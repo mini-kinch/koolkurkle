@@ -125,6 +125,38 @@ class IncrementalActionTests(unittest.TestCase):
             ),
             "skip",
         )
+        self.assertEqual(
+            el.incremental_action(
+                meta_present=True,
+                quote_stripped=0,
+                stored_hash=None,
+                new_hash="aa",
+                reembed_legacy=False,
+            ),
+            "skip",
+        )
+
+    def test_legacy_rem_row_is_due_when_reembed_legacy(self):
+        self.assertEqual(
+            el.incremental_action(
+                meta_present=True,
+                quote_stripped=0,
+                stored_hash=None,
+                new_hash="aa",
+                reembed_legacy=True,
+            ),
+            "legacy",
+        )
+        self.assertEqual(
+            el.incremental_action(
+                meta_present=True,
+                quote_stripped=1,
+                stored_hash="",
+                new_hash="aa",
+                reembed_legacy=True,
+            ),
+            "legacy",
+        )
 
     def test_quote_stripped_matching_hash_skipped(self):
         self.assertEqual(
@@ -146,6 +178,18 @@ class IncrementalActionTests(unittest.TestCase):
                 new_hash="new",
             ),
             "stale",
+        )
+
+    def test_quote_stripped_matching_still_skipped_with_reembed_legacy(self):
+        self.assertEqual(
+            el.incremental_action(
+                meta_present=True,
+                quote_stripped=1,
+                stored_hash="aa",
+                new_hash="aa",
+                reembed_legacy=True,
+            ),
+            "skip",
         )
 
 
@@ -170,6 +214,70 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(counts["skipped_legacy_embedded"], 1)
         self.assertEqual(counts["skipped_quote_stripped"], 1)
         self.assertEqual(counts["reembed_stale_content_hash"], 1)
+        self.assertEqual(counts["reembed_legacy"], 0)
+
+    def test_reembed_legacy_includes_rem_owned(self):
+        conn = incremental_conn()
+        insert_msg(conn, "missing")
+        insert_msg(conn, "rem-owned")
+        insert_msg(conn, "fresh")
+        insert_meta(conn, "rem-owned", quote_stripped=0, content_hash=None)
+        fresh_hash = mc.content_hash(mc.clean_body("New line.\n> quoted"))
+        insert_meta(conn, "fresh", quote_stripped=1, content_hash=fresh_hash)
+        default_rows = el.iter_incremental_candidates(conn)
+        self.assertEqual([r["id"] for r in default_rows], ["missing"])
+        default_counts = el.incremental_candidate_counts(conn)
+        self.assertEqual(default_counts["candidates"], 1)
+        self.assertEqual(default_counts["skipped_legacy_embedded"], 1)
+        self.assertEqual(default_counts["reembed_legacy"], 0)
+        rows = el.iter_incremental_candidates(conn, reembed_legacy=True)
+        ids = [r["id"] for r in rows]
+        self.assertEqual(ids, ["missing", "rem-owned"])
+        self.assertEqual(rows[0]["action"], "missing")
+        self.assertEqual(rows[1]["action"], "legacy")
+        self.assertTrue(rows[1]["reembed"])
+        counts = el.incremental_candidate_counts(conn, reembed_legacy=True)
+        self.assertEqual(counts["candidates"], 2)
+        self.assertEqual(counts["skipped_legacy_embedded"], 0)
+        self.assertEqual(counts["reembed_legacy"], 1)
+        self.assertEqual(counts["skipped_quote_stripped"], 1)
+
+    def test_min_chars_rem_legacy_default_skip_flag_include(self):
+        """SoR-shaped: rem-legacy above --min-chars is 0 candidates unless opt-in."""
+        conn = incremental_conn()
+        long_body = "Long rem body. " * 80
+        insert_msg(conn, "rem-long", body=long_body)
+        insert_meta(conn, "rem-long", quote_stripped=0, content_hash=None)
+        doc_len = len(
+            document_embed_text(
+                subject="Hello",
+                from_addr="ada@example.com",
+                from_name="Ada",
+                to_addrs="bob@example.com",
+                date_iso="2026-09-05T20:00:00Z",
+                lane="inbox",
+                cleaned_body=mc.clean_body(long_body),
+                cap=el.CHAR_CAP,
+            )
+        )
+        min_chars = doc_len - 1
+        self.assertGreater(doc_len, min_chars)
+        default_counts = el.incremental_candidate_counts(conn, min_chars=min_chars)
+        self.assertEqual(default_counts["candidates"], 0)
+        self.assertEqual(default_counts["skipped_legacy_embedded"], 1)
+        self.assertEqual(default_counts["reembed_legacy"], 0)
+        self.assertEqual(el.iter_incremental_candidates(conn, min_chars=min_chars), [])
+        flagged = el.iter_incremental_candidates(
+            conn, min_chars=min_chars, reembed_legacy=True
+        )
+        self.assertEqual([r["id"] for r in flagged], ["rem-long"])
+        self.assertEqual(flagged[0]["action"], "legacy")
+        flagged_counts = el.incremental_candidate_counts(
+            conn, min_chars=min_chars, reembed_legacy=True
+        )
+        self.assertEqual(flagged_counts["candidates"], 1)
+        self.assertEqual(flagged_counts["skipped_legacy_embedded"], 0)
+        self.assertEqual(flagged_counts["reembed_legacy"], 1)
 
     def test_skips_auth(self):
         conn = incremental_conn()
@@ -249,6 +357,96 @@ class BackfillIncrementalTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(bytes(rem_vec["embedding"]), b"\x00")
         self.assertTrue(any("quote_strip=1" in line for line in logs))
+
+    def test_dry_run_default_skips_legacy_flag_includes(self):
+        conn = incremental_conn()
+        insert_msg(conn, "rem-1")
+        insert_meta(conn, "rem-1", quote_stripped=0, content_hash=None)
+        conn.execute(
+            "INSERT INTO message_embeddings(message_id, embedding) VALUES ('rem-1', X'00')"
+        )
+        conn.commit()
+        default_logs: list[str] = []
+        default = el.backfill(
+            conn,
+            quote_strip=True,
+            dry_run=True,
+            embed_fn=fake_embed,
+            log=default_logs.append,
+        )
+        self.assertEqual(default["candidates"], 0)
+        self.assertEqual(default["skipped_legacy_embedded"], 1)
+        self.assertEqual(default["reembed_legacy"], 0)
+        self.assertEqual(default["would_embed"], 0)
+        self.assertEqual(default["embedded"], 0)
+        self.assertTrue(
+            any("live rem rows without content_hash are skipped" in line for line in default_logs)
+        )
+        flagged_logs: list[str] = []
+        flagged = el.backfill(
+            conn,
+            quote_strip=True,
+            reembed_legacy=True,
+            dry_run=True,
+            embed_fn=fake_embed,
+            log=flagged_logs.append,
+        )
+        self.assertEqual(flagged["candidates"], 1)
+        self.assertEqual(flagged["skipped_legacy_embedded"], 0)
+        self.assertEqual(flagged["reembed_legacy"], 1)
+        self.assertEqual(flagged["would_embed"], 1)
+        self.assertEqual(flagged["embedded"], 0)
+        self.assertTrue(any("reembed_legacy=1" in line for line in flagged_logs))
+        self.assertTrue(
+            any("opt-in re-embed of rem-legacy rows" in line for line in flagged_logs)
+        )
+        rem_meta = conn.execute(
+            "SELECT quote_stripped, content_hash FROM embedding_meta WHERE message_id='rem-1'"
+        ).fetchone()
+        self.assertEqual(int(rem_meta["quote_stripped"] or 0), 0)
+        self.assertIsNone(rem_meta["content_hash"])
+        rem_vec = conn.execute(
+            "SELECT embedding FROM message_embeddings WHERE message_id='rem-1'"
+        ).fetchone()
+        self.assertEqual(bytes(rem_vec["embedding"]), b"\x00")
+
+    def test_reembed_legacy_writes_rem_row(self):
+        conn = incremental_conn()
+        insert_msg(conn, "rem-1")
+        insert_meta(conn, "rem-1", quote_stripped=0, content_hash=None)
+        conn.execute(
+            "INSERT INTO message_embeddings(message_id, embedding) VALUES ('rem-1', X'00')"
+        )
+        conn.commit()
+        counts = el.backfill(
+            conn,
+            quote_strip=True,
+            reembed_legacy=True,
+            embed_fn=fake_embed,
+            log=lambda _m: None,
+        )
+        self.assertEqual(counts["embedded"], 1)
+        self.assertEqual(counts["reembed_legacy"], 1)
+        self.assertEqual(counts["skipped_legacy_embedded"], 0)
+        meta = conn.execute(
+            "SELECT quote_stripped, content_hash FROM embedding_meta WHERE message_id='rem-1'"
+        ).fetchone()
+        self.assertEqual(meta["quote_stripped"], 1)
+        self.assertEqual(meta["content_hash"], mc.content_hash("New line."))
+        row = conn.execute("SELECT cleaned_body FROM messages WHERE id='rem-1'").fetchone()
+        self.assertEqual(row["cleaned_body"], "New line.")
+
+    def test_reembed_legacy_without_quote_strip_refuses(self):
+        conn = incremental_conn()
+        with self.assertRaises(el.EmbedError) as ctx:
+            el.backfill(
+                conn,
+                quote_strip=False,
+                reembed_legacy=True,
+                dry_run=True,
+                embed_fn=fake_embed,
+            )
+        self.assertIn("--reembed-legacy requires --quote-strip", str(ctx.exception))
 
     def test_second_pass_skips_matching_quote_stripped(self):
         conn = incremental_conn()
@@ -417,6 +615,7 @@ class CliTests(unittest.TestCase):
     def test_quote_strip_default_off(self):
         args = eb.build_parser().parse_args([])
         self.assertFalse(args.quote_strip)
+        self.assertFalse(args.reembed_legacy)
         self.assertFalse(args.lock)
         self.assertIsNone(args.num_ctx)
 
@@ -425,9 +624,22 @@ class CliTests(unittest.TestCase):
             ["--quote-strip", "--max-chars", "3000", "--lock", "--num-ctx", "2048"]
         )
         self.assertTrue(args.quote_strip)
+        self.assertFalse(args.reembed_legacy)
         self.assertEqual(args.max_chars, 3000)
         self.assertTrue(args.lock)
         self.assertEqual(args.num_ctx, 2048)
+
+    def test_reembed_legacy_cli_default_off_and_combo(self):
+        parser = eb.build_parser()
+        self.assertFalse(parser.parse_args([]).reembed_legacy)
+        combo = parser.parse_args(["--quote-strip", "--reembed-legacy", "--min-chars", "3000"])
+        self.assertTrue(combo.quote_strip)
+        self.assertTrue(combo.reembed_legacy)
+        self.assertEqual(combo.min_chars, 3000)
+
+    def test_reembed_legacy_cli_requires_quote_strip(self):
+        rc = eb.main(["--reembed-legacy", "--dry-run", "--db", "/no/such/mailroom.sqlite"])
+        self.assertEqual(rc, 2)
 
 
 class HygieneTests(unittest.TestCase):

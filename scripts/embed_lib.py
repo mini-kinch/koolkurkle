@@ -672,11 +672,14 @@ def incremental_action(
     quote_stripped: int | None,
     stored_hash: str | None,
     new_hash: str,
+    reembed_legacy: bool = False,
 ) -> str:
-    """``missing`` / ``stale`` / ``skip`` for one id.
+    """``missing`` / ``stale`` / ``legacy`` / ``skip`` for one id.
 
-    Live rem rows (meta present, ``content_hash`` NULL) are **skip** so this
-    path never restarts the 54k/63k backfill.
+    Live rem rows (meta present, ``content_hash`` NULL) are **skip** so a
+    normal daily/resume never restarts the 54k/63k backfill. Pass
+    ``reembed_legacy=True`` (``--reembed-legacy`` with ``--quote-strip``)
+    to treat those rows as ``legacy`` candidates.
     """
     if not meta_present:
         return "missing"
@@ -692,6 +695,8 @@ def incremental_action(
         return "stale"
     if stored and stored == new_hash and qs != 1:
         return "stale"
+    if reembed_legacy and not stored:
+        return "legacy"
     return "skip"
 
 
@@ -1051,12 +1056,15 @@ def iter_incremental_candidates(
     id_rem: int | None = None,
     max_chars: int | None = None,
     min_chars: int | None = None,
+    reembed_legacy: bool = False,
 ) -> list[dict]:
     """§6.1 candidates: missing from embedding_meta or stale content_hash.
 
     Skips ``quote_stripped=1`` with matching ``content_hash``. Skips live rem
-    rows that have meta but no ``embedding_meta.content_hash`` (no 63k restart).
-    Char bounds apply to the header-prefixed document (CHAR_CAP first).
+    rows that have meta but no ``embedding_meta.content_hash`` unless
+    ``reembed_legacy`` is set (opt-in; default skip so daily/resume does
+    not restart ~63k rem-legacy rows). Char bounds apply to the
+    header-prefixed document (CHAR_CAP first).
     """
     require_incremental_schema(conn)
     id_mod, id_rem = validate_shard(id_mod, id_rem)
@@ -1079,12 +1087,13 @@ def iter_incremental_candidates(
             quote_stripped=prepared.get("quote_stripped"),
             stored_hash=prepared.get("existing_content_hash"),
             new_hash=prepared["content_hash"],
+            reembed_legacy=reembed_legacy,
         )
         if action == "skip":
             continue
         if char_bound_skip(len(prepared["text"]), max_chars, min_chars):
             continue
-        prepared["reembed"] = action == "stale"
+        prepared["reembed"] = action in ("stale", "legacy")
         prepared["action"] = action
         out.append(prepared)
         if limit is not None and len(out) >= limit:
@@ -1102,8 +1111,14 @@ def incremental_candidate_counts(
     id_rem: int | None = None,
     max_chars: int | None = None,
     min_chars: int | None = None,
+    reembed_legacy: bool = False,
 ) -> dict[str, int]:
-    """Dry-run stats for the §6.1 path. Does not walk the 54k rem-owned rows as due."""
+    """Dry-run stats for the §6.1 path.
+
+    Default does not walk rem-owned rows (meta present, content_hash
+    NULL) as due. ``reembed_legacy=True`` counts those rows as
+    ``reembed_legacy`` candidates instead of ``skipped_legacy_embedded``.
+    """
     require_incremental_schema(conn)
     id_mod, id_rem = validate_shard(id_mod, id_rem)
     max_chars, min_chars = validate_char_bounds(max_chars, min_chars)
@@ -1137,6 +1152,7 @@ def incremental_candidate_counts(
     skipped_too_long = 0
     skipped_too_short = 0
     stale = 0
+    legacy = 0
     due = 0
     for row in _eligible_incremental_rows(
         conn,
@@ -1152,6 +1168,7 @@ def incremental_candidate_counts(
             quote_stripped=prepared.get("quote_stripped"),
             stored_hash=prepared.get("existing_content_hash"),
             new_hash=prepared["content_hash"],
+            reembed_legacy=reembed_legacy,
         )
         if action == "skip":
             qs = 0
@@ -1173,6 +1190,8 @@ def incremental_candidate_counts(
             continue
         if action == "stale":
             stale += 1
+        elif action == "legacy":
+            legacy += 1
         else:
             due += 1
     out = {
@@ -1186,7 +1205,8 @@ def incremental_candidate_counts(
         "skipped_too_short": int(skipped_too_short),
         "reembed_hash_changed": int(stale),
         "reembed_stale_content_hash": int(stale),
-        "candidates": int(due) + int(stale),
+        "reembed_legacy": int(legacy),
+        "candidates": int(due) + int(stale) + int(legacy),
     }
     if id_mod is not None:
         out["id_mod"] = int(id_mod)
@@ -1335,6 +1355,7 @@ def backfill(
     max_chars: int | None = None,
     min_chars: int | None = None,
     quote_strip: bool = False,
+    reembed_legacy: bool = False,
     num_ctx: int | None = None,
     lock: bool = False,
     lock_path: Path | None = None,
@@ -1349,11 +1370,14 @@ def backfill(
 
     Default path (``quote_strip=False``) is the live rem text
     (``subject + body``). ``quote_strip=True`` is MAILROOM §6.1 incremental:
-    header-prefixed cleaned body, no vec0 create/drop, no 63k rem restart.
+    header-prefixed cleaned body, no vec0 create/drop, no 63k rem restart
+    unless ``reembed_legacy=True`` (``--reembed-legacy``; default off).
     Writer lock is per batch/heartbeat when ``lock`` is set — not the whole rem.
     """
     id_mod, id_rem = validate_shard(id_mod, id_rem)
     max_chars, min_chars = validate_char_bounds(max_chars, min_chars)
+    if reembed_legacy and not quote_strip:
+        raise EmbedError("--reembed-legacy requires --quote-strip")
     if quote_strip:
         require_incremental_schema(conn)
         if dims != DEFAULT_DIMS:
@@ -1370,6 +1394,7 @@ def backfill(
             id_rem=id_rem,
             max_chars=max_chars,
             min_chars=min_chars,
+            reembed_legacy=reembed_legacy,
         )
     else:
         apply_schema(conn, dims=dims)
@@ -1385,7 +1410,11 @@ def backfill(
         )
     stored = model_id(model)
     emit = log or (lambda msg: print(msg, file=sys.stderr))
-    path_note = " quote_strip=1 instruct=%s" % INSTRUCT_VERSION if quote_strip else ""
+    path_note = ""
+    if quote_strip:
+        path_note = " quote_strip=1 instruct=%s" % INSTRUCT_VERSION
+        if reembed_legacy:
+            path_note += " reembed_legacy=1"
     emit(
         "backfill {c} candidate(s); skipped_auth={a} skipped_empty_body={e} "
         "skipped_already_embedded={s} skipped_too_long={tl} "
@@ -1406,13 +1435,20 @@ def backfill(
         )
     )
     if quote_strip:
+        legacy_note = (
+            "opt-in re-embed of rem-legacy rows"
+            if reembed_legacy
+            else "live rem rows without content_hash are skipped"
+        )
         emit(
             "incremental §6.1: skipped_legacy_embedded=%s skipped_quote_stripped=%s "
-            "stale_content_hash=%s (live rem rows without content_hash are skipped)"
+            "stale_content_hash=%s reembed_legacy=%s (%s)"
             % (
                 counts.get("skipped_legacy_embedded", 0),
                 counts.get("skipped_quote_stripped", 0),
                 counts.get("reembed_stale_content_hash", 0),
+                counts.get("reembed_legacy", 0),
+                legacy_note,
             )
         )
     if id_mod is not None:
@@ -1438,6 +1474,7 @@ def backfill(
             id_rem=id_rem,
             max_chars=max_chars,
             min_chars=min_chars,
+            reembed_legacy=reembed_legacy,
         )
     else:
         rows = iter_candidates(
