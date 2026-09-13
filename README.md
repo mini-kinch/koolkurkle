@@ -72,36 +72,47 @@ Explicit `--lane` stays strict. Recency `exp(-0.002 * age_days)` is skipped
 when `after`/`before` is set. Vec KNN selects `message_id, distance` only
 (live vec0 has no `v.rowid`).
 
-Mac smoke (Mini venv — Apple `/usr/bin/python3` cannot load sqlite-vec):
+Mac smoke (Mini venv — Apple `/usr/bin/python3` cannot load sqlite-vec).
+Until PR-5, Mini retrieve/ask recipes set
+`MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
+`mailroom-daily-copy.sqlite`). Do not default Mini to
+`mailroom.sqlite` (empty SoR stub). Recipes that use
+`mailroom.sqlite` are **MBP-SoR-only**.
 
 ```zsh
-# Mini — hybrid retrieve
-~/MailArchive/.venv/bin/python scripts/semantic_search.py 'SDGE bill'
+# Mini — hybrid retrieve (copy DB until PR-5; Mini SoR is an empty stub)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py 'SDGE bill'
 ```
 
 ```zsh
-# Mini — hybrid retrieve JSON
-~/MailArchive/.venv/bin/python scripts/semantic_search.py --json --k 20 'Caddell'
+# Mini — hybrid retrieve JSON (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py --json --k 20 'Caddell'
 ```
 
 ```zsh
-# Mini — hybrid retrieve lane + after
-~/MailArchive/.venv/bin/python scripts/semantic_search.py --lane money --after 2024-01-01 'invoice'
+# Mini — hybrid retrieve lane + after (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py --lane money --after 2024-01-01 'invoice'
 ```
 
 ```zsh
-# Mini — hybrid retrieve cosine
-~/MailArchive/.venv/bin/python scripts/semantic_search.py --cosine 'SDGE bill'
+# Mini — hybrid retrieve cosine (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py --cosine 'SDGE bill'
 ```
 
 ```zsh
-# Mini — hybrid retrieve without rerank
-~/MailArchive/.venv/bin/python scripts/semantic_search.py --no-rerank 'SDGE bill'
+# Mini — hybrid retrieve without rerank (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py --no-rerank 'SDGE bill'
 ```
 
 ```zsh
-# Mini — hybrid retrieve (horse)
-~/MailArchive/.venv/bin/python scripts/semantic_search.py 'horse'
+# Mini — hybrid retrieve (horse; copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py 'horse'
 ```
 
 ```zsh
@@ -110,8 +121,9 @@ Mac smoke (Mini venv — Apple `/usr/bin/python3` cannot load sqlite-vec):
 ```
 
 ```zsh
-# Mini — ask_mail (generate_mode/rerank_mode always labeled)
-~/MailArchive/.venv/bin/python scripts/ask_mail.py --json 'SDGE bill'
+# Mini — ask_mail (copy DB until PR-5; generate_mode/rerank_mode always labeled)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python scripts/ask_mail.py --json 'SDGE bill'
 ```
 
 ```zsh

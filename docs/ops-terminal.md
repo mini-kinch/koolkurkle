@@ -166,10 +166,14 @@ AR without interface-proof PASS **or** an explicit **fail-open-only**
 label.
 
 1. **Interface proof** — `curl` or `ask_mail.py --probe` against the
-   official path (LM Studio `/v1/chat/completions`, locked model id).
-   Live generate PASS is an official paste (human Terminal paste or
-   explicit accept of CoS JSON). Merge may be labeled
-   **fail-open-only** when live is not re-run.
+   official path (`mlx_lm.server` `/v1/chat/completions` on
+   `127.0.0.1:1234`, locked model id). Path string `llmster-headless`
+   is not the process. Do not open LM Studio.app; do not
+   `lms server start`. Ollama is embed-only. Legacy JSON enum
+   `generate_mode=lm_studio` still means OpenAI-compatible `:1234`
+   success (do not rename). Live generate PASS is an official paste
+   (human Terminal paste or explicit accept of CoS JSON). Merge may
+   be labeled **fail-open-only** when live is not re-run.
 2. **Negative smoke** — garbage / stopped / wrong model / port closed /
    unreachable must fail or labeled-fail-open.
 3. **Official path named** — community GGUF
@@ -181,7 +185,7 @@ label.
 5. **CoS withholds merge AR** without PASS or that label.
 
 ```zsh
-# MBP — LM Studio interface proof (locked model id)
+# MBP — mlx_lm.server interface proof (locked model id)
 $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --probe
 ```
 
@@ -212,9 +216,10 @@ ollama pull qwen3-embedding:8b
 
 Retrieve+rerank may keep Ollama embed `qwen3-embedding:8b` resident
 with the in-process CrossEncoder. Then **unload** both before generate
-(LM Studio / `$MAILROOM_GENERATE_MODEL`). Do not co-pin embed +
-CrossEncoder + LM Studio 35B-class chat. Recipes:
-[ask_mail.md](ask_mail.md).
+(`mlx_lm.server` / `$MAILROOM_GENERATE_MODEL`). Do not co-pin embed +
+CrossEncoder + `mlx_lm.server` 35B-class chat. Do not open
+LM Studio.app; do not `lms server start`. Ollama is embed-only.
+Recipes: [ask_mail.md](ask_mail.md).
 
 ```zsh
 # MBP — ask_mail phase 1 retrieve + rerank (embed resident)
@@ -222,12 +227,12 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase
 ```
 
 ```zsh
-# MBP — unload embed before LM Studio generate
+# MBP — unload embed before mlx_lm.server generate
 ollama stop qwen3-embedding:8b
 ```
 
 ```zsh
-# Mini — unload embed before LM Studio generate
+# Mini — unload embed before mlx_lm.server generate
 ollama stop qwen3-embedding:8b
 ```
 

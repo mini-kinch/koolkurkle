@@ -84,7 +84,8 @@ is hard-fail (`db_mode=refused`), not fail-open.
    a malformed working copy. Practice:
    **[docs/embed-backfill.md](../docs/embed-backfill.md)**.
 5. **ask_mail** is on-demand (CLI / HTTP / MCP) — not part of the nightly
-   chain. This job must **not** start LM Studio or load 35B-class generate.
+   chain. This job must **not** start `mlx_lm.server` or load 35B-class
+   generate. Do not open LM Studio.app; do not `lms server start`.
    Generate stays a separate on-demand path. Rerank is CrossEncoder
    (fail-open if the optional extra is missing).
 
@@ -99,8 +100,9 @@ Watermarks (atomic temp+replace) under `~/MailArchive/logs/`:
 Catch-up: `last_daily_rag_ok` missing or ≥ ~24h (15-minute slop so 20:05
 calendar is not skipped) → run, **resume first failed phase**, do not redo
 successful watermarks from this cycle. Younger daily stamp → exit 0
-(RunAtLoad catch-up). Exclusive flock on `mailroom.daily.lock` so
-`StartCalendarInterval` + `RunAtLoad` cannot double-run.
+(RunAtLoad catch-up, after CoS GO). Exclusive flock on `mailroom.daily.lock`
+so `StartCalendarInterval` + `RunAtLoad` cannot double-run. Until CoS GO,
+keep `RunAtLoad` false on the installed Mini plist (match live HOLD).
 
 Embed health-check: `GET http://127.0.0.1:11434/api/tags` (`OLLAMA_HOST`)
 before the embed step. Local Ollama only — not a generate runtime.
@@ -283,7 +285,10 @@ Plist:
 - `StartCalendarInterval` 20:05 local (precursor Minute 0; 8pm bills
   digest stays a separate agent)
 - `Nice` 5
-- `RunAtLoad` true — catch-up via the stamp + flock
+- `RunAtLoad` false until CoS GO (match live HOLD). If you install from
+  the checked-in template, keep `RunAtLoad` false on the installed Mini
+  plist. Catch-up via the stamp + flock stays in the driver for when
+  CoS enables `RunAtLoad`.
 - `KeepAlive` false
 - `PATH` Homebrew + system, `PYTHONUNBUFFERED=1`
 - stdout / stderr under `__HOME__/MailArchive/logs/daily_rag.std{out,err}.log`
@@ -320,19 +325,25 @@ Prefer LaunchAgent. If you must use cron on the Mini:
 
 ## ask_mail (PR-8)
 
-On-demand retrieve + optional LM Studio generate. Not in the nightly
+On-demand retrieve + optional `mlx_lm.server` generate. Not in the nightly
 chain. Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
 
 ```zsh
-# Mini — ask_mail (hits-only unless MAILROOM_GENERATE_MODEL is set)
-~/MailArchive/.venv/bin/python ~/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
+# Mini — ask_mail (copy DB until PR-5; Mini SoR is an empty stub)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```
 
 ```zsh
-# Mini — ask_mail FTS-only
-~/MailArchive/.venv/bin/python ~/MailArchive/scripts/ask_mail.py --fts-only --k 5 --json 'invoice'
+# Mini — ask_mail FTS-only (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --fts-only --k 5 --json 'invoice'
 ```
 
-Generate runtime on Mini is **LM Studio** (`/v1/chat/completions`), not
-unnamed Ollama 9B/27B. If LM Studio is down: labeled `fail_open` /
-`hits_only`. Rerank default is CrossEncoder; missing extra fail-opens.
+Generate process on Mini is **`mlx_lm.server`** on `127.0.0.1:1234`
+(`/v1/chat/completions`), not unnamed Ollama 9B/27B. Path string
+`llmster-headless` is not the process. Do not open LM Studio.app; do
+not `lms server start`. Ollama is embed-only. If `mlx_lm.server` is
+down: labeled `fail_open` / `hits_only`. Legacy JSON enum
+`generate_mode=lm_studio` still means OpenAI-compatible `:1234` success
+(do not rename). Rerank default is CrossEncoder; missing extra fail-opens.

@@ -61,14 +61,18 @@ It is not a Qwen3 scorer.
 
 Keep the **embed** runtime resident during retrieve+rerank. Unload the
 in-process CrossEncoder (`rerank_lib.unload_cross_encoder`) and/or use
-a short Ollama `keep_alive` **before** LM Studio 35B-class generate.
+a short Ollama `keep_alive` **before** `mlx_lm.server` 35B-class generate.
 Do **not** co-pin embed + 35B + rerank. Sequential smoke:
 [ask_mail.md](ask_mail.md). Gates:
 [model-runtime-gates.md](model-runtime-gates.md).
 
-Mini generate/fallback runtime for **answers** is **LM Studio**
-(`/v1/chat/completions`), not unnamed Ollama 9B/27B chat. Mini Ollama
-stays the **embed** runtime (`qwen3-embedding:8b`) only.
+Mini generate/fallback process for **answers** is **`mlx_lm.server`**
+on `127.0.0.1:1234` (`/v1/chat/completions`), not unnamed Ollama 9B/27B
+chat. Path string `llmster-headless` is not the process. Do not open
+LM Studio.app; do not `lms server start`. Mini Ollama stays the
+**embed** runtime (`qwen3-embedding:8b`) only. Legacy JSON enum
+`generate_mode=lm_studio` still means OpenAI-compatible `:1234` success
+(do not rename).
 
 ## Early-error traps
 
@@ -85,9 +89,12 @@ is still not a rerank Ready.
 
 ## SoR + retrieve smoke
 
-SoR path is `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
-(`Path.home()` / expanduser — no machine home hardcodes). Apple
-`/usr/bin/python3` cannot load sqlite-vec; use the MailArchive venv.
+Until PR-5, Mini SoR is an empty stub. Mini retrieve recipes set
+`MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
+`mailroom-daily-copy.sqlite`). Do not default Mini to
+`mailroom.sqlite`. Recipes that use `mailroom.sqlite` are
+**MBP-SoR-only**. Apple `/usr/bin/python3` cannot load sqlite-vec;
+use the MailArchive venv.
 
 ```zsh
 # MBP — optional CrossEncoder extra (not a slim-install requirement)
@@ -110,49 +117,49 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/rerank_smoke.py
 ```
 
 ```zsh
-# MBP — hybrid retrieve (CrossEncoder when extra is installed; else fail-open)
+# MBP-SoR-only — hybrid retrieve (CrossEncoder when extra is installed; else fail-open)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'SDGE bill'
 ```
 
 ```zsh
-# MBP — hybrid retrieve JSON (rerank_mode on stderr)
+# MBP-SoR-only — hybrid retrieve JSON (rerank_mode on stderr)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --json --k 20 'Caddell'
 ```
 
 ```zsh
-# MBP — hybrid retrieve (horse)
+# MBP-SoR-only — hybrid retrieve (horse)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'horse'
 ```
 
 ```zsh
-# MBP — force rerank_mode=none
+# MBP-SoR-only — force rerank_mode=none
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --no-rerank 'SDGE bill'
 ```
 
 ```zsh
-# Mini — hybrid retrieve. Copy DB is OK; not a second writer.
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Mini — hybrid retrieve (copy DB until PR-5; Mini SoR is an empty stub)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'SDGE bill'
 ```
 
 ```zsh
-# Mini — hybrid retrieve JSON
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Mini — hybrid retrieve JSON (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --json --k 20 'Caddell'
 ```
 
 ```zsh
-# Mini — hybrid retrieve (horse)
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Mini — hybrid retrieve (horse; copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'horse'
 ```
 
 ```zsh
-# Mini — force rerank_mode=none
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Mini — force rerank_mode=none (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --no-rerank 'SDGE bill'
 ```
