@@ -6,8 +6,12 @@ present; otherwise RRF (fail-open; scores not claimed). Mail bodies are
 **DATA**. Drafts only — never send. `ask_audit` stores query + ids +
 model + host, never bodies.
 
-SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite` (`Path.home()`).
-No machine home hardcodes.
+SoR (MBP-SoR-only): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
+(`Path.home()`). No machine home hardcodes.
+
+Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
+`$HOME/MailArchive/mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`).
+Do not default Mini to `mailroom.sqlite`.
 
 ## Runtimes (named)
 
@@ -50,7 +54,7 @@ same time. Retrieve+rerank may keep embed resident. Unload the
 CrossEncoder and embed **before** `mlx_lm.server` generate.
 
 ```zsh
-# MBP — phase 1: retrieve + rerank (embed resident; CrossEncoder in-process)
+# MBP-SoR-only — phase 1: retrieve + rerank (embed resident; CrossEncoder in-process)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase retrieve --json 'SDGE bill'
 ```
@@ -61,15 +65,15 @@ ollama stop qwen3-embedding:8b
 ```
 
 ```zsh
-# MBP — phase 2: generate (mlx_lm.server). --fts-only avoids reloading embed 8b
+# MBP-SoR-only — phase 2: generate (mlx_lm.server). --fts-only avoids reloading embed 8b
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase generate --fts-only --json 'SDGE bill'
 ```
 
 ```zsh
-# Mini — phase 1: retrieve only (same sequential rule)
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Mini — phase 1: retrieve only (copy DB until PR-5; Mini SoR is an empty stub)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase retrieve --json 'SDGE bill'
 ```
 
@@ -160,7 +164,7 @@ Mocks in `tests/test_ask_mail.py`. Live MBP matrix is the operator gate.
 ## CLI
 
 ```zsh
-# MBP — ask (mlx_lm.server when MAILROOM_GENERATE_MODEL is set)
+# MBP-SoR-only — ask (mlx_lm.server when MAILROOM_GENERATE_MODEL is set)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
 MAILROOM_LM_STUDIO_URL=http://127.0.0.1:1234 \
@@ -170,12 +174,13 @@ MAILROOM_LM_STUDIO_URL=http://127.0.0.1:1234 \
 ```zsh
 # Mini — ask. Generate process is mlx_lm.server (same /v1/chat/completions).
 # If generate is not running: generate_mode=hits_only or fail_open (labeled).
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Copy DB until PR-5; Mini SoR is an empty stub.
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```
 
 ```zsh
-# MBP — HTTP loopback (8743; 8744 if bound). GET /ui is the thin same-origin UI.
+# MBP-SoR-only — HTTP loopback (8743; 8744 if bound). GET /ui is the thin same-origin UI.
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --serve
 ```
@@ -199,8 +204,8 @@ curl -sS 'http://127.0.0.1:8743/message?id=MESSAGE_ID'
 
 ```zsh
 # Mini — MCP stdio (ask_mail, hybrid_search, get_thread, draft_reply)
-# Separate process from --serve: both block.
-MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+# Separate process from --serve: both block. Copy DB until PR-5.
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --mcp
 ```
 
@@ -229,15 +234,22 @@ GET `/` and `/health` stay JSON (`ui=/ui`, `message=/message`,
 ```
 
 ```zsh
-# MBP — 2. UI + HTTP ask. Open http://127.0.0.1:8743/ui
+# MBP-SoR-only — 2. UI + HTTP ask. Open http://127.0.0.1:8743/ui
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --serve
 ```
 
 ```zsh
-# MBP / Mini — 3. MCP stdio (four tools; separate process from --serve)
+# MBP-SoR-only — 3. MCP stdio (four tools; separate process from --serve)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --mcp
+```
+
+```zsh
+# Mini — 3. MCP stdio (four tools; separate process from --serve)
+# Copy DB until PR-5; Mini SoR is an empty stub.
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --mcp
 ```
 
