@@ -180,8 +180,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "MAILROOM §6.1 incremental path: quote/signature-strip, thread "
             "graph, header-prefixed document, quote_stripped=1. Does not "
-            "re-embed live rem rows (meta present, content_hash NULL). "
-            "Default off so rem LaunchAgents keep the old text path."
+            "re-embed live rem rows (meta present, content_hash NULL) unless "
+            "--reembed-legacy is also set. Default off so rem LaunchAgents "
+            "keep the old text path."
+        ),
+    )
+    parser.add_argument(
+        "--reembed-legacy",
+        action="store_true",
+        default=False,
+        help=(
+            "With --quote-strip only: treat live rem rows (embedding_meta "
+            "present, content_hash NULL) as incremental candidates so they "
+            "can be rewritten onto the §6.1 document. Default off: those "
+            "rows stay skipped (skipped_legacy_embedded) so a daily/resume "
+            "does not surprise-rewrite ~63k rem-legacy rows. Requires "
+            "--quote-strip. One writer per .sqlite remains HARD DECK; "
+            "--lock is still per-batch, not a 2-wide permit."
         ),
     )
     parser.add_argument(
@@ -227,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         id_mod, id_rem = validate_shard(args.id_mod, args.id_rem)
         max_chars, min_chars = validate_char_bounds(args.max_chars, args.min_chars)
+        if args.reembed_legacy and not args.quote_strip:
+            raise EmbedError("--reembed-legacy requires --quote-strip")
         conn = connect_db(db, args.vec_extension)
         try:
             if not args.quote_strip:
@@ -246,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_chars=max_chars,
                 min_chars=min_chars,
                 quote_strip=args.quote_strip,
+                reembed_legacy=args.reembed_legacy,
                 num_ctx=args.num_ctx,
                 lock=args.lock,
                 lock_path=Path(args.lock_file).expanduser() if args.lock_file else None,

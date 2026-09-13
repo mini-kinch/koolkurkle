@@ -75,7 +75,9 @@ is hard-fail (`db_mode=refused`), not fail-open.
    thread graph, header-prefixed document (`instruct_version=v1`,
    `quote_stripped=1`, 1024-d). Resume-safe: missing from `embedding_meta`
    **or** stale `content_hash`. Does **not** restart live rem rows (meta
-   present, `content_hash` NULL). Writer lock is per batch, not the rem
+   present, `content_hash` NULL) unless the operator passes
+   `--reembed-legacy` (opt-in with `--quote-strip`; default skip; daily
+   argv does not include it). Writer lock is per batch, not the rem
    job. Live rem LaunchAgents keep the old text path until EXIT.
    **HARD DECK:** one `embed_backfill` writer per `.sqlite`. `--lock`
    does not make same-file 2-wide safe. Parallel char-bands belong on

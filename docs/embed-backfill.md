@@ -17,6 +17,37 @@ stays HARD DECK even with `--lock`.
 `--lock` still belongs on the Mini daily incremental path. Use it for
 that heartbeat / refuse behavior. Do not treat it as a 2-wide permit.
 
+## Rem-legacy rows under `--quote-strip` (opt-in)
+
+`--quote-strip` incremental §6.1 **skips** rows where `embedding_meta`
+is present and `content_hash` is NULL (live rem /
+`skipped_legacy_embedded`). On SoR that skip is on the order of ~63k
+rows. A normal daily/resume therefore stays safe: `--quote-strip
+--min-chars 3000` can exit with 0 candidates when only rem-legacy rows
+remain above the band.
+
+`--reembed-legacy` is **opt-in, default off**. Combined with
+`--quote-strip` only, it treats those rem-legacy rows as candidates so
+they can be rewritten onto the §6.1 header-prefixed document. Without
+the flag, behavior is unchanged (same `skipped_legacy_embedded`
+counter). Do **not** put `--reembed-legacy` on the Mini daily argv — a
+surprise ~63k rewrite is the failure this default avoids.
+
+`--reembed-legacy` without `--quote-strip` is refused. Still one writer
+per `.sqlite`. `--lock` remains per-batch, not a 2-wide permit.
+
+```zsh
+# SoR host — default skip (daily / resume). Rem-legacy stays skipped.
+$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
+  --db $HOME/MailArchive/mailroom.sqlite --quote-strip --min-chars 3000 --lock --dry-run
+```
+
+```zsh
+# SoR host — OPT-IN rem-legacy re-embed under --quote-strip. One writer.
+$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
+  --db $HOME/MailArchive/mailroom.sqlite --quote-strip --reembed-legacy --min-chars 3000 --lock
+```
+
 ## Shard on separate files, then merge
 
 Preferred split: **separate DBs and/or machines**, then merge.
