@@ -22,7 +22,7 @@ class VerifyToolExistsBeforeTerminalArTests(unittest.TestCase):
         raw = OPS.read_text(encoding="utf-8")
         text = " ".join(raw.split())
         self.assertIn("Verify tool exists before Terminal AR", raw)
-        self.assertIn("before a Terminal AR", text)
+        self.assertIn("Before a Terminal AR", text)
         self.assertIn('"run this tool"', raw)
         self.assertIn("confirm the binary or script exists", text)
         self.assertIn("named machine", text)
