@@ -294,6 +294,21 @@ ollama pull qwen3-embedding:8b
 ollama pull qwen3-embedding:8b
 ```
 
+## curl≠gh dial bad-file-descriptor / app filter
+
+Standing ops contract: `curl` to `api.github.com` can return **200** while Homebrew `gh` fails with `dial tcp … connect: bad file descriptor`. That is not a token reject and not basic network down — treat as app-level filter (e.g. Little Snitch) on `/opt/homebrew/bin/gh`.
+
+Diagnostic ladder:
+
+1. **curl 200 + gh dial bad-file-descriptor** — do not re-auth blindly.
+2. Check app filter / Allow for `gh` (Little Snitch outbound for
+   `/opt/homebrew/bin/gh` to `api.github.com`).
+3. Unauthenticated `gh api rate_limit` isolates binary network vs token.
+
+This gate is docs/tests only. It does not run `gh auth`, open
+MailArchive or live sqlite, write embed/SoR data, read Keychain,
+SSH a live machine, or change rem-legacy.
+
 ## ask_mail sequential smoke (do not pin embed + rerank + chat)
 
 Retrieve+rerank may keep Ollama embed `qwen3-embedding:8b` resident
