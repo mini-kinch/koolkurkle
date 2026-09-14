@@ -28,6 +28,7 @@ No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agen
 Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed): section below.
 Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only): section below.
 Status/handoff reports include ETA until next Action required (honest range only; no false LOCKED ETAs; no undeliverable certainty slogans): section below.
+Warn before local-exec that may trigger macOS Allow sheets (warn the operator before any local-exec / Shell / machine action that may trigger macOS permission Allow sheets; Documents/Desktop/Downloads, screen recording, microphone, camera; do not invent click-paths): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -265,6 +266,17 @@ Standing status/handoff contract: status/handoff reports include ETA until next 
 Fail closed: if a status or handoff report cannot give an honest range until the next Action required, do not invent a LOCKED ETA. Do not claim undeliverable certainty. Give an honest range only, or say the ETA is unknown.
 
 Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Warn before local-exec that may trigger macOS Allow sheets
+
+Standing ops contract: warn the operator before any local-exec / Shell / machine action that may trigger macOS permission Allow sheets (Documents/Desktop/Downloads, screen recording, microphone, camera, and similar Allow-sheet classes).
+
+Fail closed: if a local-exec, Shell, or machine action may raise an Allow sheet, do not run it until the operator has been warned. Do not invent click-paths. Name the permission class. Do not click the Allow sheet.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
