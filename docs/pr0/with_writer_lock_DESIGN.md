@@ -69,3 +69,9 @@ whole rem. It still refuses `ACTION_REQUIRED` and a lock held >4h. It
 does **not** make two `embed_backfill` processes on one `.sqlite` safe.
 Same-file 2-wide is HARD DECK. Preferred shard / char-band practice:
 [docs/embed-backfill.md](../embed-backfill.md).
+
+For rem itself, `with_writer_lock` is **process-lifetime**, not a
+per-batch drop. Rem-window default is **freeze**
+(`sor_increment=frozen`) until EXIT. Do not switch to interleave.
+Do not drop the rem lock between batches. Daily `--lock` stays
+per-batch. Rem EXIT 0 handling is out of scope here.

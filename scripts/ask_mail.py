@@ -55,6 +55,7 @@ if str(SCRIPTS) not in sys.path:
 
 import semantic_search as ss  # noqa: E402
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli  # noqa: E402
+from retrieve_db_labels import retrieve_db_labels  # noqa: E402
 from sqlite_pragmas import apply_reader_pragmas  # noqa: E402
 import ask_mail_ui as ask_ui  # noqa: E402
 
@@ -97,8 +98,14 @@ SYSTEM_PROMPT = (
 ) % (DATA_BEGIN, DATA_END)
 
 # Negative-smoke labels (documented + tested). Never silent.
+# Process is mlx_lm.server. Legacy JSON labels stay lm_studio_* (do not
+# rename generate_mode=lm_studio). Preferred smoke codes are mlx_lm.server.
 NEG_SMOKE = {
     "lm_studio_stopped": {
+        "generate_mode": "fail_open",
+        "generate_error": "lm_studio_unreachable",
+    },
+    "mlx_lm_server_stopped": {
         "generate_mode": "fail_open",
         "generate_error": "lm_studio_unreachable",
     },
@@ -114,7 +121,13 @@ NEG_SMOKE = {
         "generate_mode": "fail_open",
         "generate_error": "lm_studio_unreachable",
     },
+    "mlx_lm_server_unreachable": {
+        "generate_mode": "fail_open",
+        "generate_error": "lm_studio_unreachable",
+    },
 }
+SMOKE_PROCESS = GENERATE_PROCESS
+MINI_RAM_LAW = "no co-reside 8B embed + 35B generate"
 
 MCP_TOOLS = (
     "ask_mail",
@@ -654,6 +667,7 @@ def _base_response(
     model: str | None = None,
     host: str | None = None,
     draft: dict[str, Any] | None = None,
+    db: Path | None = None,
 ) -> dict[str, Any]:
     citations = citations_from_hits(hits)
     if generate_mode == "lm_studio":
@@ -665,7 +679,7 @@ def _base_response(
     else:
         path = None
         fail_open = False
-    return {
+    result = {
         "query": query,
         "hits": hits,
         "citations": citations,
@@ -682,6 +696,15 @@ def _base_response(
         "generate_error": generate_error,
         "rerank_note": rerank_note_for(rerank_mode),
     }
+    return attach_retrieve_labels(result, db)
+
+
+def attach_retrieve_labels(result: dict[str, Any], db: Path | None) -> dict[str, Any]:
+    """Mini copy retrieve must label db_mode=copy and copy_age."""
+    labels = retrieve_db_labels(db)
+    result["db_mode"] = labels["db_mode"]
+    result["copy_age"] = labels["copy_age"]
+    return result
 
 
 def configured_rerank_mode() -> str:
@@ -837,6 +860,7 @@ def ask(
             rerank_mode=mode_rerank,
             model=tag,
             host=host,
+            db=path,
         )
         if audit:
             write_ask_audit(
@@ -859,6 +883,7 @@ def ask(
             generate_error="MAILROOM_GENERATE_MODEL unset",
             model=None,
             host=host,
+            db=path,
         )
         sys.stderr.write(
             "warning: generate fail-open: MAILROOM_GENERATE_MODEL unset; hits-only\n"
@@ -911,6 +936,7 @@ def ask(
             generate_error=err,
             model=tag,
             host=host,
+            db=path,
         )
     else:
         result = _base_response(
@@ -921,6 +947,7 @@ def ask(
             answer=answer,
             model=tag,
             host=host,
+            db=path,
         )
     if audit:
         write_ask_audit(

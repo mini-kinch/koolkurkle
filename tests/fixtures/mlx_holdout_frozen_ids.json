@@ -1,0 +1,14 @@
+{
+  "message_ids": [
+    "hold-01", "hold-02", "hold-03", "hold-04",
+    "hold-05", "hold-06", "hold-07", "hold-08",
+    "hold-09", "hold-10", "hold-11", "hold-12",
+    "hold-13", "hold-14", "hold-15", "hold-16",
+    "hold-17", "hold-18", "hold-19", "hold-20",
+    "hold-21", "hold-22", "hold-23", "hold-24",
+    "hold-25", "hold-26", "hold-27", "hold-28",
+    "hold-29", "hold-30", "hold-31", "hold-32"
+  ],
+  "threshold": 0.97,
+  "n": 32
+}

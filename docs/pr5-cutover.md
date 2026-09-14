@@ -29,6 +29,37 @@ After rem-legacy EXIT 0:
    plist. The checked-in template is not an enable of cutover.
 3. Do not change rem-legacy LaunchAgents.
 
+## Integrity pack + copy freshness (required before cutover)
+
+Before any later cutover, after rem-legacy EXIT 0 + human go:
+
+1. **Integrity pack** — `PRAGMA integrity_check` is `ok` on SoR and
+   on the Mini copy. `sor_health_pack` read-only PASS.
+2. **Copy freshness** — Mini copy age is labeled (`copy_age`) and is
+   from the post-EXIT SoR copy, not a stale rem-window copy.
+3. **Quote-strip generation match** — Mini retrieve/generate uses the
+   same embed generation key as SoR (`qwen3-embedding:8b`, 4096
+   native / 1024 store, same instruction prefix).
+
+Post-EXIT catch-up (IMAP+bodies-FTS under lock, Mini←SoR copy,
+integrity pack, then clear `sor_increment=frozen`) runs **before**
+this checklist. See [post-exit-catchup.md](post-exit-catchup.md).
+
+## One cutover + one rollback
+
+One cutover. One rollback. Do not invent a second cutover path.
+
+**Rollback:** point Mini `MAILROOM_DB` back at
+`mailroom-copy.sqlite` / `mailroom-daily-copy.sqlite`, leave
+`mailroom.sqlite` unpromoted, keep RunAtLoad off, keep rem-legacy
+LaunchAgents unchanged. Rollback does not restart rem.
+
+## RunAtLoad is a separate GO
+
+RunAtLoad is **not** part of the cutover enable. It needs its own
+CoS GO after cutover PASS. This change does **not** enable
+RunAtLoad.
+
 ## This change
 
 - Does not enable PR-5 cutover

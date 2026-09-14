@@ -368,6 +368,22 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --fts-only --k 5 --json 'invoice'
 ```
 
+Mini retrieve labels `db_mode=copy` and `copy_age` (never imply
+live/SoR). Thread expansion is capped as injection control. Post-rem
+batch bump / Mini MLX / sidecar are AFTER EXIT 0 + human go only;
+Docs PR Ready ≠ enable against live rem. Rem-window default is freeze
+(`sor_increment=frozen`). Catch-up before PR-5:
+[post-exit-catchup.md](../docs/post-exit-catchup.md). HARD DECK:
+[embed-backfill.md](../docs/embed-backfill.md).
+
+Mini retrieve labels `db_mode=copy` and `copy_age` (never imply
+live/SoR). Thread expansion is capped as injection control. Post-rem
+batch bump / Mini MLX / sidecar are AFTER EXIT 0 + human go only;
+Docs PR Ready ≠ enable against live rem. Rem-window default is freeze
+(`sor_increment=frozen`). Catch-up before PR-5:
+[post-exit-catchup.md](../docs/post-exit-catchup.md). HARD DECK:
+[embed-backfill.md](../docs/embed-backfill.md).
+
 Generate process on Mini is **`mlx_lm.server`** on `127.0.0.1:1234`
 (`/v1/chat/completions`), not unnamed Ollama 9B/27B. Path string
 `llmster-headless` is not the process. Do not open LM Studio.app; do

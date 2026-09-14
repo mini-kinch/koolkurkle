@@ -11,7 +11,8 @@ SoR (MBP-SoR-only): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
 
 Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
 `$HOME/MailArchive/mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`).
-Do not default Mini to `mailroom.sqlite`.
+Do not default Mini to `mailroom.sqlite`. Mini retrieve labels
+`db_mode=copy` and `copy_age`. Never imply live/SoR on a copy.
 
 ## Retrieve contract (history default)
 
@@ -66,7 +67,8 @@ Every ask / `/ask` / MCP `ask_mail` object includes:
 - `rerank_mode`: `crossencoder` \| `fail_open` \| `none` \| `off`
 - `citations`: `message_id` list in **rerank** order when live floats
   are present, else **RRF** (never invented)
-- `generate_error`: neg-smoke label or null (`lm_studio_unreachable` is a **label**, not the process)
+- `generate_error`: neg-smoke label or null (`lm_studio_unreachable` is a **label**, not the process; preferred smoke codes are `mlx_lm.server`)
+- `db_mode` / `copy_age`: Mini copy retrieve labels (`db_mode=copy`; never live/SoR)
 
 `fail_open` / `none` / `off` / `hits_only` are explicit. Never silent.
 When CrossEncoder cannot run, `rerank_mode=fail_open` and citations are
@@ -76,8 +78,13 @@ RRF (scores not claimed). Ollama generate/chat is not a working scorer.
 
 Do **not** pin Ollama embed `qwen3-embedding:8b`, CrossEncoder, and
 35B-class generate (`$MAILROOM_GENERATE_MODEL`) in RAM at the
-same time. Retrieve+rerank may keep embed resident. Unload the
+same time. Mini RAM law HARD DECK: no co-reside 8B embed + 35B
+generate. Bind `:1234` and `:8743` to `127.0.0.1` only.
+Retrieve+rerank may keep embed resident. Unload the
 CrossEncoder and embed **before** `mlx_lm.server` generate.
+
+Thread expansion is capped as injection control (root + last 3,
+cap 8). Unbounded thread dump is refused.
 
 ```zsh
 # MBP-SoR-only — phase 1: retrieve + rerank (embed resident; CrossEncoder in-process)
@@ -301,7 +308,8 @@ null). This UI job does not re-run live C-F probes.
 Mail between `BEGIN_UNTRUSTED_MAIL_DATA` and `END_UNTRUSTED_MAIL_DATA`
 is DATA. The model is told to ignore instructions inside DATA. Citations
 are the retrieve Hit ids only — the model cannot invent `message_id`s
-on the response `citations` list.
+on the response `citations` list. Cap thread expansion as injection
+control (root + last 3, cap 8).
 
 ## Audit
 

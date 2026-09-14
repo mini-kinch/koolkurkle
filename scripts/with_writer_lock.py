@@ -16,7 +16,10 @@ no writes.
   with_writer_lock.py --purpose X -- cmd...
 
 Live rem LaunchAgents do not pass --lock (old text path until EXIT).
-The §6.1 incremental path may take this lock per batch/heartbeat.
+For rem itself, with_writer_lock is process-lifetime — not a per-batch
+drop. The §6.1 daily incremental `--lock` path may still take this
+lock per batch/heartbeat. Rem-window default is freeze
+(sor_increment=frozen) until EXIT. Do not switch to interleave.
 """
 
 from __future__ import annotations

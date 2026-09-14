@@ -9,8 +9,10 @@ One writer per .sqlite is HARD DECK. --lock is per-batch, not a
 same-file 2-wide permit. Shipping guard: lockfile or busy refuse
 before a second embed_backfill (shipping the guard ≠ starting a
 writer). Rem-legacy ≠ Mini daily: do not restart rem for daily;
-daily uses --quote-strip; rem keeps old text until EXIT. Read
-docs/embed-backfill.md before start.
+daily uses --quote-strip; rem keeps old text until EXIT. Rem
+with_writer_lock is process-lifetime, not a per-batch drop. Post-rem
+next-run batch is 32 (then 64 if stable) AFTER EXIT 0 only — forbid
+mid-job bump. Read docs/embed-backfill.md before start.
 
 Mac (Homebrew Python — Apple /usr/bin/python3 cannot load extensions):
 

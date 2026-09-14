@@ -43,6 +43,15 @@ mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing o
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub): section below.
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad): section below.
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer): section below.
+Post-rem embed batch bump (AFTER EXIT 0 only; first bump 32, then 64 if stable; not 256 first; forbid mid-job bump): section below.
+Mini MLX embedder path (holdout required before cutover; Mini RAM law): section below.
+Compute sidecar one-writer apply (never live rem SoR): section below.
+Embed generation key (4096 native / 1024 store): section below.
+Mini retrieve db_mode=copy + copy_age: section below.
+Fetch/auth error ≠ tombstone + UIDVALIDITY: section below.
+Rem-window freeze + lock lifetime + generate topology: section below.
+Post-EXIT catch-up BEFORE PR-5: section below.
+Ready handoff (PASS or fail-open-only; Docs PR Ready ≠ enable against live rem): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -776,3 +785,156 @@ ls "$HOME/Desktop/Heavy-Bot/to-bot"
 # MBP — sync Heavy packets into /workspace before box read
 rsync -a "$HOME/Desktop/Heavy-Bot/to-bot/" /workspace/
 ```
+
+## Post-rem embed batch bump (AFTER EXIT 0 only)
+
+Standing post-rem contract: rem-legacy stays batch 8 until EXIT 0.
+Next-run default is **32**, then **64** if stable. **256 is not the
+first bump.** Same writer. Same `qwen3-embedding:8b` / 1024-d /
+instruction prefix. Commit per batch. **Forbid mid-job bump.** Docs
+PR Ready ≠ permission to enable this against live rem. Checklist:
+[post-rem-embed-batch.md](post-rem-embed-batch.md).
+
+Fail closed: if rem-legacy has not EXIT 0, do not bump `--batch-size`.
+Do not mid-job hot-swap. Do not start rem-legacy from this gate.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Mini MLX embedder path (design)
+
+Standing Mini MLX contract: same family+dim+prefix or a new
+`model_version` / SoR generation. Holdout of N frozen `message_ids` +
+cosine-agreement threshold is required before cutover. Fail-closed if
+miss. Mini RAM law HARD DECK: no co-reside 8B embed + 35B generate.
+No mid-index switch. Rem untouched. Design:
+[mini-mlx-embedder.md](mini-mlx-embedder.md).
+
+Fail closed: if holdout misses, do not cut over. Do not co-reside 8B
+embed + 35B generate. Do not switch mid-index.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Compute sidecar one-writer apply
+
+Standing sidecar contract: one applier takes `with_writer_lock` and
+writes `embedding_meta`+vec only. Missing-only INSERT. Hash mismatch
+skips unless `--reembed` human go. Refuse second apply on the same
+shard. Never pointed at live rem SoR. Design:
+[compute-sidecar.md](compute-sidecar.md).
+
+Fail closed: if the target basename is `mailroom.sqlite`, refuse. If
+the lock is held, refuse. Corrupt / dim mismatch / second applier →
+non-zero.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Embed generation key (4096 native / 1024 store)
+
+Standing generation-key contract: `model_tag` + `embed_runtime` +
+`native_dim` + `store_dim` + `instruction_prefix`. v1 native is
+**4096**; store is **1024**. Refuse writes that mismatch
+`embedding_meta`. [embed-generation-key.md](embed-generation-key.md).
+
+Fail closed: if the incoming key mismatches `embedding_meta`, refuse
+the write. Do not mid-index swap.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Mini retrieve db_mode=copy + copy_age
+
+Standing Mini retrieve contract: `ask_mail` / `semantic_search` label
+`db_mode=copy` and `copy_age`. Never imply live/SoR on a copy.
+
+Fail closed: if Mini retrieve would label a copy as live/SoR, refuse.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Fetch/auth error ≠ tombstone + UIDVALIDITY
+
+Standing fetch contract: fetch/auth error ≠ tombstone. Empty fetch ≠
+gone. Persist UID + UIDVALIDITY. [fetch-error-tombstone.md](fetch-error-tombstone.md).
+
+Fail closed: if fetch or auth failed, do not write `present_on_server=0`.
+Do not treat an empty fetch as gone.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Rem-window freeze + lock lifetime + generate topology
+
+Standing rem-window contract: default is **freeze**
+(`sor_increment=frozen`) until EXIT. Do **not** switch to interleave.
+`with_writer_lock` is process-lifetime for rem, not a per-batch drop.
+PR-5 topology: retrieve on the SoR host; generate localhost
+hits/snippets. [rem-window-freeze.md](rem-window-freeze.md).
+
+Fail closed: if rem is live, keep `sor_increment=frozen`. Do not
+interleave. Do not drop the rem lock per batch.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Post-EXIT catch-up BEFORE PR-5
+
+Standing catch-up contract: after EXIT 0 + human go, before any PR-5:
+(1) IMAP+bodies-FTS on SoR under `with_writer_lock`, (2) Mini←SoR
+copy, (3) integrity pack, (4) then clear `sor_increment=frozen`. Do
+not run catch-up until EXIT 0 + human go. Rem EXIT 0 handling is out
+of scope. [post-exit-catchup.md](post-exit-catchup.md).
+
+Fail closed: if rem has not EXIT 0, do not run catch-up. Do not
+enable PR-5 in the same breath.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Ready handoff (PASS or fail-open-only)
+
+Standing Ready contract: Ready needs interface proof PASS **or** an
+explicit **fail-open-only** label, plus negative smoke. Docs PR Ready
+≠ permission to enable batch bump / Mini MLX / sidecar against live
+rem.
+
+Fail closed: if neither PASS nor fail-open-only is present, do not
+Ready. Do not treat Ready as a live rem enable.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## mlx_lm.server smoke + Mini RAM law HARD DECK
+
+Standing generate smoke contract: smoke codes are `mlx_lm.server`
+(legacy JSON labels `lm_studio_*` stay). Mini RAM law HARD DECK: no
+co-reside 8B embed + 35B generate. Bind `:1234` and `:8743` to
+`127.0.0.1` only.
+
+Fail closed: if generate would bind off localhost, refuse. If Mini
+would co-reside 8B embed + 35B generate, refuse.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.

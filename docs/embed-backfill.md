@@ -196,3 +196,27 @@ sqlite3 "$HOME/MailArchive/mailroom.sqlite" 'PRAGMA integrity_check;'
 
 Expected: one line `ok`. The health pack hard-fails otherwise:
 [sor-health.md](sor-health.md).
+
+## Embed generation key (4096 native / 1024 store)
+
+Locked key: `model_tag` + `embed_runtime` + `native_dim` +
+`store_dim` + `instruction_prefix`. v1 is `qwen3-embedding:8b` /
+Ollama / **4096 native / 1024 store** / Qwen3 query instruct prefix.
+Refuse writes that mismatch `embedding_meta`. Aligns
+[MAILROOM.md](MAILROOM.md) with `embed_lib.py`. Design:
+[embed-generation-key.md](embed-generation-key.md).
+
+## Post-rem same-writer batch bump (AFTER EXIT 0 only)
+
+Rem-legacy stays **batch 8** until EXIT 0. Next-run default after
+EXIT 0 + human go is **32**, then **64** if stable. **256 is not the
+first bump.** Same writer. Same model / 1024-d / instruction prefix.
+Commit per batch. **Forbid mid-job bump.** Docs PR Ready ≠ permission
+to enable this against live rem. Config:
+[post-rem-embed-batch.md](post-rem-embed-batch.md).
+
+## Compute sidecar (one-writer apply; never live rem SoR)
+
+Producer → shard files → one applier takes `with_writer_lock` and
+writes `embedding_meta`+vec only. Missing-only INSERT. Never pointed
+at live rem SoR. Design: [compute-sidecar.md](compute-sidecar.md).

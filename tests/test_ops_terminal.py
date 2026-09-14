@@ -21,6 +21,13 @@ TOMBSTONE = ROOT / "docs" / "tombstone.md"
 GENERATE = ROOT / "docs" / "generate-mlx.md"
 PR5 = ROOT / "docs" / "pr5-cutover.md"
 MAILROOM = ROOT / "docs" / "MAILROOM.md"
+POST_REM = ROOT / "docs" / "post-rem-embed-batch.md"
+MLX_EMB = ROOT / "docs" / "mini-mlx-embedder.md"
+SIDECAR = ROOT / "docs" / "compute-sidecar.md"
+GENKEY = ROOT / "docs" / "embed-generation-key.md"
+FETCH_ERR = ROOT / "docs" / "fetch-error-tombstone.md"
+FREEZE = ROOT / "docs" / "rem-window-freeze.md"
+CATCHUP = ROOT / "docs" / "post-exit-catchup.md"
 
 
 class OpsTerminalDocTests(unittest.TestCase):
@@ -287,6 +294,13 @@ class OpsTerminalDocTests(unittest.TestCase):
             GENERATE,
             PR5,
             MAILROOM,
+            POST_REM,
+            MLX_EMB,
+            SIDECAR,
+            GENKEY,
+            FETCH_ERR,
+            FREEZE,
+            CATCHUP,
         ):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops-terminal.md", text, msg=path.name)

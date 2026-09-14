@@ -130,3 +130,34 @@ or busy refuse **before** a second `embed_backfill`. Shipping the
 guard ≠ starting a writer. Do not restart rem-legacy for daily.
 Daily uses `--quote-strip`. Rem keeps old text until EXIT. Do not
 touch a running rem-legacy job.
+
+## Embed generation key (4096 native / 1024 store)
+
+Locked key: `model_tag` + `embed_runtime` + `native_dim` +
+`store_dim` + `instruction_prefix`. v1 native dim is **4096**; store
+dim is **1024**. Refuse writes that mismatch `embedding_meta`.
+[embed-generation-key.md](embed-generation-key.md).
+
+## Post-rem batch bump + Mini MLX + sidecar (docs only)
+
+After EXIT 0 only: next-run batch **32**, then 64 if stable — not 256
+first. Mini MLX path needs holdout before cutover. Sidecar apply is
+one-writer and never pointed at live rem SoR. Docs PR Ready ≠ enable
+against live rem. [post-rem-embed-batch.md](post-rem-embed-batch.md),
+[mini-mlx-embedder.md](mini-mlx-embedder.md),
+[compute-sidecar.md](compute-sidecar.md).
+
+## Rem-window freeze + post-EXIT catch-up
+
+Default rem-window is **freeze** (`sor_increment=frozen`) until EXIT.
+Do not switch to interleave. `with_writer_lock` is process-lifetime
+for rem, not a per-batch drop. Post-EXIT catch-up (IMAP+bodies-FTS,
+Mini←SoR copy, integrity pack, then clear frozen) is documented only
+and needs EXIT 0 + human go. Rem EXIT 0 handling is out of scope.
+[rem-window-freeze.md](rem-window-freeze.md),
+[post-exit-catchup.md](post-exit-catchup.md).
+
+## Fetch-error ≠ tombstone + UIDVALIDITY
+
+Fetch/auth error ≠ tombstone. Empty fetch ≠ gone. Persist UID +
+UIDVALIDITY. [fetch-error-tombstone.md](fetch-error-tombstone.md).

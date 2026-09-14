@@ -75,6 +75,7 @@ import embed_lib as el  # noqa: E402
 import messages_ids as mids  # noqa: E402
 import rerank_lib as rl  # noqa: E402
 from embed_document import INSTRUCT_VERSION  # noqa: E402
+from retrieve_db_labels import retrieve_db_labels  # noqa: E402
 
 DEFAULT_DB = el.DEFAULT_DB
 DEFAULT_K = 20
@@ -103,6 +104,9 @@ HIT_FIELDS = (
     "rerank",
     "lane",
 )
+# Injection control: cap thread expansion (root + last N). Not unbounded.
+THREAD_EXPAND_LAST_N = 3
+THREAD_EXPAND_CAP = 8
 
 MONEY_WORDS = frozenset(
     {
@@ -1023,7 +1027,7 @@ def expand_thread_spine(
             if str(mem.get("message_id")) == str(tid):
                 root = mem
                 break
-        last3 = members[-3:]
+        last3 = members[-THREAD_EXPAND_LAST_N:]
         others = [
             ranked_by_id[mid]
             for mid in ranked_by_id
@@ -1056,6 +1060,7 @@ def expand_thread_spine(
                     rerank=None,
                 )
             )
+    extra = extra[: max(0, int(THREAD_EXPAND_CAP))]
     return list(pack) + extra
 
 
@@ -1562,9 +1567,12 @@ def main(argv: list[str] | None = None) -> int:
         if not rerank_mode:
             scored = any(rl.is_live_score(h.get("rerank")) for h in hits)
             rerank_mode = "crossencoder" if scored else "fail_open"
+    labels = retrieve_db_labels(db)
     meta = {
         "rerank_mode": rerank_mode,
         "generate_mode": "off",
+        "db_mode": labels["db_mode"],
+        "copy_age": labels["copy_age"],
     }
     if args.json:
         for hit in hits:
@@ -1580,12 +1588,18 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stderr.write(
                 "\n# hybrid retrieve: FTS pre-filter + vec post-filter; "
-                "rerank_mode=%s generate_mode=%s. instruct_version=%s dims=%s\n"
+                "rerank_mode=%s generate_mode=%s db_mode=%s copy_age=%s. "
+                "instruct_version=%s dims=%s. thread expand capped "
+                "(root + last %s, cap %s) as injection control.\n"
                 % (
                     rerank_mode,
                     meta["generate_mode"],
+                    meta["db_mode"],
+                    meta["copy_age"],
                     QUERY_INSTRUCT_VERSION,
                     QUERY_DIMS,
+                    THREAD_EXPAND_LAST_N,
+                    THREAD_EXPAND_CAP,
                 )
             )
     return 0
