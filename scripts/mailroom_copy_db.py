@@ -5,6 +5,10 @@ Same allowlist as mailroom_daily.py. Honor --db, then $MAILROOM_DB.
 Refuse mailroom.sqlite / unset until SoR cutover (PR-5). Hard-fail,
 not fail-open. No silent default to the SoR name.
 
+Rem-gated copy: Mini copy only when rem-legacy is not writing, or
+after rem-legacy EXIT 0. No SMB/NFS dual-write. No live MBP→Mini
+copy from this helper.
+
 Daily children (imap_newmail, imap_tombstone, imap_fetch_bodies_fts /
 imap_fetch_bodies, classify, notify_bills) resolve the DB through
 bind_copy_db() / resolve_from_argv() instead of a hardcoded SoR path
@@ -25,7 +29,11 @@ import os
 import sys
 from pathlib import Path
 
-from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
+from refuse_destructive import (
+    DestructiveRefuse,
+    refuse_destructive_cli,
+    refuse_imap_purge_cli,
+)
 
 COPY_DB_BASENAMES = frozenset(
     {
@@ -141,6 +149,7 @@ def child_main(argv: list[str] | None = None, *, name: str = "child") -> int:
     del name
     try:
         refuse_destructive_cli(argv)
+        refuse_imap_purge_cli(argv)
         path = bind_copy_db(argv)
     except DestructiveRefuse as exc:
         emit_db_mode("refused")
@@ -223,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     try:
         refuse_destructive_cli(argv)
+        refuse_imap_purge_cli(argv)
     except DestructiveRefuse as exc:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)

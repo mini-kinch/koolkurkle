@@ -211,6 +211,21 @@ class DocsContractTests(unittest.TestCase):
             self.assertTrue(path.is_file(), path)
             self.assertGreater(path.stat().st_size, 40)
 
+    def test_sole_writer_shipping_guard_is_not_rem_legacy(self):
+        text = (ROOT / "docs" / "pr0" / "with_writer_lock_DESIGN.md").read_text(
+            encoding="utf-8"
+        )
+        src = (SCRIPTS / "with_writer_lock.py").read_text(encoding="utf-8")
+        self.assertIn("sole-writer", text.lower())
+        self.assertIn("Busy/held lock", text)
+        self.assertIn("refuses before a second writer", text)
+        self.assertIn("not** starting rem-legacy", text)
+        self.assertIn("sole-writer", src.lower())
+        self.assertIn("Shipping this guard is not starting rem-legacy", src)
+        self.assertNotIn("/Users/", text.replace("/Users/<operator>/", ""))
+        self.assertNotIn("@me.com", text)
+        self.assertNotIn("@icloud.com", text)
+
     def test_schema_sql_has_existing_reply_and_hash(self):
         sql = (ROOT / "docs" / "pr0" / "mailroom_schema.sql").read_text(encoding="utf-8")
         self.assertIn("in_reply_to TEXT", sql)

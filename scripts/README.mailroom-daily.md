@@ -20,8 +20,10 @@ is `mailroom.sqlite` or anything else.
 may be empty while rem embed still holds `mailroom-copy`. A silent default
 to `mailroom.sqlite` would write the empty SoR or race the rem job.
 Copy-only keeps one writer on the live rem copy and leaves SoR promotion
-to PR-5 (out of scope here). Do not mount the live SQLite over SMB/NFS
-and do not dual-write.
+to PR-5 (out of scope here). Rem-gated copy: Mini copy only when
+rem-legacy is not writing, or after rem-legacy EXIT 0. Do not mount
+the live SQLite over SMB/NFS and do not dual-write. No live MBP→Mini
+copy is required from this tree.
 
 ### Daily children use the same copy path
 
@@ -55,7 +57,9 @@ If rem embed still holds `mailroom-copy.sqlite`, point the daily job at
 
 Do **not** promote Mini `mailroom.sqlite` or change the allowlist in this
 driver. After PR-5, the same label can point at SoR. Until then, refuse
-is hard-fail (`db_mode=refused`), not fail-open.
+is hard-fail (`db_mode=refused`), not fail-open. PR-5 cutover checklist
+is docs only — do not enable cutover or RunAtLoad here
+([pr5-cutover.md](../docs/pr5-cutover.md)).
 
 ## Pipeline
 

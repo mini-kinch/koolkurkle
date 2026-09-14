@@ -26,6 +26,9 @@ class TombstoneNeverPurgeDocTests(unittest.TestCase):
         self.assertIn("present_on_server", text)
         self.assertIn("STORE \\Deleted", text)
         self.assertIn("EXPUNGE", text)
+        self.assertIn("Trash-purge", text)
+        self.assertIn("Refuse those verbs", text)
+        self.assertIn("local `present_on_server` only", text)
         self.assertIn("imap_tombstone.py", text)
         self.assertIn("bind_copy_db", text)
         self.assertIn("Do not", text)
@@ -41,6 +44,8 @@ class TombstoneNeverPurgeDocTests(unittest.TestCase):
         self.assertIn("Local tombstone only", text)
         self.assertIn("present_on_server", text)
         self.assertIn("EXPUNGE", text)
+        self.assertIn("Trash-purge", text)
+        self.assertIn("Refuse those verbs", text)
         self.assertIn("No IMAP sockets", text)
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, text)

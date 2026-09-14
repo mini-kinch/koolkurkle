@@ -54,6 +54,12 @@ Watch proof (quote last sample or say not watching; do not invent progress; do n
 Factory docs batches (one combined PR per batch or stacked branches; forbid parallel PRs that all edit the same shared docs files, e.g. docs/ops-terminal.md + README),
 Continuous keepgoing (after Done on an authorized chain, immediately issue the next AR/task; forbid soft pause fillers like "next judgment when you want"),
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check),
+IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge),
+with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy),
+mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
+bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
+PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
+sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 

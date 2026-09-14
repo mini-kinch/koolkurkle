@@ -18,6 +18,11 @@ Action-required open ⇒ no lock / no writes.
 | `ask_mail` retrieve (FTS / sqlite-vec) + short `ask_audit` / draft INSERT | No |
 | Humans inspecting with `sqlite3` read-only | No |
 
+`with_writer_lock` is the **sole-writer** wrapper. Busy/held lock
+refuses before a second writer starts. Shipping this guard
+(docs/tests/wrapper) is **not** starting rem-legacy. Do not start
+rem-legacy from this wrapper.
+
 This PR ships the wrapper only. It is **not** wired into `embed_backfill` or the Mini daily driver (live embeds stay up).
 
 ## Stale lock (>4h)

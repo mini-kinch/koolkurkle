@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """MAILROOM.md §9.5 exclusive writer lock for mailroom.sqlite.
 
-Exclusive flock on ~/MailArchive/mailroom.write.lock. Writes PID, hostname,
-purpose, and an ISO timestamp. If the lock is already held for more than
-4 hours, refuse — do not steal.
+Sole-writer wrapper: exclusive flock on ~/MailArchive/mailroom.write.lock.
+Writes PID, hostname, purpose, and an ISO timestamp. If the lock is
+already held (busy) or held more than 4 hours, refuse before a second
+writer — do not steal.
+
+Shipping this guard is not starting rem-legacy. Do not start rem-legacy
+from this wrapper.
 
 Writers take this lock. ask_mail does not.
 Action-required open (default: ~/MailArchive/ACTION_REQUIRED) ⇒ no lock,
