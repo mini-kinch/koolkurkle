@@ -25,7 +25,9 @@ body). Live rem LaunchAgents keep the old text path until EXIT — do not
 restart the 63k backfill or change rem flags. **HARD DECK:** one
 `embed_backfill` writer per `.sqlite` (`--lock` is per-batch, not
 same-file 2-wide). Read **[docs/embed-backfill.md](docs/embed-backfill.md)**
-before starting a backfill.
+before starting a backfill. Tombstone / never-purge: never physically
+delete iCloud or server mail; local tombstone only.
+**[docs/tombstone.md](docs/tombstone.md)**.
 
 ## Hybrid retrieve (MAILROOM §6.2 / PR-6 + PR-7) + ask_mail (PR-8)
 

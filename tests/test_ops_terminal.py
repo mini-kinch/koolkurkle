@@ -17,6 +17,7 @@ LOCK = ROOT / "docs" / "pr0" / "with_writer_lock_DESIGN.md"
 GATES = ROOT / "docs" / "model-runtime-gates.md"
 ASK = ROOT / "docs" / "ask_mail.md"
 EMBED = ROOT / "docs" / "embed-backfill.md"
+TOMBSTONE = ROOT / "docs" / "tombstone.md"
 
 
 class OpsTerminalDocTests(unittest.TestCase):
@@ -79,6 +80,8 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("launchctl start com.mailroom.daily", text)
         self.assertIn("embed-backfill.md", text)
         self.assertIn("HARD DECK", text)
+        self.assertIn("tombstone.md", text)
+        self.assertIn("never-purge", text)
         self.assertIn("same-file 2-wide", text)
         self.assertIn("embed_merge_shards.py", text)
         self.assertNotIn("/Users/", text)
@@ -118,7 +121,18 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertNotIn("9zjf9jpv7z-glitch", text)  # parked/historical; not live SoR
 
     def test_linked_from_existing_docs(self):
-        for path in (README, DAILY, RERANK, SLIM, HEALTH, LOCK, GATES, ASK, EMBED):
+        for path in (
+            README,
+            DAILY,
+            RERANK,
+            SLIM,
+            HEALTH,
+            LOCK,
+            GATES,
+            ASK,
+            EMBED,
+            TOMBSTONE,
+        ):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops-terminal.md", text, msg=path.name)
 
