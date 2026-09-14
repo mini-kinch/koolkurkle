@@ -79,8 +79,9 @@ is hard-fail (`db_mode=refused`), not fail-open.
    **or** stale `content_hash`. Does **not** restart live rem rows (meta
    present, `content_hash` NULL) unless the operator passes
    `--reembed-legacy` (opt-in with `--quote-strip`; default skip; daily
-   argv does not include it). Writer lock is per batch, not the rem
-   job. Live rem LaunchAgents keep the old text path until EXIT.
+   argv does not include it; ops contract in embed-backfill.md). Writer
+   lock is per batch, not the rem job. Live rem LaunchAgents keep the
+   old text path until EXIT.
    **HARD DECK:** one `embed_backfill` writer per `.sqlite`. `--lock`
    does not make same-file 2-wide safe. Parallel char-bands belong on
    separate files (copy vs SoR-named), then `embed_merge_shards.py`

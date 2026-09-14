@@ -12,7 +12,8 @@ history; live modes are opt-in (`--lane` / `--after` / `--before` /
 `--fts-only` filter history only; no `--live` flag). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
 `embed_backfill` single-writer HARD DECK (read this **before** starting
-a backfill): [embed-backfill.md](embed-backfill.md).
+a backfill), including the `--reembed-legacy` ops contract:
+[embed-backfill.md](embed-backfill.md).
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
 
@@ -90,6 +91,8 @@ Read [embed-backfill.md](embed-backfill.md) **before** starting
 4. **Do not merge-back a malformed working copy.** Set it aside, recopy
    from a known-good source, then start a writer only after
    `integrity_check` is `ok`.
+5. **`--reembed-legacy` ops contract.** Requires `--quote-strip`.
+   Default skip. Not the daily path. Never two writers on one sqlite.
 
 ```zsh
 # copy host — integrity before a new embed_backfill

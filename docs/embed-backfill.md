@@ -17,7 +17,21 @@ stays HARD DECK even with `--lock`.
 `--lock` still belongs on the Mini daily incremental path. Use it for
 that heartbeat / refuse behavior. Do not treat it as a 2-wide permit.
 
-## Rem-legacy rows under `--quote-strip` (opt-in)
+## `--reembed-legacy` ops contract
+
+Shipped CLI only. No new flags. Defaults unchanged. Flag text:
+`scripts/embed_backfill.py --help` (`--quote-strip` /
+`--reembed-legacy`). Refuse text: `--reembed-legacy requires
+--quote-strip`.
+
+- **`--reembed-legacy` requires `--quote-strip`.** Combined with
+  `--quote-strip` only. Without `--quote-strip` the CLI refuses.
+- **Default skip.** `--reembed-legacy` is **opt-in, default off**.
+  Without the flag, rem-legacy rows stay `skipped_legacy_embedded`.
+- **One writer per `.sqlite` (HARD DECK).** Never two writers on one
+  sqlite. `--lock` is per-batch, not a 2-wide permit.
+- **Not the daily path.** Do **not** put `--reembed-legacy` on the
+  Mini daily argv.
 
 `--quote-strip` incremental §6.1 **skips** rows where `embedding_meta`
 is present and `content_hash` is NULL (live rem /
@@ -26,12 +40,12 @@ rows. A normal daily/resume therefore stays safe: `--quote-strip
 --min-chars 3000` can exit with 0 candidates when only rem-legacy rows
 remain above the band.
 
-`--reembed-legacy` is **opt-in, default off**. Combined with
-`--quote-strip` only, it treats those rem-legacy rows as candidates so
-they can be rewritten onto the §6.1 header-prefixed document. Without
-the flag, behavior is unchanged (same `skipped_legacy_embedded`
-counter). Do **not** put `--reembed-legacy` on the Mini daily argv — a
-surprise ~63k rewrite is the failure this default avoids.
+Combined with `--quote-strip` only, `--reembed-legacy` treats those
+rem-legacy rows as candidates so they can be rewritten onto the §6.1
+header-prefixed document. Without the flag, behavior is unchanged
+(same `skipped_legacy_embedded` counter). Do **not** put
+`--reembed-legacy` on the Mini daily argv — a surprise ~63k rewrite
+is the failure this default avoids.
 
 `--reembed-legacy` without `--quote-strip` is refused. Still one writer
 per `.sqlite`. `--lock` remains per-batch, not a 2-wide permit.
