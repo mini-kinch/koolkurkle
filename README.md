@@ -1,5 +1,9 @@
 # koolkurkle
 
+**koolkurkle** is a **local** personal-mail search and assistant toolkit. It indexes your **iCloud / Apple Mail** mailbox on your own Macs, then lets you ask questions with **citations** back to real messages. It does **not** replace Apple Mail, does **not** change your email address, and does **not** send mail for you (drafts only).
+
+Beginner guide: [docs/beginner-guide.md](docs/beginner-guide.md)
+
 ask_mail with citations is the product; vectors/FTS/IMAP are infrastructure.
 
 iCloud mail retrieve scripts.
