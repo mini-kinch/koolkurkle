@@ -31,6 +31,12 @@ may pass (`--lane`, `--after`, `--before`, `--fts-only`) also filter
 history retrieve; they do not enable live IMAP.
 
 Canonical soft-delete: [soft-delete.md](soft-delete.md).
+ATT-0 attachment retrieve (DESIGN ONLY):
+[att0-constraints.md](att0-constraints.md). History default includes
+tombstoned attach hits (`present_on_server=0`); `--live` hides them.
+Auth hard-gate (`lane=auth`) must not enter attachment extract→FTS.
+`--no-attach` is future ATT-5. ATT-1..8 implement is FUTURE / out of
+scope. Ready ≠ ATT implement permission. No attachment ingest here.
 
 HARD DECK: never overwrite `scripts/ask_mail.py` with an MCP stub.
 Ready/merge is blocked if `tests/test_ask_mail_never_mcp_stub.py`

@@ -28,7 +28,12 @@ UIDVALIDITY together. UID alone is not identity.
 
 ask_mail retrieve default is history (Q1 **DECIDED**); live modes are
 opt-in (`--live` is an additive SELECT filter only)
-([ask_mail.md](ask_mail.md)).
+([ask_mail.md](ask_mail.md)). Attachment hits for tombstoned parents
+follow the same mode: visible under history; hidden only under
+`--live`. Do not permanently hide attach hits solely because the
+parent is tombstoned. Never-purge `attachment_*` tables/rows (same
+never-purge spirit as `messages`); skip/`too_big` beats disk purge.
+[att0-constraints.md](att0-constraints.md).
 
 Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily
 pipeline: [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).

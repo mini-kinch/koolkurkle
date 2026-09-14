@@ -74,7 +74,8 @@ mlx_lm.server smoke codes + Mini RAM law HARD DECK (bind 1234/8743 to 127.0.0.1;
 Thread expansion cap as injection control (root + last 3, cap 8),
 Rem-window freeze (sor_increment=frozen until EXIT; do not switch to interleave; with_writer_lock is process-lifetime for rem),
 Post-EXIT catch-up BEFORE PR-5 (docs only; IMAP+bodies-FTS under lock, Mini←SoR copy, integrity pack, then clear frozen; EXIT 0 + human go; rem EXIT 0 handling out of scope),
-Ready handoff (PASS or explicit fail-open-only; interface proof + negative smoke; Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live rem),
+Ready handoff (PASS or explicit fail-open-only; interface proof + negative smoke; Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live rem; Ready ≠ ATT implement permission),
+ATT-0 attachment lane (DESIGN ONLY; schema/generation/skip; auth hard-gate `lane=auth`; history vs live tombstoned attach hits; no live SoR catalog/apply while rem; IMAP brew-curl / `\Seen` rails; never-purge `attachment_*` + disk caps; ATT-1..8 FUTURE; Ready ≠ ATT implement; [docs/att0-constraints.md](docs/att0-constraints.md)),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
@@ -117,6 +118,8 @@ Soft-delete / never-purge + MAILROOM sync:
 **[docs/MAILROOM.md](docs/MAILROOM.md)**,
 **[docs/soft-delete.md](docs/soft-delete.md)**,
 **[docs/ask_mail.md](docs/ask_mail.md)**.
+ATT-0 attachment-search DESIGN (docs/tests only; ATT-1..8 FUTURE):
+**[docs/att0-constraints.md](docs/att0-constraints.md)**.
 
 `scripts/ask_mail.py` is the PR-8 CLI + HTTP `127.0.0.1:8743` (GET /ui
 same-origin POST /ask; GET /message?id=... for citation click-through;

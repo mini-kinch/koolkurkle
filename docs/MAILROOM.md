@@ -9,7 +9,8 @@ Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily:
 Retrieve: [ask_mail.md](ask_mail.md). Tombstone:
 [tombstone.md](tombstone.md). Canonical soft-delete one-pager:
 [soft-delete.md](soft-delete.md). Embed:
-[embed-backfill.md](embed-backfill.md).
+[embed-backfill.md](embed-backfill.md). ATT-0 attachment lane
+(DESIGN ONLY): [att0-constraints.md](att0-constraints.md).
 
 ## §5 Soft-delete (DECIDED)
 
@@ -161,3 +162,21 @@ and needs EXIT 0 + human go. Rem EXIT 0 handling is out of scope.
 
 Fetch/auth error ≠ tombstone. Empty fetch ≠ gone. Persist UID +
 UIDVALIDITY. [fetch-error-tombstone.md](fetch-error-tombstone.md).
+
+## ATT-0 attachment lane (DESIGN ONLY)
+
+Heavy `20260914-05-attachment-search-design` + Mailroom-accepted
+constraints. Schema / generation key / skip policy (MIME skip table,
+size bands S/M/L/X, phases P0–P3) live in
+[att0-constraints.md](att0-constraints.md). ATT-1..8 implement is
+**FUTURE / out of scope**. Ready ≠ ATT implement permission.
+
+Auth hard-gate (`lane=auth`) fail-closed. History vs live for
+tombstoned attach hits (history default). No live SoR catalog/apply
+while rem holds the lock (file-stage / copy OK; APPLY waits rem
+EXIT 0 + `with_writer_lock`). IMAP part-fetch via Homebrew curl
+≥ 8.17; `\Seen` restore is not delete; never `EXPUNGE` / `\Deleted`
+for hygiene. Never-purge `attachment_*` + disk caps (`too_big`).
+
+This change does not start catalog/extract/chunk/embed/apply. No
+live IMAP. Rem-legacy untouched.

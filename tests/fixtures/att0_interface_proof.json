@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "lane": "att0",
+  "status": "DESIGN ONLY",
+  "source": "20260914-05-attachment-search-design",
+  "store_dim": 1024,
+  "model_tag": "qwen3-embedding:8b",
+  "homebrew_curl": "/opt/homebrew/opt/curl/bin/curl",
+  "apple_curl": "/usr/bin/curl",
+  "apple_curl_fail_closed": true,
+  "min_curl_version": "8.17",
+  "seen_restore_is_delete": false,
+  "never_expunge": true,
+  "history_default": true,
+  "ready_is_not_att_implement": true,
+  "rem_untouched": true,
+  "no_live_imap": true,
+  "no_live_sor_writer": true,
+  "att_1_to_8": "FUTURE / out of scope",
+  "tables": [
+    "attachments",
+    "attachment_extracts",
+    "attachment_chunks",
+    "attachment_chunks_fts",
+    "chunk_embedding_meta",
+    "chunk_embeddings"
+  ],
+  "phases": ["P0", "P1", "P2", "P3"],
+  "size_bands": ["S", "M", "L", "X"],
+  "file_stage": ["B", "C", "E"],
+  "sor_writers": ["A", "D", "F"],
+  "negative_smoke": [
+    "auth_hard_gate",
+    "rem_holds_lock_catalog",
+    "apple_curl_body_peek",
+    "mixed_dim",
+    "delete_attachment_star",
+    "expunge_hygiene",
+    "message_embeddings_for_chunks"
+  ]
+}
