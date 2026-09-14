@@ -26,7 +26,9 @@ restart the 63k backfill or change rem flags. **HARD DECK:** one
 `embed_backfill` writer per `.sqlite` (`--lock` is per-batch, not
 same-file 2-wide). Read the `--reembed-legacy` ops contract in
 **[docs/embed-backfill.md](docs/embed-backfill.md)** before starting a
-backfill. Tombstone / never-purge: never physically
+backfill. Long SoR embeds stay host-kept foreground (host Terminal +
+`caffeinate -w <pid>`). Do not `nohup &`. Rem-legacy is not the Mini
+daily path. Tombstone / never-purge: never physically
 delete iCloud or server mail; local tombstone only.
 **[docs/tombstone.md](docs/tombstone.md)**.
 

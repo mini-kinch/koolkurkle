@@ -12,7 +12,8 @@ history; live modes are opt-in (`--lane` / `--after` / `--before` /
 `--fts-only` filter history only; no `--live` flag). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
 `embed_backfill` single-writer HARD DECK (read this **before** starting
-a backfill), including the `--reembed-legacy` ops contract:
+a backfill), including the `--reembed-legacy` ops contract and the
+host-kept foreground embed ops contract:
 [embed-backfill.md](embed-backfill.md).
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
@@ -93,6 +94,14 @@ Read [embed-backfill.md](embed-backfill.md) **before** starting
    `integrity_check` is `ok`.
 5. **`--reembed-legacy` ops contract.** Requires `--quote-strip`.
    Default skip. Not the daily path. Never two writers on one sqlite.
+6. **Host-kept foreground.** Long SoR embeds stay in a host Terminal.
+   Do not `nohup` or `&`. Keep the host awake with `caffeinate -w <pid>`
+   (placeholder, not a live PID). Rem-legacy is not the daily path.
+
+```zsh
+# SoR host — prevent sleep while the foreground embed PID is live
+caffeinate -w <pid>
+```
 
 ```zsh
 # copy host — integrity before a new embed_backfill

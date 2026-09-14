@@ -4,7 +4,8 @@ Preferred practice **before** any `embed_backfill.py` start. Read this
 first. Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily
 incremental: [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
 Per-batch lock: [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md).
-Integrity: [sor-health.md](sor-health.md).
+Integrity: [sor-health.md](sor-health.md). Long embeds: host-kept
+foreground (section below), not `nohup &`.
 
 ## One writer per `.sqlite` (HARD DECK)
 
@@ -60,6 +61,30 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
 $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
   --db $HOME/MailArchive/mailroom.sqlite --quote-strip --reembed-legacy --min-chars 3000 --lock
 ```
+
+## Host-kept foreground embed ops contract
+
+Long MailArchive embeds stay **host-kept foreground** in a host
+Terminal. Do **not** background with `nohup` or `&`.
+
+Sole writer is HARD DECK: never two writers on one `.sqlite`. A live
+rem-legacy job on the SoR-named file is that sole writer until EXIT 0.
+Do not start a second `embed_backfill` against the same file.
+
+After the foreground PID is known, keep the host awake for that
+process (placeholder `<pid>`, not a live PID):
+
+```zsh
+# SoR host — prevent sleep while the foreground embed PID is live
+caffeinate -w <pid>
+```
+
+`--reembed-legacy` is **not** the daily path. Daily incremental is
+LaunchAgent `embed_backfill.py --skip-auth --quote-strip --lock`
+without `--reembed-legacy`
+([README.mailroom-daily.md](../scripts/README.mailroom-daily.md)).
+Rem-legacy CLI rules (opt-in, default off, requires `--quote-strip`):
+section above. No new flags. Defaults unchanged.
 
 ## Shard on separate files, then merge
 
