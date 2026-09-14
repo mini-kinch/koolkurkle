@@ -38,9 +38,7 @@ Keep (agreed with ATT-0 / [att0-constraints.md](att0-constraints.md)):
 
 Tighten (now locked — was open in 05):
 
-1. **RRF is one unified list** tagged `source=body|attach`. Not two RRF
-   then merge. Same rule later: `source=body|attach|imsg|note` in one
-   list. Do not reopen “or two RRF.” Do not invent a second RRF product.
+1. **RRF is one unified list** tagged `source=body|attach`. Not two RRF then merge. Same rule later: `source=body|attach|imsg|note` in one list. Do not reopen “or two RRF.” Do not invent a second RRF product.
 2. **Blob-tree path contract** (one tree, both machines):
 
 ```
@@ -52,7 +50,7 @@ $MAILARCHIVE/att-shards/                         embed parquet
 ```
 
 Do not write into Apple’s `Messages/Attachments` or Notes Group
-Container. Copy-out by sha only. Missing blob =
+Container. copy-out by sha only. Missing blob =
 `extract_status=blob_missing`, not a second catalog.
 
 `$MAILARCHIVE` is the same logical tree on MBP and Mini (`MailArchive`
@@ -363,9 +361,7 @@ explode). Cap 20 messages of context per cited chat.
 
 Mail `--live` stays a mail SELECT filter (`present_on_server=1`).
 There is no “live IMAP” for iMessage. Freshness is replica lag,
-labeled `replica_age`. CLI/docs must not imply unified “live” means
-fresh iMessage. Per-corpus caps required so group-chat volume does not
-starve mail hits.
+labeled `replica_age`. CLI/docs must not imply unified “live” means fresh iMessage. Per-corpus caps required so group-chat volume does not starve mail hits.
 
 `ask_all` on the box is retrieve-only against **our** replicas
 (`msgroom` / `noteroom`), never a path that opens live `chat.db` /
@@ -482,18 +478,14 @@ One tagged RRF (`source=body|attach|imsg|note`) matches ATT-0 — do not
 invent a second RRF product.
 
 Gap locked: mail `--live` is IMAP `present_on_server`; imsg/note
-freshness is **`replica_age` only**. CLI/docs must not imply unified
-“live” means fresh iMessage. Per-corpus caps required so group-chat
-volume does not starve mail hits.
+freshness is **`replica_age` only**. CLI/docs must not imply unified “live” means fresh iMessage. Per-corpus caps required so group-chat volume does not starve mail hits.
 
 ### 11.4 No-send vs existing bill texts
 
 Heavy-06 bans auto-send / Messages AppleScript send for ask.
 
 Isolated exception: Mailroom’s narrow `notify_bills` → Messages path
-(Keychain item **name** only in docs; once per bill) is an **ops
-exception**, not an `ask_all` capability and not a precedent for agent
-send. `ask_all` has no send path.
+(Keychain item **name** only in docs; once per bill) is an **ops exception**, not an `ask_all` capability and not a precedent for agent send. `ask_all` has no send path.
 
 ### 11.5 MSG OTP / auth hard-gate
 
@@ -502,8 +494,7 @@ SMS/iMessage.
 
 MSG lane needs an equivalent gate (skip or hard-filter likely OTP
 patterns / known auth senders) so `ask_all` cannot become a code dump.
-Never put codes in citations / `ask_audit`. No sample codes in this
-repo.
+Never put codes in citations / `ask_audit`. No sample codes in this repo.
 
 ---
 

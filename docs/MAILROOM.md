@@ -190,7 +190,7 @@ Spine: [unified-search-design.md](unified-search-design.md).
 MSG-0..2 / NOTE-0..2 / FED-0 implement is **FUTURE / out of scope**.
 Ready ≠ MSG/NOTE enable permission. Ready ≠ ATT implement permission.
 
-Three SoRs / three locks / three backup sets (`mailroom.sqlite` /
+three SoRs / three locks / three backup sets (`mailroom.sqlite` /
 `msgroom.sqlite` / `noteroom.sqlite`). Never dump Messages/Notes into
 `mailroom.sqlite`. Mail rem lock ≠ msgroom/noteroom locks.
 
