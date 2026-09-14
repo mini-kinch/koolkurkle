@@ -24,6 +24,9 @@ class OpsTerminalDocTests(unittest.TestCase):
     def test_covers_required_topics(self):
         text = OPS.read_text(encoding="utf-8")
         self.assertIn("One machine per card", text)
+        self.assertIn("Terminal AR format", text)
+        self.assertIn("Title equals body", text)
+        self.assertIn("One command fence per copy button", text)
         self.assertIn("SWITCH TO Mini/MBP before machine-specific Terminal AR", text)
         self.assertIn("Sent-from-machine", text)
         self.assertIn("Verify tool exists before Terminal AR", text)

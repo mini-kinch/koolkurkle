@@ -37,7 +37,7 @@ one Action-required.
 
 ## One machine per card
 
-- One host per card. A **MBP** or **Mini** banner on the first line
+- One host per card. A loud **MBP** or **Mini** banner on the first line
   keeps the paste target obvious.
 - Open a new card when switching machines. Keychain items and `$HOME`
   paths then stay on the host they belong to.
@@ -88,8 +88,8 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 Put each Terminal command in its own fenced code block. Chat copy
 buttons paste the whole fence; one command per fence keeps a single
-line on the clipboard. Two `security` (or other) lines in one fence
-become one paste.
+line on the clipboard. One command fence per copy button. Two
+`security` (or other) lines in one fence become one paste.
 
 ```zsh
 # Mini — example banner (first line of the card)
@@ -100,6 +100,20 @@ hostname
 # MBP — example banner (new card after switching machines)
 hostname
 ```
+
+## Terminal AR format
+
+Standing format for Terminal Action-required cards. One machine per
+card. Fail closed: if a card cannot follow this format, do not issue it.
+
+- **One host banner.** The first line is a loud **MBP** or **Mini** banner so the paste target is obvious. Name machines MBP and Mini only.
+- **One command fence per copy button.** Each fenced block is one command. Chat copy buttons paste the whole fence.
+- **Title equals body.** The card title is the same text as the body paste (title=body).
+- **No stacked interactive prompts in one paste.** Do not stack prompts that wait for input in one paste.
+- **No multi-line paste that includes interactive read.** A paste that includes an interactive read must not be multi-line.
+
+This gate is docs/tests only. It does not SSH a live machine, open
+MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 ## MBP SoR vs Mini copy-only
 
