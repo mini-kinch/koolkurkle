@@ -29,6 +29,8 @@ SWITCH TO Mini/MBP before a machine-specific Terminal AR
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; no Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
 generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
+IMAP live checks via `/usr/bin/curl imaps://` (never Python sockets
+to imap.mail.me.com; Errno 9),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
