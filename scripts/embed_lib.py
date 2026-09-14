@@ -29,6 +29,13 @@ from embed_document import (
     INSTRUCT_VERSION,
     document_embed_text,
 )
+from embed_generation_key import (
+    DEFAULT_EMBED_RUNTIME,
+    GenerationKeyRefuse,
+    embed_generation_key,
+    meta_row_to_key,
+    refuse_generation_mismatch,
+)
 from mail_clean import clean_body, content_hash
 from thread_graph import thread_fields_from_row
 
@@ -46,6 +53,11 @@ DEFAULT_DIMS = 1024
 DEFAULT_K = 10
 # Local 8B on Apple Silicon: small batches keep Metal/RAM steady.
 DEFAULT_BATCH_SIZE = 8
+# Rem-legacy stays 8 until EXIT 0. Next-run AFTER EXIT 0 only (KOO-55).
+# First bump 32, then 64 if stable — NOT 256 first. Forbid mid-job bump.
+POST_REM_NEXT_RUN_BATCH_SIZE = 32
+POST_REM_NEXT_RUN_BATCH_IF_STABLE = 64
+POST_REM_HOLD_256 = 256
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 # Modest ctx for §6.1 incremental docs (CHAR_CAP 16k ≈ 4k tokens). Live rem
 # does not send num_ctx. 32k is the model max — do not use it on Mini.
@@ -1325,6 +1337,38 @@ def upsert_embedding(
             f"(v1 default is {DEFAULT_DIMS}-d Matryoshka from {NATIVE_DIMS} native; "
             f"stored model id {stored})."
         )
+    incoming_key = embed_generation_key(
+        model_tag=embed_model or model,
+        embed_runtime=DEFAULT_EMBED_RUNTIME,
+        native_dim=NATIVE_DIMS,
+        store_dim=dims,
+        instruction_prefix=QUERY_INSTRUCT,
+    )
+    stored_key = None
+    if _has_table(conn, "embedding_meta"):
+        meta_cols = _table_columns(conn, "embedding_meta")
+        select = ["model", "dims"]
+        if "embed_model" in meta_cols:
+            select.append("embed_model")
+        if "embed_dim" in meta_cols:
+            select.append("embed_dim")
+        if "instruct_version" in meta_cols:
+            select.append("instruct_version")
+        try:
+            existing = conn.execute(
+                "SELECT %s FROM embedding_meta WHERE message_id = ? AND model = ? "
+                "AND model_version = ?"
+                % ", ".join(select),
+                (message_id, stored, model_version),
+            ).fetchone()
+        except sqlite3.Error:
+            existing = None
+        if existing is not None:
+            stored_key = meta_row_to_key(existing)
+    try:
+        refuse_generation_mismatch(stored_key, incoming_key)
+    except GenerationKeyRefuse as exc:
+        raise EmbedError(str(exc)) from exc
     created = created_at or utc_now()
     blob = serialize_f32(vector)
     conn.execute("DELETE FROM message_embeddings WHERE message_id = ?", (message_id,))

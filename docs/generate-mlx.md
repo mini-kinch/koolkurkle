@@ -15,6 +15,8 @@ not LM Studio): [ops-terminal.md](ops-terminal.md).
 | `path` success | `llmster-headless` | **Code string only.** Withhold product-name claim |
 | `path` generate down | `fail-open-only` | Required label. Hits-only, `answer` null |
 | Embed | Ollama | `ps` / `stop` only. Never generate |
+| Bind | `127.0.0.1:1234` and `127.0.0.1:8743` | localhost only |
+| Mini RAM law | HARD DECK | no co-reside 8B embed + 35B generate |
 
 ## One-command install (MBP)
 
@@ -103,7 +105,10 @@ lsof -nP -iTCP:1234 -sTCP:LISTEN || echo ":1234 free"
 5. `max_tokens` 512–1024 on the generate request.
 
 Do not open LM Studio.app for Mailroom generate. Do not `lms server start`
-as the generate path. Do not Ollama chat/generate.
+as the generate path. Do not Ollama chat/generate. Smoke codes are
+`mlx_lm.server` (legacy JSON labels `lm_studio_*` stay). Mini RAM law
+HARD DECK: no co-reside 8B embed + 35B generate. Bind `:1234` / `:8743`
+to `127.0.0.1` only.
 
 Client library: `scripts/mailroom_generate.py`. Live CLI remains
 `scripts/ask_mail.py`. Headless probes (C/D/E/F):

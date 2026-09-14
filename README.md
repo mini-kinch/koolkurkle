@@ -1,5 +1,7 @@
 # koolkurkle
 
+ask_mail with citations is the product; vectors/FTS/IMAP are infrastructure.
+
 iCloud mail retrieve scripts.
 
 ## Mini daily RAG
@@ -61,6 +63,18 @@ bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; c
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),
 Homebrew curl Little Snitch allow (Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl; BODY.PEEK `/opt/homebrew/opt/curl/bin/curl` needs its own Little Snitch allow; no live IMAP),
+Post-rem embed batch bump (AFTER EXIT 0 only; first bump **32**, then 64 if stable; not 256 first; forbid mid-job bump; commit-per-batch; same qwen3-embedding:8b / 1024-d / instruction prefix),
+Mini MLX embedder path (design; holdout of N frozen message_ids + cosine-agreement threshold required before cutover; fail-closed if miss; Mini RAM law: no co-reside 8B embed + 35B generate),
+Compute sidecar one-writer apply (design+contract tests; never pointed at live rem SoR; missing-only INSERT; hash mismatch skip unless --reembed human go),
+Embed generation key (model_tag + embed_runtime + native_dim + store_dim + instruction_prefix; 4096 native / 1024 store; refuse embedding_meta mismatch),
+Mini retrieve db_mode=copy + copy_age (never imply live/SoR),
+Fetch/auth error ≠ tombstone (empty fetch ≠ gone; UID+UIDVALIDITY persistence),
+PR-5 integrity + rollback (docs only — do not enable; integrity pack, copy freshness, quote-strip generation match, one cutover + one rollback, RunAtLoad separate GO),
+mlx_lm.server smoke codes + Mini RAM law HARD DECK (bind 1234/8743 to 127.0.0.1; no co-reside 8B embed + 35B generate),
+Thread expansion cap as injection control (root + last 3, cap 8),
+Rem-window freeze (sor_increment=frozen until EXIT; do not switch to interleave; with_writer_lock is process-lifetime for rem),
+Post-EXIT catch-up BEFORE PR-5 (docs only; IMAP+bodies-FTS under lock, Mini←SoR copy, integrity pack, then clear frozen; EXIT 0 + human go; rem EXIT 0 handling out of scope),
+Ready handoff (PASS or explicit fail-open-only; interface proof + negative smoke; Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live rem),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 

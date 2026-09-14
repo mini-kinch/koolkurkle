@@ -22,6 +22,10 @@ Daily headers child: `imap_tombstone.py`. The GitHub tree is copy-only
 bind (`bind_copy_db`); it does not open IMAP or Keychain. Do not
 implement live IMAP delete here.
 
+**Fetch/auth error ≠ tombstone.** Empty fetch ≠ gone. Persist UID +
+UIDVALIDITY together. UID alone is not identity.
+[fetch-error-tombstone.md](fetch-error-tombstone.md).
+
 ask_mail retrieve default is history (Q1 **DECIDED**); live modes are
 opt-in (`--live` is an additive SELECT filter only)
 ([ask_mail.md](ask_mail.md)).
