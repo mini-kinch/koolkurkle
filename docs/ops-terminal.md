@@ -86,6 +86,34 @@ command -v <tool>
 This gate is docs/tests only. It does not SSH a live machine, open
 MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
+## IMAP live checks via curl imaps (never Python sockets)
+
+Standing contract: IMAP live checks use `/usr/bin/curl imaps://`.
+Never open a Python socket client to `imap.mail.me.com`.
+
+Python `socket` / `imaplib` clients to `imap.mail.me.com` fail with
+**Errno 9** (bad file descriptor). That is the failure mode.
+Do not retry with another Python socket. Fail closed: no
+`/usr/bin/curl imaps://`, no IMAP live check.
+
+Name the machines as MBP and Mini only. Never a login, home path, email,
+secret, credential, or app password on the card or in git.
+
+```zsh
+# Mini — prove Apple curl exists before an IMAP live-check card
+test -x /usr/bin/curl
+```
+
+```zsh
+# MBP — prove Apple curl exists before an IMAP live-check card
+test -x /usr/bin/curl
+```
+
+This gate is docs/tests only. It does not run live IMAP, does not
+connect to `imap.mail.me.com`, does not run curl against IMAP, does
+not read Keychain, does not open MailArchive or live sqlite, and does
+not change rem-legacy.
+
 ## One command per fence
 
 Put each Terminal command in its own fenced code block. Chat copy
