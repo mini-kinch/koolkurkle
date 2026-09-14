@@ -21,8 +21,7 @@ that heartbeat / refuse behavior. Do not treat it as a 2-wide permit.
 
 Shipped CLI only. No new flags. Defaults unchanged. Flag text:
 `scripts/embed_backfill.py --help` (`--quote-strip` /
-`--reembed-legacy`). Refuse text: `--reembed-legacy requires
---quote-strip`.
+`--reembed-legacy`). Refuse text: `--reembed-legacy requires --quote-strip`.
 
 - **`--reembed-legacy` requires `--quote-strip`.** Combined with
   `--quote-strip` only. Without `--quote-strip` the CLI refuses.

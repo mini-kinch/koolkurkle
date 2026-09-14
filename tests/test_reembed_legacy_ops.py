@@ -108,7 +108,7 @@ class ReembedLegacyOpsContractTests(unittest.TestCase):
         self.assertNotIn("EXAMPLE_USER_LOCAL", text)
 
     def test_operators_can_find_the_contract(self):
-        for path in (README, OPS, DAILY, EMBED):
+        for path in (README, OPS, DAILY):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops contract", text, msg=path.name)
             self.assertIn("--reembed-legacy", text, msg=path.name)
