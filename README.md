@@ -36,6 +36,9 @@ fail closed for classify/rules),
 CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS
 orders Developer, collects status, issues user ARs only; Developer
 owns Mac process ownership and installs),
+Discuss ≠ authorize (discussion and how questions are not authorization;
+implement only on do it / approved / implement or standing authorized process;
+in CoS Desk discussion/troubleshooting, do not act until explicit),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
