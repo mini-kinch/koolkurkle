@@ -25,6 +25,7 @@ CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS orders Devel
 Discuss ≠ authorize (discussion and how questions are not authorization; implement only on do it / approved / implement or standing authorized process; in CoS Desk discussion/troubleshooting, do not act until explicit): section below.
 After Action required: zero chatter until Done (after an Action required, silence until Done/Blocked/explicit reply; exceptions only STOP / hello / wake-up; do not stack chatter or routine status on an open AR): section below.
 No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agent Shell can read; Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal): section below.
+Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -229,6 +230,18 @@ Name the machines as MBP and Mini only. Never a login, home path, or
 email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Embed model (local Qwen3-Embedding-8B via Ollama)
+
+Standing embed-model contract: embed model is local Qwen3-Embedding-8B via Ollama. Not cloud embed.
+
+Official Ollama library tag is `qwen3-embedding:8b` (local Ollama only). Do not use a cloud embed API.
+
+Fail closed: if local Ollama Qwen3-Embedding-8B is not the embed path, do not start an embed job. Do not fall through to cloud embed.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not start embed jobs, does not start Ollama, does not run live Mac writers, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 
