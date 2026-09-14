@@ -164,12 +164,9 @@ change rem-legacy.
 
 ## Auth/2FA mail never Junk or Trash (Auth folder)
 
-Standing classify/rules contract: auth/2FA mail must not be classified
-into Junk or Trash. The destination hygiene folder is Auth.
+Standing classify/rules contract: auth/2FA mail must not be classified into Junk or Trash. The destination hygiene folder is Auth.
 
-Fail closed: if classify or rules cannot place auth/2FA mail into
-Auth, do not classify it into Junk or Trash. Do not guess Junk.
-Do not fall through to Trash.
+Fail closed: if classify or rules cannot place auth/2FA mail into Auth, do not classify it into Junk or Trash. Do not guess Junk. Do not fall through to Trash.
 
 Name the machines as MBP and Mini only. Never a login, home path, or
 email.
