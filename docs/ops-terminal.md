@@ -32,6 +32,10 @@ Warn before local-exec that may trigger macOS Allow sheets (warn the operator be
 No stacked ARs (never stack Action required / card-like prompts in one turn; exception only when the user explicitly asks for another AR during an active host-kept foreground job; one machine, one command, loud banner still applies): section below.
 CoS Desk default theater (CoS Desk is the default theater for factory Merge ARs and status that needs user action; do not post Merge ARs to CoS private 1:1 unless the user asks for privacy; one thing at a time — no dual-window / stacked AR): section below.
 Watch proof (quote last sample or say not watching; do not invent progress; do not claim LOCKED monitor; do not restart watched jobs from status reports): section below.
+Factory docs batches (one combined PR per batch or stacked branches; forbid parallel PRs that all edit the same shared docs files, e.g. docs/ops-terminal.md + README): section below.
+SWITCH TO Mini/MBP before machine-specific Terminal AR (detect machine only from prompt hostname / Sent-from-machine / pasted proof; loud SWITCH TO MBP/Mini callout on mismatch; agents cannot see which Terminal window is focused): section below.
+Continuous keepgoing (after Done on an authorized chain, immediately issue the next AR/task; forbid soft pause fillers like "next judgment when you want"): section below.
+After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -59,13 +63,16 @@ one Action-required.
 ## SWITCH TO Mini/MBP before machine-specific Terminal AR
 
 Before a machine-specific Terminal AR, check the last user input
-source. Detect the host from a **Sent-from-machine** tag or a pasted
-prompt **hostname** proof only. The operator cannot see the focused
-Terminal window.
+source. Detect the machine only from prompt hostname /
+Sent-from-machine / pasted proof. Detect the host from a
+**Sent-from-machine** tag or a pasted prompt **hostname** proof only.
+Agents cannot see which Terminal window is focused. The operator
+cannot see the focused Terminal window.
 
 If last input was **Mini** and the task needs **MBP** (or vice versa),
-call out **SWITCH TO MBP** or **SWITCH TO Mini** explicitly before or
-with the AR. Fail closed: no host proof, no machine-specific card.
+issue a loud SWITCH TO MBP/Mini callout — **SWITCH TO MBP** or
+**SWITCH TO Mini** — explicitly before or with the AR. Fail closed:
+no host proof, no machine-specific card.
 
 One machine per Terminal AR. Open a new card when switching hosts.
 
@@ -323,6 +330,42 @@ Fail closed: if a watch claim cannot quote a last real sample line, explicitly s
 Name the machines as MBP and Mini only. Never a login, home path, or email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, does not sample a live watch, and does not change rem-legacy.
+
+## Factory docs batches (one combined PR per batch or stacked)
+
+Standing factory-docs contract: factory docs batches = one combined PR per batch OR stacked branches; forbid parallel PRs that all edit the same shared docs files (e.g. docs/ops-terminal.md + README).
+
+Do not open parallel same-file docs PRs. A factory docs batch lands in one combined PR, or as stacked branches that merge one at a time. Parallel PRs that all edit `docs/ops-terminal.md` and README collide.
+
+Fail closed: if a factory docs batch would open parallel PRs that all edit the same shared docs files, do not open them. Use one combined PR per batch, or stacked branches.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Continuous keepgoing: immediate next AR after Done
+
+Standing keepgoing contract: after Done on an authorized chain, immediately issue the next AR/task; forbid soft pause fillers like "next judgment when you want".
+
+When a task on an authorized chain completes (Done), CoS immediately issues the next Action required / next task. Do not insert a soft pause between steps of an authorized chain.
+
+Fail closed: if a task on an authorized chain is Done, immediately issue the next AR/task. Do not insert a soft pause filler. Do not say "next judgment when you want".
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## After user PASS on a check: ack and next AR — no re-ask
+
+Standing check-PASS contract: after user PASS / paste for a check, ack PASS and proceed to the next AR; do not re-issue the same check.
+
+If the user already PASSed or pasted proof for a check (e.g. `rate_limit`), ack PASS and ship the next AR. Do not re-ask the same check.
+
+Fail closed: if the user already PASSed / pasted for a check, ack PASS and proceed to the next AR. Do not re-issue the same check. Do not re-ask the same check.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 
