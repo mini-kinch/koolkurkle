@@ -27,7 +27,14 @@ CLI = ROOT / "scripts" / "ask_mail.py"
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 
-EXISTING_RETRIEVE_FLAGS = ("--lane", "--after", "--before", "--fts-only")
+EXISTING_RETRIEVE_FLAGS = (
+    "--lane",
+    "--after",
+    "--before",
+    "--fts-only",
+    "--live-mailboxes",
+    "--trash-live",
+)
 EXISTING_GENERATE_OPT_IN = ("--llm", "--phase generate", "--no-generate", "--phase retrieve")
 
 
@@ -85,6 +92,8 @@ class AskMailHistoryDefaultDocTests(unittest.TestCase):
         self.assertIn("--phase", option_strings)
         self.assertIn("--no-generate", option_strings)
         self.assertIn("--live", option_strings)
+        self.assertIn("--live-mailboxes", option_strings)
+        self.assertIn("--trash-live", option_strings)
         self.assertNotIn("--history", option_strings)
 
         args = parser.parse_args(["invoice"])

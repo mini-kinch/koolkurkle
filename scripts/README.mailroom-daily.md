@@ -73,7 +73,9 @@ is docs only — do not enable cutover or RunAtLoad here
    `imap_fetch_bodies.py`. `CURL_BIN` is **unset** so the canonical body
    script can pick Homebrew curl ≥ 8.17
    (`/opt/homebrew/opt/curl/bin/curl`). Apple `/usr/bin/curl` is
-   fail-closed for BODY.PEEK. New mail only; skip `lane=auth` /
+   fail-closed for BODY.PEEK. Apple `/usr/bin/curl` Little Snitch allow
+   does not cover Homebrew curl. BODY.PEEK Homebrew curl needs its own
+   Little Snitch allow. No live IMAP from this gate. New mail only; skip `lane=auth` /
    auth-shaped / junk inside that script.
 3. **Classify + bills** — `classify.py` then `notify_bills.py` (same chain
    as `mailroom_8pm.py`).
@@ -85,7 +87,10 @@ is docs only — do not enable cutover or RunAtLoad here
    **or** stale `content_hash`. Does **not** restart live rem rows (meta
    present, `content_hash` NULL) unless the operator passes
    `--reembed-legacy` (opt-in with `--quote-strip`; default skip; daily
-   argv does not include it; ops contract in embed-backfill.md). Writer
+   argv does not include it; ops contract in embed-backfill.md).
+   `--embed-live-only` is shipped for a future daily incremental and
+   is **not** on this argv (shipping the flag ≠ starting a job; must
+   not delete existing tombstone embeds; guard ≠ run against rem-legacy). Writer
    lock is per batch, not the rem job. Live rem LaunchAgents keep the
    old text path until EXIT. Long SoR rem-legacy embeds are host-kept
    foreground on the SoR host (not this LaunchAgent). Do not `nohup &`.

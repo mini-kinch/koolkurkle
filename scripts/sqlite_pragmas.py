@@ -21,6 +21,8 @@ import sqlite3
 import sys
 from typing import Any
 
+from refuse_sql_maintenance import refuse_sql_maintenance
+
 # MAILROOM.md §9 writer pin. Homebrew/venv inspect: 3.53.4.
 WRITER_SQLITE_MIN = (3, 51, 3)
 BUSY_TIMEOUT_MS = 30000
@@ -47,6 +49,7 @@ def require_writer_sqlite(conn: sqlite3.Connection | None = None) -> None:
 
 
 def _exec_pragma(conn: sqlite3.Connection, sql: str) -> Any:
+    refuse_sql_maintenance(sql)
     cur = conn.execute(sql)
     try:
         return cur.fetchone()

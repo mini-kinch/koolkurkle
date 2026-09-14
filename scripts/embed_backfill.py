@@ -377,6 +377,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--embed-live-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Future daily incremental: embed present_on_server=1 only. "
+            "Must not delete existing tombstone embeds. Default off. "
+            "Shipping this flag ≠ starting a job. Guard ≠ run against "
+            "rem-legacy. Do not put on rem-legacy argv."
+        ),
+    )
+    parser.add_argument(
         "--num-ctx",
         type=int,
         default=None,
@@ -448,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_chars=min_chars,
                 quote_strip=args.quote_strip,
                 reembed_legacy=args.reembed_legacy,
+                embed_live_only=args.embed_live_only,
                 num_ctx=args.num_ctx,
                 lock=args.lock,
                 lock_path=Path(args.lock_file).expanduser() if args.lock_file else None,

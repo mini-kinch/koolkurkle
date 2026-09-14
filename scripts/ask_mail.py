@@ -6,8 +6,9 @@ Retrieve is ``semantic_search.retrieve()``. Citations follow Hit order
 (RRF when ``Hit.rerank`` is null). Mail bodies are DATA. Drafts only —
 never send. ``ask_audit`` stores query + ids + model + host, never bodies.
 Retrieve default is history (local SoR). Live modes are explicit opt-in
-filters. ``--live`` is an additive SELECT filter only. No ``--history``
-flag.
+filters. ``--live`` is an additive SELECT filter only. ``--live-mailboxes``
+and ``--trash-live`` are further opt-in read-side SELECT filters. Q2
+trash-in-live default is deferred. No ``--history`` flag.
 
 Generate **process** is ``mlx_lm.server`` OpenAI-compatible
 ``/v1/chat/completions`` when ``$MAILROOM_GENERATE_MODEL`` is set
@@ -737,6 +738,8 @@ def retrieve_hits(
     retrieve_kwargs: dict[str, Any] | None,
     rerank_status: dict[str, Any] | None = None,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
 ) -> list[dict[str, Any]]:
     worker = retrieve_fn or ss.retrieve
     kwargs: dict[str, Any] = {
@@ -748,6 +751,8 @@ def retrieve_hits(
         "rerank": rerank,
         "expand_threads": True,
         "live": bool(live),
+        "live_mailboxes": live_mailboxes,
+        "trash_live": bool(trash_live),
     }
     if rerank_status is not None:
         kwargs["rerank_status"] = rerank_status
@@ -763,8 +768,16 @@ def retrieve_hits(
         try:
             return list(worker(query, **kwargs))
         except TypeError:
-            kwargs.pop("live", None)
-            return list(worker(query, **kwargs))
+            kwargs.pop("trash_live", None)
+            try:
+                return list(worker(query, **kwargs))
+            except TypeError:
+                kwargs.pop("live_mailboxes", None)
+                try:
+                    return list(worker(query, **kwargs))
+                except TypeError:
+                    kwargs.pop("live", None)
+                    return list(worker(query, **kwargs))
 
 
 def ask(
@@ -779,6 +792,8 @@ def ask(
     rerank: bool = True,
     fts_only: bool = False,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
     model: str | None = None,
     lm_studio_url: str | None = None,
     retrieve_fn: RetrieveFn | None = None,
@@ -802,6 +817,8 @@ def ask(
         rerank=rerank,
         fts_only=fts_only,
         live=live,
+        live_mailboxes=live_mailboxes,
+        trash_live=trash_live,
         retrieve_fn=retrieve_fn,
         retrieve_kwargs=retrieve_kwargs,
         rerank_status=rerank_status,
@@ -1367,6 +1384,16 @@ def _dispatch_ask(query: str, cfg: dict[str, Any], payload: dict[str, Any]) -> d
         rerank=not bool(payload.get("no_rerank") or cfg.get("no_rerank")),
         fts_only=bool(payload.get("fts_only") or cfg.get("fts_only")),
         live=_as_live_flag(payload["live"]) if "live" in payload else bool(cfg.get("live")),
+        live_mailboxes=(
+            payload["live_mailboxes"]
+            if "live_mailboxes" in payload
+            else cfg.get("live_mailboxes")
+        ),
+        trash_live=(
+            _as_live_flag(payload["trash_live"])
+            if "trash_live" in payload
+            else bool(cfg.get("trash_live"))
+        ),
         model=cfg.get("model"),
         lm_studio_url=cfg.get("lm_studio_url"),
         retrieve_fn=cfg.get("retrieve_fn"),
@@ -1388,6 +1415,16 @@ def _dispatch_hybrid(query: str, cfg: dict[str, Any], payload: dict[str, Any]) -
         rerank=not bool(payload.get("no_rerank") or cfg.get("no_rerank")),
         fts_only=bool(payload.get("fts_only") or cfg.get("fts_only")),
         live=_as_live_flag(payload["live"]) if "live" in payload else bool(cfg.get("live")),
+        live_mailboxes=(
+            payload["live_mailboxes"]
+            if "live_mailboxes" in payload
+            else cfg.get("live_mailboxes")
+        ),
+        trash_live=(
+            _as_live_flag(payload["trash_live"])
+            if "trash_live" in payload
+            else bool(cfg.get("trash_live"))
+        ),
         retrieve_fn=cfg.get("retrieve_fn"),
         retrieve_kwargs=cfg.get("retrieve_kwargs"),
         audit=cfg.get("audit", True),
@@ -1457,6 +1494,20 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
             "description": (
                 "Additive SELECT filter present_on_server=1. "
                 "History remains the default. Does not open IMAP."
+            ),
+        },
+        "live_mailboxes": {
+            "type": "string",
+            "description": (
+                "Opt-in comma-separated IMAP folder SELECT filter. "
+                "Read-side only. Does not decide Q2 trash-in-live."
+            ),
+        },
+        "trash_live": {
+            "type": "boolean",
+            "description": (
+                "Opt-in include Deleted/Trash when live_mailboxes is set. "
+                "Q2 trash-in-live default is deferred."
             ),
         },
     }
@@ -1680,6 +1731,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--live-mailboxes",
+        default=None,
+        help=(
+            "Opt-in comma-separated IMAP folder SELECT filter. "
+            "Read-side only. Does not open IMAP. "
+            "Does not decide Q2 trash-in-live default."
+        ),
+    )
+    parser.add_argument(
+        "--trash-live",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: include Deleted/Trash when --live-mailboxes is set. "
+            "Q2 trash-in-live default is deferred. Bare --live is unchanged."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print the full response object (includes generate_mode / rerank_mode).",
@@ -1779,6 +1848,8 @@ def _cli_config(args: argparse.Namespace) -> dict[str, Any]:
         "before": args.before,
         "fts_only": args.fts_only,
         "live": bool(args.live),
+        "live_mailboxes": args.live_mailboxes,
+        "trash_live": bool(args.trash_live),
         "no_rerank": args.no_rerank,
         "generate": generate,
         "model": args.model,
@@ -1856,6 +1927,8 @@ def main(argv: list[str] | None = None) -> int:
             rerank=not cfg["no_rerank"],
             fts_only=cfg["fts_only"],
             live=cfg["live"],
+            live_mailboxes=cfg.get("live_mailboxes"),
+            trash_live=bool(cfg.get("trash_live")),
             model=cfg["model"],
             lm_studio_url=cfg["lm_studio_url"],
         )
