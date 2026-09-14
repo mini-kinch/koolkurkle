@@ -1,13 +1,15 @@
 # Generate process: mlx_lm.server
 
 Preferred practice after AR 07 (READY Y). Do not re-run live generate
-probes from this document.
+probes from this document. Standing ops contract (process, venv-mlx,
+not LM Studio): [ops-terminal.md](ops-terminal.md).
 
 ## Process vs path string
 
 | Field | Value | Meaning |
 |---|---|---|
 | Process | `mlx_lm.server` | What listens on `127.0.0.1:1234` |
+| Canonical python | `venv-mlx` | `~/MailArchive/venv-mlx/bin/python` (placeholder). Not LM Studio |
 | LaunchAgent | `com.mailroom.mlx-generate` | KeepAlive; generate-down is bootout |
 | Client | OpenAI `POST /v1/chat/completions` | Unchanged |
 | `path` success | `llmster-headless` | **Code string only.** Withhold product-name claim |

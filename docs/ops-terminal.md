@@ -7,7 +7,9 @@ Model/runtime gates (interface proof, neg smoke, fail-open-only):
 [model-runtime-gates.md](model-runtime-gates.md). Rerank default is
 CrossEncoder (fail-open if the optional extra is missing); Ollama
 cannot score Qwen3-Reranker: [rerank.md](rerank.md).
-ask_mail probe: [ask_mail.md](ask_mail.md). Retrieve default is
+ask_mail probe: [ask_mail.md](ask_mail.md). Generate process
+(`mlx_lm.server` on `127.0.0.1:1234`, venv-mlx, not LM Studio):
+[generate-mlx.md](generate-mlx.md). Retrieve default is
 history; live modes are opt-in (`--lane` / `--after` / `--before` /
 `--fts-only` filter history only; no `--live` flag). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
@@ -272,6 +274,24 @@ not a standalone lessons dump.
 After a PR merges to the wrong base, open compare `main...branch` and
 merge that PR so `main` receives the commits. Once a PR number exists,
 only **Merge** remains — do not re-instruct Create.
+
+## Generate process (mlx_lm.server, not LM Studio)
+
+Standing generate process is **`mlx_lm.server`** on `127.0.0.1:1234`
+(`POST /v1/chat/completions`). Canonical python is **venv-mlx**
+(`~/MailArchive/venv-mlx/bin/python` — placeholder path only).
+This is not LM Studio. Do not open LM Studio.app; do not
+`lms server start`. Ollama is embed-only.
+
+ask_mail UI pointer (when `--serve` is already up):
+`http://127.0.0.1:8743/ui`. No secrets.
+
+Recipes and generate-down: [generate-mlx.md](generate-mlx.md).
+ask_mail probe + UI: [ask_mail.md](ask_mail.md).
+
+This gate is docs/tests only. It does not start generate, open
+MailArchive or live sqlite, write embed/SoR data, read Keychain,
+SSH a live machine, change rem-legacy, or hit `:1234` or `:8743`.
 
 ## Early-error traps (model / runtime)
 

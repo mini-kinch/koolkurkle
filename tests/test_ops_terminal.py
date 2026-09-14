@@ -18,6 +18,7 @@ GATES = ROOT / "docs" / "model-runtime-gates.md"
 ASK = ROOT / "docs" / "ask_mail.md"
 EMBED = ROOT / "docs" / "embed-backfill.md"
 TOMBSTONE = ROOT / "docs" / "tombstone.md"
+GENERATE = ROOT / "docs" / "generate-mlx.md"
 
 
 class OpsTerminalDocTests(unittest.TestCase):
@@ -103,6 +104,10 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("never-purge", text)
         self.assertIn("same-file 2-wide", text)
         self.assertIn("embed_merge_shards.py", text)
+        self.assertIn("Generate process (mlx_lm.server, not LM Studio)", text)
+        self.assertIn("venv-mlx", text)
+        self.assertIn("http://127.0.0.1:8743/ui", text)
+        self.assertIn("does not start generate", text)
         self.assertNotIn("/Users/", text.replace("/Users/<operator>/", ""))
         self.assertNotIn("-----BEGIN", text)
         self.assertNotIn("ak_live", text)
@@ -151,6 +156,7 @@ class OpsTerminalDocTests(unittest.TestCase):
             ASK,
             EMBED,
             TOMBSTONE,
+            GENERATE,
         ):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops-terminal.md", text, msg=path.name)

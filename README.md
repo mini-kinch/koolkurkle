@@ -28,6 +28,7 @@ SWITCH TO Mini/MBP before a machine-specific Terminal AR
 (Sent-from-machine or hostname proof only; one machine per AR),
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; no Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
+generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
@@ -67,7 +68,9 @@ same-origin POST /ask; GET /message?id=... for citation click-through;
 `hybrid_search`, `get_thread`, non-sending `draft_reply`). `--serve`
 and `--mcp` both block — two processes. Preferred generate **process** is
 `mlx_lm.server` on `http://127.0.0.1:1234/v1/chat/completions` when
-`$MAILROOM_GENERATE_MODEL` is set; soft-fail to labeled `fail-open-only`
+`$MAILROOM_GENERATE_MODEL` is set; canonical python is **venv-mlx**
+(`~/MailArchive/venv-mlx/bin/python`). Not LM Studio. ask_mail UI
+pointer: `http://127.0.0.1:8743/ui`. Soft-fail to labeled `fail-open-only`
 hits-only if down. Ollama is embed-only (never generate). Client path
 strings `llmster-headless` / `fail-open-only` stay in code — they are
 **not** the process name; withhold the product-name claim
