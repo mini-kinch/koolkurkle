@@ -52,8 +52,9 @@ class AskMailHistoryDefaultDocTests(unittest.TestCase):
         self.assertIn("opt-in", low)
         self.assertIn("history", low)
         self.assertNotIn("EXAMPLE_USER_LOCAL", text)
+        hay = text.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, text)
+            self.assertNotIn(needle, hay)
 
     def test_cli_comment_matches_contract(self):
         text = CLI.read_text(encoding="utf-8")
@@ -94,8 +95,9 @@ class AskMailHistoryDefaultDocTests(unittest.TestCase):
             self.assertIn("ask_mail.md", text, msg=path.name)
             self.assertIn("history", low, msg=path.name)
             self.assertIn("opt-in", low, msg=path.name)
+            hay = text.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
-                self.assertNotIn(needle, text, msg=path.name)
+                self.assertNotIn(needle, hay, msg=path.name)
 
 
 if __name__ == "__main__":

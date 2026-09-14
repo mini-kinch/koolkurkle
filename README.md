@@ -16,7 +16,8 @@ writer, no SMB/NFS dual-write.
 Install, Keychain **name** (`mailroom.imap.app-password`), launchd Keychain
 proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
 **[scripts/README.mailroom-daily.md](scripts/README.mailroom-daily.md)**.
-Human Terminal cards, Keychain create, privacy generics, GitHub SoR
+Human Terminal cards, Keychain create, ZERO personal info on GitHub
+(placeholder classes only), GitHub SoR
 (`mini-kinch/koolkurkle`; Build is staging), Connect ≠ ACL
 (`repositories()` before CloudAgent), and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.

@@ -33,8 +33,9 @@ class RepositoriesBeforeCloudAgentGateTests(unittest.TestCase):
         self.assertIn("does not change rem-legacy", text)
         self.assertIn("parked/historical", text)
         self.assertIn(PARKED, raw)
+        hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, raw)
+            self.assertNotIn(needle, hay)
 
         for lineno, line in enumerate(raw.splitlines(), 1):
             if PARKED in line:
@@ -54,8 +55,9 @@ class RepositoriesBeforeCloudAgentGateTests(unittest.TestCase):
         self.assertIn("repositories()", text)
         self.assertIn("cloudagent", text)
         self.assertNotIn(PARKED, raw)  # parked/historical; not live SoR
+        hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, raw)
+            self.assertNotIn(needle, hay)
 
 
 if __name__ == "__main__":

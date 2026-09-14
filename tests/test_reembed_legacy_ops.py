@@ -104,8 +104,9 @@ class ReembedLegacyOpsContractTests(unittest.TestCase):
         self.assertIn("Do **not** put `--reembed-legacy` on the Mini daily argv", text)
         self.assertIn("No new flags", text)
         self.assertIn("Defaults unchanged", text)
+        hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, raw)
+            self.assertNotIn(needle, hay)
         self.assertNotIn("EXAMPLE_USER_LOCAL", raw)
 
     def test_operators_can_find_the_contract(self):
@@ -115,8 +116,9 @@ class ReembedLegacyOpsContractTests(unittest.TestCase):
             self.assertIn("--reembed-legacy", text, msg=path.name)
             self.assertIn("--quote-strip", text, msg=path.name)
             self.assertIn("embed-backfill.md", text, msg=path.name)
+            hay = text.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
-                self.assertNotIn(needle, text, msg=path.name)
+                self.assertNotIn(needle, hay, msg=path.name)
 
 
 if __name__ == "__main__":

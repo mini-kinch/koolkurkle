@@ -41,8 +41,9 @@ class HostKeptForegroundEmbedOpsTests(unittest.TestCase):
         self.assertNotRegex(raw, LIVE_PID)
         self.assertNotIn("nohup embed_backfill", raw)
         self.assertNotRegex(raw, r"(?m)^nohup\s")
+        hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, raw)
+            self.assertNotIn(needle, hay)
         self.assertNotIn("EXAMPLE_USER_LOCAL", raw)
 
     def test_operators_can_find_the_contract(self):
@@ -53,8 +54,9 @@ class HostKeptForegroundEmbedOpsTests(unittest.TestCase):
             self.assertIn("host-kept", text, msg=path.name)
             self.assertIn("nohup", text, msg=path.name)
             self.assertIn("HARD DECK", raw, msg=path.name)
+            hay = raw.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
-                self.assertNotIn(needle, raw, msg=path.name)
+                self.assertNotIn(needle, hay, msg=path.name)
 
         ops = OPS.read_text(encoding="utf-8")
         self.assertIn(CAFFEINATE, ops)
