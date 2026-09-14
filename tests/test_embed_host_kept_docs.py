@@ -63,7 +63,7 @@ class HostKeptForegroundEmbedOpsTests(unittest.TestCase):
 
         readme = README.read_text(encoding="utf-8")
         self.assertIn(CAFFEINATE, readme)
-        self.assertIn("not the Mini daily path", readme)
+        self.assertIn("not the Mini daily path", " ".join(readme.split()))
         self.assertNotRegex(readme, LIVE_PID)
 
 
