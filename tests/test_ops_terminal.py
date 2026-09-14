@@ -56,7 +56,7 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("silence until Done/Blocked/explicit reply", text)
         self.assertIn("exceptions only STOP / hello / wake-up", text)
         self.assertIn("Do not stack chatter or routine status on an open AR", text)
-        self.assertIn("zero further user-facing messages", text)
+        self.assertIn("Zero further user-facing messages", text)
         self.assertIn("one Action-required card at a time", text)
         self.assertIn("TO DO", text)
         self.assertIn("first check whether the card's instructions", text)
