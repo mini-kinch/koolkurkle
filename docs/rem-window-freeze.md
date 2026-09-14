@@ -1,7 +1,6 @@
 # Rem-window freeze + lock lifetime + generate topology (KOO-64)
 
-Docs/tests only. No live act. Rem-legacy stays running. Rem EXIT 0
-handling is out of scope for this PR.
+Docs/tests only. No live act. Rem-legacy stays running. Rem EXIT 0 handling is out of scope for this PR.
 
 Human Terminal cards: [ops-terminal.md](ops-terminal.md).
 Lock: [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md).
@@ -10,8 +9,7 @@ PR-5: [pr5-cutover.md](pr5-cutover.md).
 
 ## 1. Lock lifetime
 
-`with_writer_lock` is **process-lifetime for rem**, not a per-batch
-drop. Daily `--lock` on `embed_backfill` stays per-batch / heartbeat.
+`with_writer_lock` is **process-lifetime for rem**, not a per-batch drop. Daily `--lock` on `embed_backfill` stays per-batch / heartbeat.
 Do not drop the rem lock between batches.
 
 ## 2. Rem-window default = FREEZE

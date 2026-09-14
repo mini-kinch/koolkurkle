@@ -1,8 +1,7 @@
 # Mini MLX embedder path (design) — KOO-56
 
 Design + holdout contract only. Rem-legacy stays running and
-untouched. No mid-index switch. No live embedder cutover. Docs PR
-Ready ≠ permission to enable Mini MLX against live rem.
+untouched. No mid-index switch. No live embedder cutover. Docs PR Ready ≠ permission to enable Mini MLX against live rem.
 
 Human Terminal cards: [ops-terminal.md](ops-terminal.md).
 Generation key: [embed-generation-key.md](embed-generation-key.md).
@@ -33,7 +32,7 @@ embedder. Never writes SoR.
 
 ## Mini RAM law (HARD DECK)
 
-No co-reside **8B embed + 35B generate** on Mini. Unload embed before
+No co-reside **8B embed + 35B generate** on Mini (no co-reside 8B embed + 35B generate). Unload embed before
 `mlx_lm.server` generate. Bind generate `1234` and ask_mail `8743` to
 `127.0.0.1` only.
 

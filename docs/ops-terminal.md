@@ -912,8 +912,7 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 ## Ready handoff (PASS or fail-open-only)
 
 Standing Ready contract: Ready needs interface proof PASS **or** an
-explicit **fail-open-only** label, plus negative smoke. Docs PR Ready
-≠ permission to enable batch bump / Mini MLX / sidecar against live
+explicit **fail-open-only** label, plus negative smoke. Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live
 rem.
 
 Fail closed: if neither PASS nor fail-open-only is present, do not

@@ -12,7 +12,7 @@ Generation key: [embed-generation-key.md](embed-generation-key.md).
 
 1. **Shard** = `id` + `content_hash` + `model_tag` + `store_dim` +
    `vector` + `checksum`.
-2. **One applier** takes `with_writer_lock`.
+2. **One applier** takes `with_writer_lock`. one applier takes `with_writer_lock`.
 3. Writes **`embedding_meta` + vec only** — never `messages` / FTS /
    IMAP.
 4. **Missing-only INSERT.** Hash mismatch = skip unless explicit

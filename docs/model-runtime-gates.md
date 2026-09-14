@@ -37,8 +37,7 @@ forever): [rerank.md](rerank.md).
 5. **CoS withholds merge AR** without trap 1 PASS **or** an explicit
    **fail-open-only** label on the PR. Ready handoff is PASS or
    explicit fail-open-only, plus interface proof + negative smoke.
-   Docs PR Ready ≠ permission to enable batch bump / Mini MLX /
-   sidecar against live rem.
+   Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live rem.
 
 ## This PR (lock C — CrossEncoder)
 
