@@ -10,6 +10,11 @@ foreground (section below), not `nohup &`.
 ## One writer per `.sqlite` (HARD DECK)
 
 Start **one** `embed_backfill` process against a given `.sqlite`.
+Shipping guard: lockfile or busy refuse **before** a second
+`embed_backfill`. Shipping the guard ≠ starting a writer. Rem-legacy
+≠ Mini daily (HARD DECK): do not restart rem for daily; daily uses
+`--quote-strip`; rem keeps old text until EXIT. Do not touch a
+running rem-legacy job.
 `--lock` takes the PR-0 writer lock **per batch / heartbeat** (not the
 whole rem). It refuses `ACTION_REQUIRED` and a lock held >4h. It does
 **not** make two writers on the same file safe. Same-file 2-wide

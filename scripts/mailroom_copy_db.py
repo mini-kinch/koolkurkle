@@ -25,6 +25,8 @@ import os
 import sys
 from pathlib import Path
 
+from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
+
 COPY_DB_BASENAMES = frozenset(
     {
         "mailroom-copy.sqlite",
@@ -138,7 +140,12 @@ def child_main(argv: list[str] | None = None, *, name: str = "child") -> int:
     """
     del name
     try:
+        refuse_destructive_cli(argv)
         path = bind_copy_db(argv)
+    except DestructiveRefuse as exc:
+        emit_db_mode("refused")
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     except CopyDbRefuse as exc:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)
@@ -214,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        refuse_destructive_cli(argv)
+    except DestructiveRefuse as exc:
+        emit_db_mode("refused")
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     args = build_parser().parse_args(argv)
     try:
         path = resolve_copy_db(args.db)

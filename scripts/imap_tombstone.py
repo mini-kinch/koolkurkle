@@ -3,6 +3,7 @@
 
 Never physically delete iCloud or server mail. Local tombstone only
 (`present_on_server`). No IMAP STORE \\Deleted / EXPUNGE.
+Hard-refuse purge|expunge|empty-trash|delete-gone|drop-messages.
 
 bind_copy_db is the child entry used on Mini: resolve --db /
 $MAILROOM_DB, export MAILROOM_DB, refuse mailroom.sqlite and unset.

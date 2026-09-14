@@ -41,6 +41,7 @@ from mailroom_copy_db import (
     env_db_path,
     resolve_copy_db,
 )
+from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
 
 APPLE_CURL = "/usr/bin/curl"
 APPLE_PY = "/usr/bin/python3"
@@ -546,6 +547,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        refuse_destructive_cli(argv)
+    except DestructiveRefuse as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     args = build_parser().parse_args(argv)
     archive = Path(args.archive).expanduser()
     scripts_dir = (

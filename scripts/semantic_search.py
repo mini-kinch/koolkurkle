@@ -341,6 +341,31 @@ def _date_bounds(after: str | None, before: str | None) -> tuple[str | None, str
     return lo, hi
 
 
+def message_present_on_server(conn: sqlite3.Connection, message_id: str) -> bool:
+    """History-safe presence. Missing column / NULL ⇒ treat as present.
+
+    Deleted-folder is never consulted. ``present=0`` is tombstone only.
+    """
+    if not table_exists(conn, "messages"):
+        return True
+    cols = set(table_columns(conn, "messages"))
+    if "present_on_server" not in cols:
+        return True
+    row = conn.execute(
+        "SELECT present_on_server FROM messages WHERE id = ?",
+        (message_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    val = row[0]
+    if val is None:
+        return True
+    try:
+        return int(val) != 0
+    except (TypeError, ValueError):
+        return True
+
+
 def _message_filters_sql(
     conn: sqlite3.Connection,
     *,
@@ -348,6 +373,7 @@ def _message_filters_sql(
     lane: str | None,
     after: str | None,
     before: str | None,
+    live: bool = False,
 ) -> tuple[str, list[Any]]:
     cols = set(table_columns(conn, "messages"))
     clauses: list[str] = []
@@ -363,6 +389,8 @@ def _message_filters_sql(
     if date_col and hi:
         clauses.append("COALESCE(%s.%s, '') <= ?" % (alias, date_col))
         params.append(hi)
+    if live and "present_on_server" in cols:
+        clauses.append("COALESCE(%s.present_on_server, 1) != 0" % alias)
     if not clauses:
         return "", params
     return " AND " + " AND ".join(clauses), params
@@ -470,6 +498,7 @@ def _subject_like_hits(
     after: str | None,
     before: str | None,
     k: int,
+    live: bool = False,
 ) -> list[str]:
     """Fallback when messages_fts has no subject column: scan messages.subject."""
     if not table_exists(conn, "messages"):
@@ -481,7 +510,7 @@ def _subject_like_hits(
     if not tokens:
         return []
     extra, params = _message_filters_sql(
-        conn, alias="m", lane=lane, after=after, before=before
+        conn, alias="m", lane=lane, after=after, before=before, live=live
     )
     likes = []
     like_params: list[Any] = []
@@ -504,6 +533,7 @@ def fts_search(
     lane: str | None = None,
     after: str | None = None,
     before: str | None = None,
+    live: bool = False,
 ) -> list[dict[str, Any]]:
     """FTS5 BM25 top-k on messages_fts. Subject-boost when the column exists."""
     if not table_exists(conn, "messages_fts"):
@@ -516,7 +546,7 @@ def fts_search(
     extra, params = ("", [])
     if has_messages:
         extra, params = _message_filters_sql(
-            conn, alias="m", lane=lane, after=after, before=before
+            conn, alias="m", lane=lane, after=after, before=before, live=live
         )
     if "subject" in fts_set:
         bm25 = _bm25_weight_sql(fts_cols)
@@ -559,7 +589,7 @@ def fts_search(
         if (r["message_id"] if isinstance(r, sqlite3.Row) else r[0])
     ]
     subject_ids = _subject_like_hits(
-        conn, query, lane=lane, after=after, before=before, k=k
+        conn, query, lane=lane, after=after, before=before, k=k, live=live
     )
     merged: list[str] = []
     seen: set[str] = set()
@@ -635,6 +665,7 @@ def vec_search(
     lane: str | None = None,
     after: str | None = None,
     before: str | None = None,
+    live: bool = False,
 ) -> list[dict[str, Any]]:
     """sqlite-vec KNN top-k on live message_embeddings. Join chunk_vec_map when present."""
     if not table_exists(conn, "message_embeddings"):
@@ -660,7 +691,7 @@ def vec_search(
         mid = rec.get("message_id")
         if not mid:
             continue
-        meta = _load_message(conn, str(mid)) if (lane or lo or hi) else None
+        meta = _load_message(conn, str(mid)) if (lane or lo or hi or live) else None
         if lane or lo or hi:
             assert meta is not None
             if lane and meta.get("lane") and str(meta["lane"]).lower() != lane.lower():
@@ -672,6 +703,8 @@ def vec_search(
                 continue
             if hi and date_s > hi:
                 continue
+        if live and not message_present_on_server(conn, str(mid)):
+            continue
         rank += 1
         out.append(
             {
@@ -925,6 +958,7 @@ def retrieve(
     after: str | None = None,
     before: str | None = None,
     *,
+    live: bool = False,
     db: str | Path | None = None,
     conn: sqlite3.Connection | None = None,
     embed_fn: EmbedFn | None = None,
@@ -981,6 +1015,7 @@ def retrieve(
                         lane=active_lane,
                         after=after,
                         before=before,
+                        live=live,
                     )
                     or []
                 )
@@ -1004,19 +1039,31 @@ def retrieve(
                 lane=active_lane,
                 after=after,
                 before=before,
+                live=live,
             )
 
         fts_hits = fts_search(
-            used, q, k=FTS_K, lane=inferred, after=after, before=before
+            used, q, k=FTS_K, lane=inferred, after=after, before=before, live=live
         )
         ids_hits: list[dict[str, Any]] = []
         if ident:
             ids_hits = mids.match_messages_ids(used, q, k=IDS_K)
+            if live:
+                ids_hits = [
+                    item
+                    for item in ids_hits
+                    if message_present_on_server(
+                        used, str(item.get("message_id") or "")
+                    )
+                ]
         def _passes_vec_filters(item: dict[str, Any], active_lane: str | None) -> bool:
-            """Vec post-filter (KNN / mock hits): lane + date_utc window."""
+            """Vec post-filter (KNN / mock hits): lane + date_utc window + live."""
+            mid = str(item.get("message_id") or "")
+            if live and not message_present_on_server(used, mid):
+                return False
             if not active_lane and not after and not before:
                 return True
-            meta = _load_message(used, str(item.get("message_id") or ""))
+            meta = _load_message(used, mid)
             if active_lane:
                 msg_lane = str(meta.get("lane") or "").lower()
                 if msg_lane != active_lane.lower():
@@ -1042,7 +1089,7 @@ def retrieve(
         if inferred_only and not fts_hits and not vec_hits and not ids_hits:
             inferred = None
             fts_hits = fts_search(
-                used, q, k=FTS_K, lane=None, after=after, before=before
+                used, q, k=FTS_K, lane=None, after=after, before=before, live=live
             )
             vec_hits = [
                 item for item in _run_vec(None) if _passes_vec_filters(item, None)
@@ -1212,6 +1259,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upper bound on messages.date_utc (date-only includes that day).",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help=(
+            "Additive SELECT filter: present_on_server=1. "
+            "History is the default. Does not open IMAP."
+        ),
+    )
+    parser.add_argument(
         "--cosine",
         action="store_true",
         help="Backward-compatible cosine KNN only (embed_lib.semantic_search).",
@@ -1308,6 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
                 lane=args.lane,
                 after=args.after,
                 before=args.before,
+                live=args.live,
                 db=db,
                 model=args.model,
                 ollama_url=args.ollama_url,

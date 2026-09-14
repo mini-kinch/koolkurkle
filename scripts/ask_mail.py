@@ -6,7 +6,8 @@ Retrieve is ``semantic_search.retrieve()``. Citations follow Hit order
 (RRF when ``Hit.rerank`` is null). Mail bodies are DATA. Drafts only —
 never send. ``ask_audit`` stores query + ids + model + host, never bodies.
 Retrieve default is history (local SoR). Live modes are explicit opt-in
-filters. No ``--live`` / ``--history`` flag.
+filters. ``--live`` is an additive SELECT filter only. No ``--history``
+flag.
 
 Generate **process** is ``mlx_lm.server`` OpenAI-compatible
 ``/v1/chat/completions`` when ``$MAILROOM_GENERATE_MODEL`` is set
@@ -52,6 +53,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import semantic_search as ss  # noqa: E402
+from refuse_destructive import DestructiveRefuse, refuse_destructive_cli  # noqa: E402
 from sqlite_pragmas import apply_reader_pragmas  # noqa: E402
 import ask_mail_ui as ask_ui  # noqa: E402
 
@@ -713,6 +715,14 @@ def rerank_note_for(rerank_mode: str) -> str:
     )
 
 
+def _as_live_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def retrieve_hits(
     query: str,
     *,
@@ -726,6 +736,7 @@ def retrieve_hits(
     retrieve_fn: RetrieveFn | None,
     retrieve_kwargs: dict[str, Any] | None,
     rerank_status: dict[str, Any] | None = None,
+    live: bool = False,
 ) -> list[dict[str, Any]]:
     worker = retrieve_fn or ss.retrieve
     kwargs: dict[str, Any] = {
@@ -736,6 +747,7 @@ def retrieve_hits(
         "db": db,
         "rerank": rerank,
         "expand_threads": True,
+        "live": bool(live),
     }
     if rerank_status is not None:
         kwargs["rerank_status"] = rerank_status
@@ -748,7 +760,11 @@ def retrieve_hits(
         return list(worker(query, **kwargs))
     except TypeError:
         kwargs.pop("rerank_status", None)
-        return list(worker(query, **kwargs))
+        try:
+            return list(worker(query, **kwargs))
+        except TypeError:
+            kwargs.pop("live", None)
+            return list(worker(query, **kwargs))
 
 
 def ask(
@@ -762,6 +778,7 @@ def ask(
     generate: bool | None = None,
     rerank: bool = True,
     fts_only: bool = False,
+    live: bool = False,
     model: str | None = None,
     lm_studio_url: str | None = None,
     retrieve_fn: RetrieveFn | None = None,
@@ -784,6 +801,7 @@ def ask(
         before=before,
         rerank=rerank,
         fts_only=fts_only,
+        live=live,
         retrieve_fn=retrieve_fn,
         retrieve_kwargs=retrieve_kwargs,
         rerank_status=rerank_status,
@@ -1348,6 +1366,7 @@ def _dispatch_ask(query: str, cfg: dict[str, Any], payload: dict[str, Any]) -> d
         generate=generate,
         rerank=not bool(payload.get("no_rerank") or cfg.get("no_rerank")),
         fts_only=bool(payload.get("fts_only") or cfg.get("fts_only")),
+        live=_as_live_flag(payload["live"]) if "live" in payload else bool(cfg.get("live")),
         model=cfg.get("model"),
         lm_studio_url=cfg.get("lm_studio_url"),
         retrieve_fn=cfg.get("retrieve_fn"),
@@ -1368,6 +1387,7 @@ def _dispatch_hybrid(query: str, cfg: dict[str, Any], payload: dict[str, Any]) -
         before=payload.get("before", cfg.get("before")),
         rerank=not bool(payload.get("no_rerank") or cfg.get("no_rerank")),
         fts_only=bool(payload.get("fts_only") or cfg.get("fts_only")),
+        live=_as_live_flag(payload["live"]) if "live" in payload else bool(cfg.get("live")),
         retrieve_fn=cfg.get("retrieve_fn"),
         retrieve_kwargs=cfg.get("retrieve_kwargs"),
         audit=cfg.get("audit", True),
@@ -1432,6 +1452,13 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
         "lane": {"type": "string"},
         "after": {"type": "string"},
         "before": {"type": "string"},
+        "live": {
+            "type": "boolean",
+            "description": (
+                "Additive SELECT filter present_on_server=1. "
+                "History remains the default. Does not open IMAP."
+            ),
+        },
     }
     return [
         {
@@ -1643,6 +1670,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip sqlite-vec (empty vec_hits_fn).",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        default=False,
+        help=(
+            "Additive SELECT filter: present_on_server=1. "
+            "History is the default. Does not open IMAP. "
+            "Deleted-folder is not present=0."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print the full response object (includes generate_mode / rerank_mode).",
@@ -1741,6 +1778,7 @@ def _cli_config(args: argparse.Namespace) -> dict[str, Any]:
         "after": args.after,
         "before": args.before,
         "fts_only": args.fts_only,
+        "live": bool(args.live),
         "no_rerank": args.no_rerank,
         "generate": generate,
         "model": args.model,
@@ -1753,6 +1791,11 @@ def _cli_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        refuse_destructive_cli(argv)
+    except DestructiveRefuse as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     args = build_parser().parse_args(argv)
     cfg = _cli_config(args)
     if args.probe:
@@ -1812,6 +1855,7 @@ def main(argv: list[str] | None = None) -> int:
             generate=cfg["generate"],
             rerank=not cfg["no_rerank"],
             fts_only=cfg["fts_only"],
+            live=cfg["live"],
             model=cfg["model"],
             lm_studio_url=cfg["lm_studio_url"],
         )

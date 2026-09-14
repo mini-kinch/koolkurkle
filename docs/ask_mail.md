@@ -16,13 +16,19 @@ Do not default Mini to `mailroom.sqlite`.
 ## Retrieve contract (history default)
 
 Retrieve default is **history**: local SoR sqlite via
-`semantic_search.retrieve()`. There is no `--history` flag — history is
-the standing default. ask_mail does not open IMAP.
+`semantic_search.retrieve()`. History default is **DECIDED**. There is
+no `--history` flag — history is the standing default. ask_mail does
+not open IMAP.
 
-Live modes are explicit **opt-in** filters. The CLI does not ship a
-`--live` retrieve switch. Existing retrieve args that operators may
-pass (`--lane`, `--after`, `--before`, `--fts-only`) filter history
-retrieve only; they do not enable live IMAP.
+Live modes are explicit **opt-in** filters. `--live` is an additive
+SELECT filter only (`present_on_server=1`). It does not open IMAP.
+**Deleted-folder ≠ present=0.** Existing retrieve args that operators
+may pass (`--lane`, `--after`, `--before`, `--fts-only`) also filter
+history retrieve; they do not enable live IMAP.
+
+HARD DECK: never overwrite `scripts/ask_mail.py` with an MCP stub.
+Ready/merge is blocked if `tests/test_ask_mail_never_mcp_stub.py`
+fails. Keep the live CLI size.
 
 Generate is a separate opt-in (`--llm`, `--phase generate`,
 `$MAILROOM_GENERATE_MODEL`) and is not the retrieve default.
@@ -192,6 +198,12 @@ MAILROOM_LM_STUDIO_URL=http://127.0.0.1:1234 \
 # Copy DB until PR-5; Mini SoR is an empty stub.
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
+```
+
+```zsh
+# Mini — ask_mail --live (additive SELECT present_on_server=1; copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --live --json 'SDGE bill'
 ```
 
 ```zsh

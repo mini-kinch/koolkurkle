@@ -67,7 +67,9 @@ is hard-fail (`db_mode=refused`), not fail-open.
    ([tombstone.md](../docs/tombstone.md)).
 2. **Body / FTS** — first of `imap_fetch_bodies_fts.py`,
    `imap_fetch_bodies.py`. `CURL_BIN` is **unset** so the canonical body
-   script can pick Homebrew curl ≥ 8.17. New mail only; skip `lane=auth` /
+   script can pick Homebrew curl ≥ 8.17
+   (`/opt/homebrew/opt/curl/bin/curl`). Apple `/usr/bin/curl` is
+   fail-closed for BODY.PEEK. New mail only; skip `lane=auth` /
    auth-shaped / junk inside that script.
 3. **Classify + bills** — `classify.py` then `notify_bills.py` (same chain
    as `mailroom_8pm.py`).
@@ -332,15 +334,23 @@ Prefer LaunchAgent. If you must use cron on the Mini:
 ## ask_mail (PR-8)
 
 On-demand retrieve + optional `mlx_lm.server` generate. Not in the nightly
-chain. Retrieve default is **history** (local SoR); live modes are
-opt-in filters. No `--live` / `--history` flag. Existing retrieve args
-`--lane` / `--after` / `--before` / `--fts-only` filter history only.
+chain. Retrieve default is **history** (Q1 **DECIDED**; local SoR);
+live modes are opt-in. `--live` is an additive SELECT filter only.
+No `--history` flag. Existing retrieve args
+`--lane` / `--after` / `--before` / `--fts-only` also filter history.
 Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
+MAILROOM sync: **[MAILROOM.md](../docs/MAILROOM.md)**.
 
 ```zsh
 # Mini — ask_mail (copy DB until PR-5; Mini SoR is an empty stub)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
+```
+
+```zsh
+# Mini — ask_mail --live (additive SELECT; copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --live --json 'SDGE bill'
 ```
 
 ```zsh
