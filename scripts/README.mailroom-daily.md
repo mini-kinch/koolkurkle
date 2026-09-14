@@ -63,6 +63,8 @@ is hard-fail (`db_mode=refused`), not fail-open.
 
 1. **Headers** — `imap_newmail.py` then `imap_tombstone.py`. Apple
    `/usr/bin/curl` (`CURL_BIN=/usr/bin/curl`). No Python IMAP sockets.
+   Never physically delete iCloud or server mail — local tombstone only
+   ([tombstone.md](../docs/tombstone.md)).
 2. **Body / FTS** — first of `imap_fetch_bodies_fts.py`,
    `imap_fetch_bodies.py`. `CURL_BIN` is **unset** so the canonical body
    script can pick Homebrew curl ≥ 8.17. New mail only; skip `lane=auth` /

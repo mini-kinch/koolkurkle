@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Daily headers: IMAP tombstone (Apple curl). Copy-only SoR bind.
 
+Never physically delete iCloud or server mail. Local tombstone only
+(`present_on_server`). No IMAP STORE \\Deleted / EXPUNGE.
+
 bind_copy_db is the child entry used on Mini: resolve --db /
 $MAILROOM_DB, export MAILROOM_DB, refuse mailroom.sqlite and unset.
 argv=None reads sys.argv[1:] so a bare bind_copy_db() still sees --db.

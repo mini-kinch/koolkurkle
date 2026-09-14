@@ -11,6 +11,8 @@ ask_mail probe: [ask_mail.md](ask_mail.md). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
 `embed_backfill` single-writer HARD DECK (read this **before** starting
 a backfill): [embed-backfill.md](embed-backfill.md).
+Tombstone / never-purge (never physically delete iCloud or server mail;
+local tombstone only): [tombstone.md](tombstone.md).
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see

@@ -5,7 +5,8 @@ Does not write the DB, does not kill embed jobs, and does not print message
 bodies, Keychain values, or app passwords.
 
 Human Terminal cards (one machine per card, one command per fence):
-[ops-terminal.md](ops-terminal.md).
+[ops-terminal.md](ops-terminal.md). Never-purge / local tombstone only:
+[tombstone.md](tombstone.md).
 
 ## Path
 
