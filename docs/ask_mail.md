@@ -24,7 +24,7 @@ Live modes are explicit **opt-in** filters. `--live` is an additive
 SELECT filter only (`present_on_server=1`). It does not open IMAP.
 **Deleted-folder ≠ present=0.** `--live-mailboxes` and `--trash-live`
 are further opt-in read-side SELECT filters. They do not decide Q2
-(trash-in-live default is deferred). Bare `--live` is unchanged.
+(Q2 trash in live remains deferred). Bare `--live` is unchanged.
 Existing retrieve args that operators
 may pass (`--lane`, `--after`, `--before`, `--fts-only`) also filter
 history retrieve; they do not enable live IMAP.

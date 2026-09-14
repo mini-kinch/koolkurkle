@@ -386,8 +386,8 @@ See [MAILROOM.md](MAILROOM.md) and [tombstone.md](tombstone.md).
 SQL helpers fail-closed refuse `DELETE FROM messages` /
 `DROP TABLE messages` / `TRUNCATE`. Frozen `icloud_mail_all.jsonl`
 is immutable (no rewrite / reconcile). `--live-mailboxes` and
-`--trash-live` are opt-in read-side SELECT filters. Q2 trash-in-live
-default is deferred.
+`--trash-live` are opt-in read-side SELECT filters. Q2 (trash in live)
+remains deferred.
 
 ## IMAP tombstone never STORE Deleted / EXPUNGE
 
@@ -490,7 +490,7 @@ Keychain read/write from this gate.
 
 Operator checklist (docs/tests only; no live IMAP):
 
-1. Apple `/usr/bin/curl` Little Snitch allow does not cover Homebrew curl.
+1. Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
 2. BODY.PEEK uses `/opt/homebrew/opt/curl/bin/curl` and needs its own
    Little Snitch allow.
 3. Headers may still use Apple `/usr/bin/curl`.

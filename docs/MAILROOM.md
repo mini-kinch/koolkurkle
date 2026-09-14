@@ -39,7 +39,7 @@ is the standing default. There is no `--history` flag. Live is
 (`present_on_server=1`). It does not open IMAP. It does not mean
 "exclude Deleted-folder". `--live-mailboxes` and `--trash-live` are
 further opt-in read-side SELECT filters. They do not decide Q2
-(trash-in-live default is deferred).
+(Q2 trash in live remains deferred).
 
 ## §6.1 Incremental embed (pointer)
 
@@ -117,7 +117,7 @@ a second writer. See [sor-health.md](sor-health.md).
 BODY.PEEK prefers Homebrew curl ≥ 8.17 at
 `/opt/homebrew/opt/curl/bin/curl`. Apple `/usr/bin/curl` is
 fail-closed for BODY.PEEK. Headers may still use Apple curl.
-Apple `/usr/bin/curl` Little Snitch allow does not cover Homebrew curl.
+Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
 BODY.PEEK Homebrew curl needs its own Little Snitch allow. No live IMAP.
 Keychain item **name** only: `mailroom.imap.app-password`. Never
 secret values in this repo. No live IMAP. No Keychain read/write

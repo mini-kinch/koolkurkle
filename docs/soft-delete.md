@@ -56,8 +56,8 @@ is an additive SELECT filter only (`present_on_server=1`). It does
 not open IMAP. It does not mean "exclude Deleted-folder".
 
 `--live-mailboxes` and `--trash-live` are further **opt-in**
-read-side SELECT filters. They do not decide Q2 (trash-in-live
-default is deferred). HARD DECK: never overwrite `ask_mail.py` with
+read-side SELECT filters. They do not decide Q2 (trash in live remains
+deferred). HARD DECK: never overwrite `ask_mail.py` with
 an MCP stub.
 
 ## §8 Embed tombstones

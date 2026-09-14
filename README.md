@@ -60,7 +60,7 @@ mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing o
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),
-Homebrew curl Little Snitch allow (Apple `/usr/bin/curl` Little Snitch allow does not cover Homebrew curl; BODY.PEEK `/opt/homebrew/opt/curl/bin/curl` needs its own Little Snitch allow; no live IMAP),
+Homebrew curl Little Snitch allow (Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl; BODY.PEEK `/opt/homebrew/opt/curl/bin/curl` needs its own Little Snitch allow; no live IMAP),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 

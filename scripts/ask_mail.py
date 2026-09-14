@@ -8,7 +8,7 @@ never send. ``ask_audit`` stores query + ids + model + host, never bodies.
 Retrieve default is history (local SoR). Live modes are explicit opt-in
 filters. ``--live`` is an additive SELECT filter only. ``--live-mailboxes``
 and ``--trash-live`` are further opt-in read-side SELECT filters. Q2
-trash-in-live default is deferred. No ``--history`` flag.
+(trash in live) remains deferred. No ``--history`` flag.
 
 Generate **process** is ``mlx_lm.server`` OpenAI-compatible
 ``/v1/chat/completions`` when ``$MAILROOM_GENERATE_MODEL`` is set
@@ -1500,14 +1500,14 @@ def mcp_tool_schemas() -> list[dict[str, Any]]:
             "type": "string",
             "description": (
                 "Opt-in comma-separated IMAP folder SELECT filter. "
-                "Read-side only. Does not decide Q2 trash-in-live."
+                "Read-side only. Does not decide Q2 (trash in live)."
             ),
         },
         "trash_live": {
             "type": "boolean",
             "description": (
                 "Opt-in include Deleted/Trash when live_mailboxes is set. "
-                "Q2 trash-in-live default is deferred."
+                "Q2 (trash in live) remains deferred."
             ),
         },
     }
@@ -1736,7 +1736,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Opt-in comma-separated IMAP folder SELECT filter. "
             "Read-side only. Does not open IMAP. "
-            "Does not decide Q2 trash-in-live default."
+            "Does not decide Q2 (trash in live)."
         ),
     )
     parser.add_argument(
@@ -1745,7 +1745,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Opt-in: include Deleted/Trash when --live-mailboxes is set. "
-            "Q2 trash-in-live default is deferred. Bare --live is unchanged."
+            "Q2 (trash in live) remains deferred. Bare --live is unchanged."
         ),
     )
     parser.add_argument(

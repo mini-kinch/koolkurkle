@@ -73,8 +73,8 @@ is docs only — do not enable cutover or RunAtLoad here
    `imap_fetch_bodies.py`. `CURL_BIN` is **unset** so the canonical body
    script can pick Homebrew curl ≥ 8.17
    (`/opt/homebrew/opt/curl/bin/curl`). Apple `/usr/bin/curl` is
-   fail-closed for BODY.PEEK. Apple `/usr/bin/curl` Little Snitch allow
-   does not cover Homebrew curl. BODY.PEEK Homebrew curl needs its own
+   fail-closed for BODY.PEEK. Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
+   BODY.PEEK Homebrew curl needs its own
    Little Snitch allow. No live IMAP from this gate. New mail only; skip `lane=auth` /
    auth-shaped / junk inside that script.
 3. **Classify + bills** — `classify.py` then `notify_bills.py` (same chain

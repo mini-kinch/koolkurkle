@@ -63,7 +63,7 @@ Guard ≠ run against rem-legacy.
 
 - **`--embed-live-only`** restricts candidates to
   `present_on_server=1`.
-- **Must not delete existing tombstone embeds.** `present=0` rows
+- **must not delete existing tombstone embeds.** `present=0` rows
   stay `skipped_tombstone`; existing `message_embeddings` blobs stay.
 - **Not on rem-legacy argv.** Do not restart rem. Do not put this
   flag on a running rem-legacy job.

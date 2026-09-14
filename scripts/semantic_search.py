@@ -696,7 +696,6 @@ def fts_search(
         live_mailboxes=live_mailboxes,
         trash_live=trash_live,
     )
-    )
     merged: list[str] = []
     seen: set[str] = set()
     for mid in subject_ids + body_ids:
@@ -1422,7 +1421,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Opt-in comma-separated IMAP folder SELECT filter. "
             "Read-side only. Does not open IMAP. "
-            "Does not decide Q2 trash-in-live default."
+            "Does not decide Q2 (trash in live)."
         ),
     )
     parser.add_argument(
@@ -1431,7 +1430,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Opt-in: include Deleted/Trash when --live-mailboxes is set. "
-            "Q2 trash-in-live default is deferred. Bare --live is unchanged."
+            "Q2 (trash in live) remains deferred. Bare --live is unchanged."
         ),
     )
     parser.add_argument(
