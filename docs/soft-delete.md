@@ -74,6 +74,10 @@ same never-purge spirit as `messages`). Do not `DELETE` from
 ballooning. History vs live for tombstoned attach hits follows Q1
 (**history** default). [att0-constraints.md](att0-constraints.md).
 ATT-1..8 implement is FUTURE / out of scope.
+Unified-search (DESIGN ONLY) keeps mail history/`--live` semantics
+and does not invent a unified-live lie for imsg/note (`replica_age`
+only). Never dump Messages/Notes into `mailroom.sqlite`.
+[unified-search-design.md](unified-search-design.md).
 
 ## §10 Out of scope
 

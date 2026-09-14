@@ -53,6 +53,7 @@ Rem-window freeze + lock lifetime + generate topology: section below.
 Post-EXIT catch-up BEFORE PR-5: section below.
 Ready handoff (PASS or fail-open-only; Docs PR Ready ≠ enable against live rem): section below.
 ATT-0 attachment lane constraints (DESIGN ONLY; schema/generation/skip; auth hard-gate; history vs live tombstoned attach; no live SoR catalog/apply while rem; IMAP brew-curl / \Seen rails; never-purge attachment_* + disk caps; Ready ≠ ATT implement): section below.
+Unified-search / ask_all (DESIGN ONLY; Heavy-06 + 06b; three SoRs / three locks / three backups; one tagged RRF; FDA human grant never Grok Bot.app / Linux box; mail --live vs replica_age; notify_bills isolated ops exception; MSG OTP/auth hard-gate; Ready ≠ MSG/NOTE enable): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -914,7 +915,8 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 
 Standing Ready contract: Ready needs interface proof PASS **or** an
 explicit **fail-open-only** label, plus negative smoke. Docs PR Ready ≠ permission to enable batch bump / Mini MLX / sidecar against live
-rem. Ready ≠ ATT implement permission.
+rem. Ready ≠ ATT implement permission. Ready ≠ MSG/NOTE enable
+permission.
 
 Fail closed: if neither PASS nor fail-open-only is present, do not
 Ready. Do not treat Ready as a live rem enable.
@@ -951,6 +953,42 @@ Name the machines as MBP and Mini only. Never a login, home path, or
 email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy. This change does not start an ATT catalog/extract/chunk/embed/apply run.
+
+## Unified-search / ask_all (DESIGN ONLY)
+
+Standing Heavy-06 / 06b contract: land
+`20260914-06-unified-search-design` +
+`20260914-06b-mailroom-gaps-accepted` in
+[unified-search-design.md](unified-search-design.md). Factory note:
+KOO-65..70 Done (#36 merged). Separate SoRs
+(`mailroom.sqlite` / `msgroom.sqlite` / `noteroom.sqlite`) + three
+locks + three backup sets. One tagged RRF
+`source=body|attach|imsg|note`. Blob-tree under `$MAILARCHIVE`
+(`att-blobs` / `imsg-blobs` / `note-blobs` / `att-extract` /
+`att-shards`); copy-out by sha only. FDA is a **human** grant to the
+local indexer/Terminal; never Grok Bot.app / Linux box. `ask_all` on
+the box is retrieve-only against our replicas. Mail `--live` =
+`present_on_server`; imsg/note freshness = `replica_age` only.
+`notify_bills` → Messages is an isolated ops exception (Keychain item
+**name** only), not an `ask_all` send and not an agent-send
+precedent. MSG OTP/auth hard-gate equivalent to mail `lane=auth`;
+never codes in citations / `ask_audit`. MSG-0..2 / NOTE-0..2 / FED-0
+implement is FUTURE / out of scope. Ready ≠ MSG/NOTE enable
+permission. Ready ≠ ATT implement permission.
+
+Fail closed: if FDA would be granted to Grok Bot.app / Linux box,
+refuse. If `ask_all` on the box would open live `chat.db` /
+NoteStore, refuse. If Messages/Notes would be dumped into
+`mailroom.sqlite`, refuse. If a second RRF product would be invented,
+refuse. If unified `--live` would be claimed for iMessage, refuse. If
+`ask_all` would send, refuse. If OTP/auth codes would enter
+citations / `ask_audit`, refuse. If MSG/NOTE implement or SoR apply
+would start while rem holds the lock, refuse.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy. This change does not create msgroom/noteroom, does not open chat.db/NoteStore, does not grant FDA, and does not start a MSG/NOTE pipeline.
 
 ## mlx_lm.server smoke + Mini RAM law HARD DECK
 

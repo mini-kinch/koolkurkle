@@ -37,6 +37,11 @@ tombstoned attach hits (`present_on_server=0`); `--live` hides them.
 Auth hard-gate (`lane=auth`) must not enter attachment extract→FTS.
 `--no-attach` is future ATT-5. ATT-1..8 implement is FUTURE / out of
 scope. Ready ≠ ATT implement permission. No attachment ingest here.
+Unified-search / `ask_all` (DESIGN ONLY; FED-0 reader, one tagged RRF
+`source=body|attach|imsg|note`, per-corpus caps; mail `--live` ≠
+imsg/note `replica_age`):
+[unified-search-design.md](unified-search-design.md).
+MSG/NOTE implement is FUTURE. Ready ≠ MSG/NOTE enable permission.
 
 HARD DECK: never overwrite `scripts/ask_mail.py` with an MCP stub.
 Ready/merge is blocked if `tests/test_ask_mail_never_mcp_stub.py`
