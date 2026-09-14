@@ -241,7 +241,8 @@ GET `/` and `/health` stay JSON (`ui=/ui`, `message=/message`,
 `mlx_lm.server` is a third process (LaunchAgent via
 `install-mlx-generate.sh`). HARD DECK: never overwrite
 `scripts/ask_mail.py` with an MCP stub or tiny placeholder — `--serve`
-/ `--mcp` are flags on the SoR CLI. No attachment ingest.
+/ `--mcp` are flags on the SoR CLI. Ready/merge is blocked if
+`tests/test_ask_mail_never_mcp_stub.py` fails. No attachment ingest.
 
 ```zsh
 # MBP — 1. generate process (KeepAlive; generate-down is bootout)
