@@ -66,7 +66,17 @@ an MCP stub.
 existing tombstone embeds. Shipping the flag ≠ starting a job.
 Guard ≠ run against rem-legacy. See [embed-backfill.md](embed-backfill.md).
 
-## §9 Out of scope
+## §9 ATT-0 never-purge attachment_* (pointer)
+
+Never-purge extends to `attachment_*` tables/rows (docs/tests only;
+same never-purge spirit as `messages`). Do not `DELETE` from
+`attachment_*` as cleanup. Disk caps + skip/`too_big` beat silent
+ballooning. History vs live for tombstoned attach hits follows Q1
+(**history** default). [att0-constraints.md](att0-constraints.md).
+ATT-1..8 implement is FUTURE / out of scope.
+
+## §10 Out of scope
 
 No live IMAP. No Keychain read/write. No RunAtLoad change. No PR-5
-enable. No live MBP SoR writers. Rem-legacy untouched.
+enable. No live MBP SoR writers. Rem-legacy untouched. No ATT
+catalog/extract/chunk/embed/apply run.

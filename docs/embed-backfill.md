@@ -220,3 +220,14 @@ to enable this against live rem. Config:
 Producer → shard files → one applier takes `with_writer_lock` and
 writes `embedding_meta`+vec only. Missing-only INSERT. Never pointed
 at live rem SoR. Design: [compute-sidecar.md](compute-sidecar.md).
+
+## ATT-0 attachment lane (DESIGN ONLY)
+
+Attachment chunks use a separate lane (`chunk_embeddings` 1024-d),
+not `message_embeddings`. Same generation key unless a new generation
+is declared. While rem holds the live SoR lock, only **file-stage**
+work (B/C/E sidecars) or a **copy DB** is legal. Live SoR catalog /
+APPLY_TEXT / APPLY_VEC wait rem EXIT 0 + `with_writer_lock`.
+[att0-constraints.md](att0-constraints.md). ATT-1..8 implement is
+FUTURE / out of scope. Ready ≠ ATT implement permission. This change
+does not start an ATT catalog or apply.
