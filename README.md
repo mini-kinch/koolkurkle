@@ -43,6 +43,7 @@ After Action required: zero chatter until Done (after an Action required, silenc
 No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agent Shell can read; Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal),
 Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed),
 Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only),
+Status/handoff reports include ETA until next Action required (honest range only; no false LOCKED ETAs; no undeliverable certainty slogans),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
