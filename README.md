@@ -44,6 +44,7 @@ No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agen
 Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed),
 Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only),
 Status/handoff reports include ETA until next Action required (honest range only; no false LOCKED ETAs; no undeliverable certainty slogans),
+Warn before local-exec that may trigger macOS Allow sheets (warn the operator before any local-exec / Shell / machine action that may trigger macOS permission Allow sheets; Documents/Desktop/Downloads, screen recording, microphone, camera; do not invent click-paths),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
