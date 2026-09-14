@@ -20,6 +20,7 @@ host-kept foreground embed ops contract:
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; No Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0): section below.
+Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth; fail closed for classify/rules): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -160,6 +161,20 @@ Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite
 This gate is docs/tests only. It does not open MailArchive or live
 sqlite, write embed/SoR data, read Keychain, SSH a live machine, or
 change rem-legacy.
+
+## Auth/2FA mail never Junk or Trash (Auth folder)
+
+Standing classify/rules contract: auth/2FA mail must not be classified into Junk or Trash. The destination hygiene folder is Auth.
+
+Fail closed: if classify or rules cannot place auth/2FA mail into Auth, do not classify it into Junk or Trash. Do not guess Junk. Do not fall through to Trash.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live classify, does not
+open MailArchive or live sqlite, does not write embed/SoR data, does
+not read Keychain, does not SSH a live machine, and does not change
+rem-legacy.
 
 ## Mini daily (copy-only)
 

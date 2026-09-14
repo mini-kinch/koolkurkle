@@ -31,6 +31,8 @@ curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect
 generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
 IMAP live checks via `/usr/bin/curl imaps://` (never Python sockets
 to imap.mail.me.com; Errno 9),
+Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth;
+fail closed for classify/rules),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
