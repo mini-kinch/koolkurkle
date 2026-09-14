@@ -7,7 +7,9 @@ Model/runtime gates (interface proof, neg smoke, fail-open-only):
 [model-runtime-gates.md](model-runtime-gates.md). Rerank default is
 CrossEncoder (fail-open if the optional extra is missing); Ollama
 cannot score Qwen3-Reranker: [rerank.md](rerank.md).
-ask_mail probe: [ask_mail.md](ask_mail.md). Mini-only slim:
+ask_mail probe: [ask_mail.md](ask_mail.md). Retrieve default is
+history; live modes are opt-in (`--lane` / `--after` / `--before` /
+`--fts-only` filter history only; no `--live` flag). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
 `embed_backfill` single-writer HARD DECK (read this **before** starting
 a backfill): [embed-backfill.md](embed-backfill.md).

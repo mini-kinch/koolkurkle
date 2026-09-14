@@ -330,7 +330,10 @@ Prefer LaunchAgent. If you must use cron on the Mini:
 ## ask_mail (PR-8)
 
 On-demand retrieve + optional `mlx_lm.server` generate. Not in the nightly
-chain. Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
+chain. Retrieve default is **history** (local SoR); live modes are
+opt-in filters. No `--live` / `--history` flag. Existing retrieve args
+`--lane` / `--after` / `--before` / `--fts-only` filter history only.
+Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
 
 ```zsh
 # Mini — ask_mail (copy DB until PR-5; Mini SoR is an empty stub)
