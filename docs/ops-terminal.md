@@ -29,6 +29,7 @@ Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed): section belo
 Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only): section below.
 Status/handoff reports include ETA until next Action required (honest range only; no false LOCKED ETAs; no undeliverable certainty slogans): section below.
 Warn before local-exec that may trigger macOS Allow sheets (warn the operator before any local-exec / Shell / machine action that may trigger macOS permission Allow sheets; Documents/Desktop/Downloads, screen recording, microphone, camera; do not invent click-paths): section below.
+No stacked ARs (never stack Action required / card-like prompts in one turn; exception only when the user explicitly asks for another AR during an active host-kept foreground job; one machine, one command, loud banner still applies): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -277,6 +278,20 @@ Fail closed: if a local-exec, Shell, or machine action may raise an Allow sheet,
 
 Name the machines as MBP and Mini only. Never a login, home path, or
 email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## No stacked ARs (exception only when user asks during host-kept job)
+
+Standing ops contract: never stack Action required / card-like prompts in one turn. Do not stack open Action requireds / problems onto the user. No stacked open ARs by default.
+
+Exception only when the user explicitly asks for another AR during an active host-kept foreground job. Parallel next ARs while a long host-kept job runs are OK when the user asks for the next task.
+
+One machine, one command, loud banner still applies.
+
+Fail closed: if the user did not explicitly ask for another AR during an active host-kept foreground job, do not stack Action required / card-like prompts. Do not stack open ARs by default. Do not stack card-like prompts in one turn.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
