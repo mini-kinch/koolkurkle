@@ -24,6 +24,7 @@ Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth; fail clos
 CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS orders Developer, collects status, issues user ARs only; Developer owns Mac process ownership and installs): section below.
 Discuss ≠ authorize (discussion and how questions are not authorization; implement only on do it / approved / implement or standing authorized process; in CoS Desk discussion/troubleshooting, do not act until explicit): section below.
 After Action required: zero chatter until Done (after an Action required, silence until Done/Blocked/explicit reply; exceptions only STOP / hello / wake-up; do not stack chatter or routine status on an open AR): section below.
+No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agent Shell can read; Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -208,6 +209,21 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 Standing ops contract: after an Action required, silence until Done/Blocked/explicit reply. Zero further user-facing messages until Done / Blocked / explicit reply. Exceptions only STOP / hello / wake-up — answer immediately. Do not stack chatter or routine status on an open AR.
 
 Fail closed: if an Action required is still open, do not send further user-facing messages. Stay silent until Done/Blocked/explicit reply. Do not stack chatter. Do not post routine status on an open AR.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## No Terminal AR for facts Shell can read
+
+Standing ops contract: do not issue Terminal AR for facts agent Shell can read. Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal.
+
+If the agent Shell can already read the fact (repo file, git status, local test output, workspace path class), do not issue a Terminal AR. Read it in Shell. Do not ask a human to paste that fact from a Mac Terminal.
+
+Issue a Terminal AR only when the step needs a real Terminal for GUI / Little Snitch / sudo / secrets.
+
+Fail closed: if the agent Shell can read the fact, do not issue a Terminal AR. Do not issue a Terminal AR for ls, cat, git status, or other Shell-readable facts.
 
 Name the machines as MBP and Mini only. Never a login, home path, or
 email.
