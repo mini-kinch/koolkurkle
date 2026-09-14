@@ -13,6 +13,21 @@ Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
 `$HOME/MailArchive/mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`).
 Do not default Mini to `mailroom.sqlite`.
 
+## Retrieve contract (history default)
+
+Retrieve default is **history**: local SoR sqlite via
+`semantic_search.retrieve()`. There is no `--history` flag — history is
+the standing default. ask_mail does not open IMAP.
+
+Live modes are explicit **opt-in** filters. The CLI does not ship a
+`--live` retrieve switch. Existing retrieve args that operators may
+pass (`--lane`, `--after`, `--before`, `--fts-only`) filter history
+retrieve only; they do not enable live IMAP.
+
+Generate is a separate opt-in (`--llm`, `--phase generate`,
+`$MAILROOM_GENERATE_MODEL`) and is not the retrieve default.
+`--no-generate` and `--phase retrieve` keep `generate_mode=hits_only`.
+
 ## Runtimes (named)
 
 | Role | Runtime | Notes |

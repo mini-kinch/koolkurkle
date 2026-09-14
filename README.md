@@ -42,6 +42,11 @@ Ollama generate/chat **cannot** score Qwen3-Reranker. Practice + traps:
 **[docs/rerank.md](docs/rerank.md)**,
 **[docs/model-runtime-gates.md](docs/model-runtime-gates.md)**.
 
+Retrieve default is **history** (local SoR); live modes are opt-in
+filters. No `--live` / `--history` flag. Existing retrieve args
+`--lane` / `--after` / `--before` / `--fts-only` filter history only.
+Recipes: **[docs/ask_mail.md](docs/ask_mail.md)**.
+
 `scripts/ask_mail.py` is the PR-8 CLI + HTTP `127.0.0.1:8743` (GET /ui
 same-origin POST /ask; GET /message?id=... for citation click-through;
 8744 if bound) + MCP (`ask_mail`,

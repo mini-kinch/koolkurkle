@@ -5,6 +5,8 @@ CLI, loopback HTTP (127.0.0.1:8743, or 8744 if bound), and MCP stdio.
 Retrieve is ``semantic_search.retrieve()``. Citations follow Hit order
 (RRF when ``Hit.rerank`` is null). Mail bodies are DATA. Drafts only —
 never send. ``ask_audit`` stores query + ids + model + host, never bodies.
+Retrieve default is history (local SoR). Live modes are explicit opt-in
+filters. No ``--live`` / ``--history`` flag.
 
 Generate **process** is ``mlx_lm.server`` OpenAI-compatible
 ``/v1/chat/completions`` when ``$MAILROOM_GENERATE_MODEL`` is set

@@ -11,5 +11,8 @@ Daily headers child: `imap_tombstone.py`. The GitHub tree is copy-only
 bind (`bind_copy_db`); it does not open IMAP or Keychain. Do not
 implement live IMAP delete here.
 
+ask_mail retrieve default is history; live modes are opt-in
+([ask_mail.md](ask_mail.md)).
+
 Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily
 pipeline: [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
