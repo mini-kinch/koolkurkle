@@ -39,6 +39,7 @@ owns Mac process ownership and installs),
 Discuss ≠ authorize (discussion and how questions are not authorization;
 implement only on do it / approved / implement or standing authorized process;
 in CoS Desk discussion/troubleshooting, do not act until explicit),
+After Action required: zero chatter until Done (after an Action required, silence until Done/Blocked/explicit reply; exceptions only STOP / hello / wake-up; do not stack chatter or routine status on an open AR),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
