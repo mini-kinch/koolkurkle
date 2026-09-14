@@ -26,6 +26,7 @@ Discuss ≠ authorize (discussion and how questions are not authorization; imple
 After Action required: zero chatter until Done (after an Action required, silence until Done/Blocked/explicit reply; exceptions only STOP / hello / wake-up; do not stack chatter or routine status on an open AR): section below.
 No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agent Shell can read; Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal): section below.
 Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed): section below.
+Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -242,6 +243,19 @@ Fail closed: if local Ollama Qwen3-Embedding-8B is not the embed path, do not st
 Name the machines as MBP and Mini only. Never a login, home path, or email.
 
 This gate is docs/tests only. It does not start embed jobs, does not start Ollama, does not run live Mac writers, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Agent Shell non-interactive (no read/getpass)
+
+Standing Agent Shell contract: **Agent Shell is non-interactive**. Forbid `read`/`getpass` in agent scripts. Do not use `read` or `getpass` in agent scripts. Agent Shell cannot collect a secret at a prompt.
+
+security -w last or it stores empty. Do not put the secret on the command line. Secrets only in a **real Terminal**. The operator types the secret there and reports `wc -c` only (length, never the secret). No secret values in the repo.
+
+Fail closed: if a step needs a secret, do not prompt in Agent Shell. Do not use `read` or `getpass` in agent scripts. Do not run `security -w` from Agent Shell. Issue a real-Terminal card; the operator types the secret and reports `wc -c` only.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not write Keychain, does not run live secret entry, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 
