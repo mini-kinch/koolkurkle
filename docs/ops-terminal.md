@@ -10,8 +10,9 @@ cannot score Qwen3-Reranker: [rerank.md](rerank.md).
 ask_mail probe: [ask_mail.md](ask_mail.md). Generate process
 (`mlx_lm.server` on `127.0.0.1:1234`, venv-mlx, not LM Studio):
 [generate-mlx.md](generate-mlx.md). Retrieve default is
-history; live modes are opt-in (`--lane` / `--after` / `--before` /
-`--fts-only` filter history only; no `--live` flag). Mini-only slim:
+history (DECIDED); live modes are opt-in (`--live` additive SELECT
+filter; `--lane` / `--after` / `--before` /
+`--fts-only` also filter history). Mini-only slim:
 [macos-slim/README.md](../macos-slim/README.md).
 `embed_backfill` single-writer HARD DECK (read this **before** starting
 a backfill), including the `--reembed-legacy` ops contract and the
@@ -367,6 +368,22 @@ Name the machines as MBP and Mini only. Never a login, home path, or email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
+## Soft-delete / never-purge CLI refuse
+
+Soft-delete is **DECIDED** (not soft-delete standby). History default
+is **DECIDED**. Hard-refuse CLI verbs `purge` | `expunge` |
+`empty-trash` | `delete-gone` | `drop-messages`. Never physically
+purge. **Deleted-folder ≠ present=0.** `--live` is an additive SELECT
+filter only. See [MAILROOM.md](MAILROOM.md) and [tombstone.md](tombstone.md).
+
+## Mini bodies-fts curl + Keychain name
+
+BODY.PEEK prefers Homebrew curl ≥ 8.17 at
+`/opt/homebrew/opt/curl/bin/curl`. Apple `/usr/bin/curl` is
+fail-closed for BODY.PEEK. Keychain item **name** only:
+`mailroom.imap.app-password`. Never secret values. No live IMAP. No
+Keychain read/write from this gate.
+
 ## Mini daily (copy-only)
 
 Preferred practice: the Mini daily job writes **only** a copy. Set
@@ -391,7 +408,11 @@ use `mailroom-daily-copy.sqlite` then. Full cards:
 Read [embed-backfill.md](embed-backfill.md) **before** starting
 `embed_backfill.py`. Preferred practice:
 
-1. **One writer per `.sqlite`.** `--lock` is a per-batch heartbeat. It
+1. **One writer per `.sqlite`.** Shipping guard: lockfile or busy
+   refuse before a second `embed_backfill`. Shipping the guard ≠
+   starting a writer. Rem-legacy ≠ Mini daily: do not restart rem
+   for daily; daily uses `--quote-strip`; rem keeps old text until
+   EXIT. `--lock` is a per-batch heartbeat. It
    does not make same-file 2-wide safe.
 2. **Shard on separate files** (copy host `mailroom-copy.sqlite` vs
    SoR-named `mailroom.sqlite`), then `embed_merge_shards.py` after

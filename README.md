@@ -59,7 +59,9 @@ and Little Snitch:
 
 New/daily embed uses `--quote-strip` (MAILROOM §6.1 header-prefixed cleaned
 body). Live rem LaunchAgents keep the old text path until EXIT — do not
-restart the 63k backfill or change rem flags. **HARD DECK:** one
+restart rem for daily or change rem flags. Mini bodies-fts prefers
+Homebrew curl ≥ 8.17 (`/opt/homebrew/opt/curl/bin/curl`); Apple
+`/usr/bin/curl` is fail-closed for BODY.PEEK. **HARD DECK:** one
 `embed_backfill` writer per `.sqlite` (`--lock` is per-batch, not
 same-file 2-wide). Read the `--reembed-legacy` ops contract in
 **[docs/embed-backfill.md](docs/embed-backfill.md)** before starting a
@@ -82,10 +84,14 @@ Ollama generate/chat **cannot** score Qwen3-Reranker. Practice + traps:
 **[docs/rerank.md](docs/rerank.md)**,
 **[docs/model-runtime-gates.md](docs/model-runtime-gates.md)**.
 
-Retrieve default is **history** (local SoR); live modes are opt-in
-filters. No `--live` / `--history` flag. Existing retrieve args
-`--lane` / `--after` / `--before` / `--fts-only` filter history only.
-Recipes: **[docs/ask_mail.md](docs/ask_mail.md)**.
+Retrieve default is **history** (Q1 **DECIDED**; local SoR); live
+modes are opt-in. `--live` is an additive SELECT filter only
+(`present_on_server=1`). No `--history` flag. Deleted-folder ≠
+present=0. Existing retrieve args
+`--lane` / `--after` / `--before` / `--fts-only` also filter history.
+Soft-delete / never-purge + MAILROOM sync:
+**[docs/MAILROOM.md](docs/MAILROOM.md)**,
+**[docs/ask_mail.md](docs/ask_mail.md)**.
 
 `scripts/ask_mail.py` is the PR-8 CLI + HTTP `127.0.0.1:8743` (GET /ui
 same-origin POST /ask; GET /message?id=... for citation click-through;

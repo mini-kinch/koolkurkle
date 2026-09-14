@@ -6,7 +6,11 @@ Always skips lane=auth unless --no-skip-auth. Never calls OpenAI.
 Does not call IMAP. Does not rewrite FTS ingest.
 
 One writer per .sqlite is HARD DECK. --lock is per-batch, not a
-same-file 2-wide permit. Read docs/embed-backfill.md before start.
+same-file 2-wide permit. Shipping guard: lockfile or busy refuse
+before a second embed_backfill (shipping the guard ≠ starting a
+writer). Rem-legacy ≠ Mini daily: do not restart rem for daily;
+daily uses --quote-strip; rem keeps old text until EXIT. Read
+docs/embed-backfill.md before start.
 
 Mac (Homebrew Python — Apple /usr/bin/python3 cannot load extensions):
 
@@ -19,9 +23,14 @@ Mac (Homebrew Python — Apple /usr/bin/python3 cannot load extensions):
 from __future__ import annotations
 
 import argparse
+import fcntl
+import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Iterable
 
+from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
 from embed_lib import (
     CHAR_CAP,
     DEFAULT_BATCH_SIZE,
@@ -41,6 +50,174 @@ from embed_lib import (
     validate_char_bounds,
     validate_shard,
 )
+
+EMBED_SCRIPT_NEEDLE = "embed_backfill.py"
+DEFAULT_SOR_BASENAME = "mailroom.sqlite"
+BUSY_REFUSE = "embed guard: busy refuse; another embed_backfill targets this db"
+LOCKFILE_REFUSE = "embed guard: lockfile held; refuse second embed_backfill"
+
+
+@dataclass
+class HeldEmbedGuard:
+    fd: IO[str]
+    path: Path
+
+
+def embed_guard_lock_path(db: Path) -> Path:
+    return Path(str(Path(db).expanduser()) + ".embed.lock")
+
+
+def parse_embed_db_from_cmdline(cmdline: str) -> Path | None:
+    parts = (cmdline or "").replace("\0", " ").split()
+    for i, part in enumerate(parts):
+        if part == "--db" and i + 1 < len(parts):
+            return Path(parts[i + 1]).expanduser()
+        if part.startswith("--db="):
+            return Path(part.split("=", 1)[1]).expanduser()
+    return None
+
+
+def is_embed_backfill_cmdline(cmdline: str) -> bool:
+    return EMBED_SCRIPT_NEEDLE in (cmdline or "").replace("\0", " ")
+
+
+def same_db_path(left: Path, right: Path) -> bool:
+    a = Path(left).expanduser()
+    b = Path(right).expanduser()
+    try:
+        if a.exists() and b.exists():
+            return a.samefile(b)
+    except OSError:
+        pass
+    return a.as_posix() == b.as_posix()
+
+
+def cmdline_targets_db(cmdline: str, db: Path) -> bool:
+    """True when cmdline's --db (or default SoR name) matches db."""
+    target = parse_embed_db_from_cmdline(cmdline)
+    if target is None:
+        return Path(db).expanduser().name == DEFAULT_SOR_BASENAME
+    return same_db_path(target, db)
+
+
+def iter_proc_cmdlines(proc_dir: Path | None = None) -> Iterable[tuple[int, str]]:
+    """Read /proc/*/cmdline when present. No-op on macOS (no /proc)."""
+    root = proc_dir if proc_dir is not None else Path("/proc")
+    if not root.is_dir():
+        return
+    for entry in root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        yield int(entry.name), raw.replace(b"\0", b" ").decode("utf-8", "replace")
+
+
+def iter_ps_cmdlines() -> Iterable[tuple[int, str]]:
+    """Best-effort ``ps`` scan. Unused in unit tests (inject cmdlines)."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-ax", "-o", "pid=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return
+    for line in proc.stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        parts = text.split(None, 1)
+        if not parts or not parts[0].isdigit():
+            continue
+        yield int(parts[0]), parts[1] if len(parts) > 1 else ""
+
+
+def iter_embed_cmdlines(
+    *,
+    proc_dir: Path | None = None,
+    cmdlines: Iterable[tuple[int, str]] | None = None,
+) -> Iterable[tuple[int, str]]:
+    if cmdlines is not None:
+        yield from cmdlines
+        return
+    seen = False
+    for item in iter_proc_cmdlines(proc_dir):
+        seen = True
+        yield item
+    if not seen:
+        yield from iter_ps_cmdlines()
+
+
+def refuse_if_embed_busy(
+    db: Path,
+    *,
+    self_pid: int | None = None,
+    cmdlines: Iterable[tuple[int, str]] | None = None,
+    proc_dir: Path | None = None,
+) -> None:
+    """Refuse if another embed_backfill already targets this db. No start."""
+    me = os.getpid() if self_pid is None else self_pid
+    for pid, line in iter_embed_cmdlines(proc_dir=proc_dir, cmdlines=cmdlines):
+        if pid == me:
+            continue
+        if not is_embed_backfill_cmdline(line):
+            continue
+        if cmdline_targets_db(line, db):
+            raise EmbedError("%s (pid=%s)" % (BUSY_REFUSE, pid))
+
+
+def acquire_embed_start_guard(
+    db: Path,
+    *,
+    lock_path: Path | None = None,
+) -> HeldEmbedGuard | None:
+    """Non-blocking exclusive lockfile. Refuse if held. Does not start a writer.
+
+    If the db parent directory is missing, skip the lockfile (connect will
+    fail closed) so this guard never mkdir's a fake SoR path.
+    """
+    path = Path(lock_path).expanduser() if lock_path else embed_guard_lock_path(db)
+    if not path.parent.is_dir():
+        return None
+    fh = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        fh.close()
+        raise EmbedError(LOCKFILE_REFUSE) from exc
+    return HeldEmbedGuard(fd=fh, path=path)
+
+
+def release_embed_start_guard(held: HeldEmbedGuard | None) -> None:
+    if held is None:
+        return
+    try:
+        fcntl.flock(held.fd.fileno(), fcntl.LOCK_UN)
+    finally:
+        held.fd.close()
+
+
+def refuse_second_embed(
+    db: Path,
+    *,
+    self_pid: int | None = None,
+    cmdlines: Iterable[tuple[int, str]] | None = None,
+    proc_dir: Path | None = None,
+    lock_path: Path | None = None,
+) -> HeldEmbedGuard | None:
+    """Busy refuse, then take the start-gate lockfile. Shipping guard ≠ start."""
+    refuse_if_embed_busy(
+        db, self_pid=self_pid, cmdlines=cmdlines, proc_dir=proc_dir
+    )
+    return acquire_embed_start_guard(db, lock_path=lock_path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -237,13 +414,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        refuse_destructive_cli(argv)
+    except DestructiveRefuse as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     args = build_parser().parse_args(argv)
     db = Path(args.db).expanduser()
+    guard: HeldEmbedGuard | None = None
     try:
         id_mod, id_rem = validate_shard(args.id_mod, args.id_rem)
         max_chars, min_chars = validate_char_bounds(args.max_chars, args.min_chars)
         if args.reembed_legacy and not args.quote_strip:
             raise EmbedError("--reembed-legacy requires --quote-strip")
+        guard = refuse_second_embed(db)
         conn = connect_db(db, args.vec_extension)
         try:
             if not args.quote_strip:
@@ -282,6 +466,8 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        release_embed_start_guard(guard)
     return 0
 
 
