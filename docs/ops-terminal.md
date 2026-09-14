@@ -17,9 +17,7 @@ host-kept foreground embed ops contract:
 [embed-backfill.md](embed-backfill.md).
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
-MBP SoR vs Mini copy-only (MBP is the live Source of Record for
-`mailroom.sqlite`; Mini is copy-only; no Mini writers against SoR;
-PR-5 cutover still gated on rem-legacy EXIT 0): section below.
+MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; No Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -86,9 +84,7 @@ hostname
 
 ## MBP SoR vs Mini copy-only
 
-Standing ops contract: **MBP** is the live Source of Record for
-`mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers
-against SoR. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
+Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers against SoR. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
 
 - MBP holds the live SoR DB (`$HOME/MailArchive/mailroom.sqlite` as
   a path class).
