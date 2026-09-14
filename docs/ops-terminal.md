@@ -151,13 +151,23 @@ falls back to the legacy item when the default name is missing or empty.
 
 ## Privacy on GitHub
 
-Zero personal identifiers in this repo or on GitHub — code, tests, PR
-bodies, and comments. Generics only:
+**ZERO personal info on GitHub** anywhere — code, tests, docs, PR
+titles, PR bodies, comments, commits, and branch names. Docs and
+tests may use **placeholder classes only**. Never a real email, real
+login name, real home directory, or secret.
 
-- `EXAMPLE_USER_LOCAL`
-- `example.invalid`
-- `$HOME` / `__HOME__`
-- `USERNAME`
+Forbidden classes (placeholders only in examples):
+
+- personal email: `user@example.com` / `<operator>@example.com`
+- home paths: `/Users/<operator>/...`, `~/...` as generic
+- Keychain material: `<service>` / `<account>` (names only; never
+  the secret)
+
+Also fine as generics: `EXAMPLE_USER_LOCAL`, `example.invalid`,
+`$HOME` / `__HOME__`, `USERNAME`.
+
+This gate is docs/tests only. It does not read Keychain, open
+MailArchive or live sqlite, or change rem-legacy.
 
 ## GitHub SoR / PR description
 

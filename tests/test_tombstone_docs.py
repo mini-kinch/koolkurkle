@@ -31,8 +31,9 @@ class TombstoneNeverPurgeDocTests(unittest.TestCase):
         self.assertIn("Do not", text)
         self.assertIn("implement live IMAP delete here", text)
         self.assertIn("ops-terminal.md", text)
+        hay = text.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, text)
+            self.assertNotIn(needle, hay)
 
     def test_child_comment_matches_contract(self):
         text = CHILD.read_text(encoding="utf-8")
@@ -49,8 +50,9 @@ class TombstoneNeverPurgeDocTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("tombstone.md", text, msg=path.name)
             self.assertIn("local tombstone only", text.lower(), msg=path.name)
+            hay = text.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
-                self.assertNotIn(needle, text, msg=path.name)
+                self.assertNotIn(needle, hay, msg=path.name)
 
 
 if __name__ == "__main__":
