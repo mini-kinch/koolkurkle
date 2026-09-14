@@ -11,6 +11,8 @@ Retrieve: [ask_mail.md](ask_mail.md). Tombstone:
 [soft-delete.md](soft-delete.md). Embed:
 [embed-backfill.md](embed-backfill.md). ATT-0 attachment lane
 (DESIGN ONLY): [att0-constraints.md](att0-constraints.md).
+Unified-search / ask_all (DESIGN ONLY):
+[unified-search-design.md](unified-search-design.md).
 
 ## §5 Soft-delete (DECIDED)
 
@@ -180,3 +182,25 @@ for hygiene. Never-purge `attachment_*` + disk caps (`too_big`).
 
 This change does not start catalog/extract/chunk/embed/apply. No
 live IMAP. Rem-legacy untouched.
+
+## Unified-search / ask_all (DESIGN ONLY)
+
+Heavy `20260914-06-unified-search-design` + Mailroom 06b gaps.
+Spine: [unified-search-design.md](unified-search-design.md).
+MSG-0..2 / NOTE-0..2 / FED-0 implement is **FUTURE / out of scope**.
+Ready ≠ MSG/NOTE enable permission. Ready ≠ ATT implement permission.
+
+Three SoRs / three locks / three backup sets (`mailroom.sqlite` /
+`msgroom.sqlite` / `noteroom.sqlite`). Never dump Messages/Notes into
+`mailroom.sqlite`. Mail rem lock ≠ msgroom/noteroom locks.
+
+FDA is a human grant to indexer/Terminal; never Grok Bot.app / Linux
+box. `ask_all` on the box is retrieve-only against our replicas.
+Mail `--live` is `present_on_server`; imsg/note freshness is
+`replica_age` only. `notify_bills` → Messages is an isolated ops
+exception (Keychain item **name** only), not an `ask_all` send and
+not an agent-send precedent. MSG OTP/auth hard-gate: never codes in
+citations / `ask_audit`.
+
+This change does not create msgroom/noteroom, does not open
+`chat.db` / NoteStore, does not grant FDA, and does not start rem.

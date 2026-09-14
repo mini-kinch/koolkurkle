@@ -230,4 +230,8 @@ work (B/C/E sidecars) or a **copy DB** is legal. Live SoR catalog /
 APPLY_TEXT / APPLY_VEC wait rem EXIT 0 + `with_writer_lock`.
 [att0-constraints.md](att0-constraints.md). ATT-1..8 implement is
 FUTURE / out of scope. Ready ≠ ATT implement permission. This change
-does not start an ATT catalog or apply.
+does not start an ATT catalog or apply. Unified-search / ask_all
+DESIGN ONLY (separate SoRs; Mini embeds only from copied replicas;
+no MSG/NOTE apply during rem):
+[unified-search-design.md](unified-search-design.md).
+Ready ≠ MSG/NOTE enable.

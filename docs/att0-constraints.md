@@ -99,7 +99,7 @@ Logical tables (names locked for ATT-0 docs/tests):
 
 1. Body FTS + body KNN (existing)  
 2. Chunk FTS + chunk KNN (new)  
-3. One RRF over unified hits tagged `source=body|attach` (lock this; do not invent a second product)  
+3. One RRF over unified hits tagged `source=body|attach` (lock this; do not invent a second product). Same one-RRF product later tags `source=body|attach|imsg|note` — [unified-search-design.md](unified-search-design.md).  
 4. Optional CrossEncoder fail-open labeled  
 5. Collapse to parent `message_id` for generate; citations still list file + page/chunk  
 6. Cap attach snippets in prompt; `--no-attach` flag; `--fts-only` includes chunk FTS  
@@ -173,6 +173,7 @@ Expected docs landing (Developer chooses exact paths on main):
 - New: `docs/attachment-search.md` (or `docs/att0-constraints.md`) containing this contract  
 - Cross-links from `docs/MAILROOM.md`, `docs/ask_mail.md`, `docs/embed-backfill.md`, `docs/tombstone.md`  
 - Tests: contract/needle tests only (no live IMAP, no SoR open required)
+- Later rem-safe sibling (not ATT implement): [unified-search-design.md](unified-search-design.md) — Heavy-06 / 06b; Ready ≠ MSG/NOTE enable
 
 ---
 

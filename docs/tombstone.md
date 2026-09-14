@@ -34,6 +34,10 @@ follow the same mode: visible under history; hidden only under
 parent is tombstoned. Never-purge `attachment_*` tables/rows (same
 never-purge spirit as `messages`); skip/`too_big` beats disk purge.
 [att0-constraints.md](att0-constraints.md).
+Fetch/replica fail ≠ “conversation deleted” for future MSG/NOTE
+replicas (status column, not tombstone-as-gone). Unified-search
+freshness: mail `--live` is `present_on_server`; imsg/note is
+`replica_age` only. [unified-search-design.md](unified-search-design.md).
 
 Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily
 pipeline: [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
