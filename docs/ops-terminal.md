@@ -31,6 +31,7 @@ Status/handoff reports include ETA until next Action required (honest range only
 Warn before local-exec that may trigger macOS Allow sheets (warn the operator before any local-exec / Shell / machine action that may trigger macOS permission Allow sheets; Documents/Desktop/Downloads, screen recording, microphone, camera; do not invent click-paths): section below.
 No stacked ARs (never stack Action required / card-like prompts in one turn; exception only when the user explicitly asks for another AR during an active host-kept foreground job; one machine, one command, loud banner still applies): section below.
 CoS Desk default theater (CoS Desk is the default theater for factory Merge ARs and status that needs user action; do not post Merge ARs to CoS private 1:1 unless the user asks for privacy; one thing at a time — no dual-window / stacked AR): section below.
+Watch proof (quote last sample or say not watching; do not invent progress; do not claim LOCKED monitor; do not restart watched jobs from status reports): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -310,6 +311,18 @@ Name the machines as MBP and Mini only. Never a login, home path, or
 email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Watch proof: quote last sample or say not watching
+
+Standing watch-proof contract: when reporting on a watched job (e.g. rem-legacy / host-kept embed), quote the last real sample line (`PT | job | alive/stalled/EXIT | n/N`) or explicitly say not watching. Do not invent progress. Do not claim LOCKED monitor. Do not restart watched jobs from status reports.
+
+Placeholder classes only: `PT`, `<job>`, `n/N`. Never a live numeric PID as a standing example.
+
+Fail closed: if a watch claim cannot quote a last real sample line, explicitly say not watching. Do not invent progress. Do not claim LOCKED monitor. Do not restart watched jobs from status reports.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, does not sample a live watch, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 
