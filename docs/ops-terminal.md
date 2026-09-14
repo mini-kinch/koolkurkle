@@ -87,9 +87,9 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 ## One command per fence
 
 Put each Terminal command in its own fenced code block. Chat copy
-buttons paste the whole fence; one command fence per copy button keeps
-a single line on the clipboard. Two `security` (or other) lines in one
-fence become one paste.
+buttons paste the whole fence; one command per fence keeps a single
+line on the clipboard. One command fence per copy button. Two
+`security` (or other) lines in one fence become one paste.
 
 ```zsh
 # Mini — example banner (first line of the card)
