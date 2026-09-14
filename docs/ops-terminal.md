@@ -27,6 +27,7 @@ After Action required: zero chatter until Done (after an Action required, silenc
 No Terminal AR for facts Shell can read (do not issue Terminal AR for facts agent Shell can read; Terminal AR only for GUI / Little Snitch / sudo / secrets in a real Terminal): section below.
 Embed model (local Qwen3-Embedding-8B via Ollama; not cloud embed): section below.
 Agent Shell non-interactive (no read/getpass in agent scripts; security -w last or it stores empty; secrets only in real Terminal; report wc -c only): section below.
+Status/handoff reports include ETA until next Action required (honest range only; no false LOCKED ETAs; no undeliverable certainty slogans): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -256,6 +257,16 @@ Name the machines as MBP and Mini only. Never a login, home path, or
 email.
 
 This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not write Keychain, does not run live secret entry, does not SSH a live machine, and does not change rem-legacy.
+
+## Status/handoff: ETA until next Action required
+
+Standing status/handoff contract: status/handoff reports include ETA until next Action required. Honest range only. No false LOCKED ETAs. No undeliverable certainty slogans.
+
+Fail closed: if a status or handoff report cannot give an honest range until the next Action required, do not invent a LOCKED ETA. Do not claim undeliverable certainty. Give an honest range only, or say the ETA is unknown.
+
+Name the machines as MBP and Mini only. Never a login, home path, or email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 
