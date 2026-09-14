@@ -370,7 +370,7 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 
 ## Soft-delete / never-purge CLI refuse
 
-Soft-delete is **DECIDED** (not soft-delete standby). History default
+Soft-delete is **DECIDED** (not a standby contract). History default
 is **DECIDED**. Hard-refuse CLI verbs `purge` | `expunge` |
 `empty-trash` | `delete-gone` | `drop-messages`. Never physically
 purge. **Deleted-folder ≠ present=0.** `--live` is an additive SELECT

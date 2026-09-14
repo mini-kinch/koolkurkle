@@ -12,7 +12,7 @@ Retrieve: [ask_mail.md](ask_mail.md). Tombstone:
 
 ## §5 Soft-delete (DECIDED)
 
-Soft-delete is **DECIDED**. This is not soft-delete standby.
+Soft-delete is **DECIDED**. This is not a standby contract.
 
 Never physically delete iCloud or server mail. Local tombstone only
 (`messages.present_on_server`). The tree hard-refuses destructive CLI
@@ -55,8 +55,16 @@ ask_mail does not take the writer lock.
 Mini unset / `mailroom.sqlite` is a hard-fail (`db_mode=refused`).
 Daily LaunchAgent `MAILROOM_DB` is copy-only
 (`mailroom-copy.sqlite` or `mailroom-daily-copy.sqlite`). ask_mail
-Mini recipes must set `MAILROOM_DB` to that copy. Do not default Mini
-to the empty SoR stub. No RunAtLoad change. No PR-5 cutover here.
+Mini recipes must set `MAILROOM_DB` to that copy:
+
+```zsh
+# Mini — ask_mail (copy DB until PR-5)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
+```
+
+Do not default Mini to the empty SoR stub. No RunAtLoad change. No
+PR-5 cutover here.
 
 ## Mini bodies-fts curl + Keychain name
 

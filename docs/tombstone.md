@@ -1,7 +1,7 @@
 # Tombstone / never-purge SoR contract
 
 Never physically delete iCloud or server mail. Local tombstone only.
-Soft-delete is **DECIDED** (not soft-delete standby). See
+Soft-delete is **DECIDED** (not a standby contract). See
 [MAILROOM.md](MAILROOM.md) §5.
 
 When IMAP no longer lists a message, SoR keeps the local row and marks

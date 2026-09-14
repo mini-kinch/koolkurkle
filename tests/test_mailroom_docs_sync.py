@@ -16,7 +16,8 @@ DAILY = ROOT / "scripts" / "README.mailroom-daily.md"
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 STALE = (
-    "soft-delete standby",
+    "soft-delete is standby",
+    "soft-delete remains standby",
     "history default TBD",
     "history default is standby",
     "live default",
@@ -27,7 +28,7 @@ class MailroomDocsSyncTests(unittest.TestCase):
     def test_mailroom_locks_decided_language(self):
         text = MAILROOM.read_text(encoding="utf-8")
         self.assertIn("§5 Soft-delete (DECIDED)", text)
-        self.assertIn("not soft-delete standby", text)
+        self.assertIn("not a standby contract", text)
         self.assertIn("History default (Q1 DECIDED)", text)
         self.assertIn("Deleted-folder ≠ present=0", text)
         self.assertIn("present_on_server", text)
