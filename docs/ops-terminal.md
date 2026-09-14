@@ -145,7 +145,10 @@ bodies, and comments. Generics only:
 
 ## GitHub SoR / PR description
 
-Build is **staging**. GitHub `main` is the source of record.
+Build is **staging**. GitHub `main` on
+[mini-kinch/koolkurkle](https://github.com/mini-kinch/koolkurkle) is the
+source of record. Clone and remote URLs under
+`9zjf9jpv7z-glitch/koolkurkle` are parked/historical — not live SoR.
 
 To change a PR description, edit the first Conversation comment
 (⋯ → Edit). The title pencil edits the title only.

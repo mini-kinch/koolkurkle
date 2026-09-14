@@ -32,6 +32,8 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("download link", text)
         self.assertIn("official paste", text)
         self.assertIn("Build is **staging**", text)
+        self.assertIn("mini-kinch/koolkurkle", text)
+        self.assertIn("https://github.com/mini-kinch/koolkurkle", text)
         self.assertIn("same cycle", text)
         self.assertIn("MBP", text)
         self.assertIn("Mini", text)
@@ -85,6 +87,35 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertNotIn("kirkbacon", text)
         self.assertNotIn("@me.com", text)
         self.assertNotIn("@icloud.com", text)
+
+    def test_old_github_owner_leftovers_are_parked(self):
+        old = "9zjf9jpv7z-glitch"  # parked/historical GitHub owner — not live SoR
+        skip_dirs = {".git", "__pycache__", ".venv"}
+        leftovers = []
+        for path in ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part in skip_dirs for part in path.parts):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if old in line:
+                    leftovers.append((path.relative_to(ROOT), lineno, line.strip()))
+        for rel, lineno, line in leftovers:
+            low = line.lower()
+            self.assertTrue(
+                "parked" in low or "historical" in low,
+                msg="%s:%s names %s without parked/historical: %s"
+                % (rel, lineno, old, line),
+            )
+
+    def test_readme_names_live_github_sor(self):
+        text = README.read_text(encoding="utf-8")
+        self.assertIn("mini-kinch/koolkurkle", text)
+        self.assertNotIn("9zjf9jpv7z-glitch", text)  # parked/historical; not live SoR
 
     def test_linked_from_existing_docs(self):
         for path in (README, DAILY, RERANK, SLIM, HEALTH, LOCK, GATES, ASK, EMBED):

@@ -17,7 +17,7 @@ Install, Keychain **name** (`mailroom.imap.app-password`), launchd Keychain
 proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
 **[scripts/README.mailroom-daily.md](scripts/README.mailroom-daily.md)**.
 Human Terminal cards, Keychain create, privacy generics, GitHub SoR
-(Build is staging), and Little Snitch:
+(`mini-kinch/koolkurkle`; Build is staging), and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
 New/daily embed uses `--quote-strip` (MAILROOM §6.1 header-prefixed cleaned
