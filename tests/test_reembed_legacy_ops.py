@@ -89,7 +89,8 @@ class ReembedLegacyOpsContractTests(unittest.TestCase):
         self.assertIn(REFUSE, LIB.read_text(encoding="utf-8"))
 
     def test_docs_lock_ops_contract(self):
-        text = EMBED.read_text(encoding="utf-8")
+        raw = EMBED.read_text(encoding="utf-8")
+        text = " ".join(raw.split())
         self.assertIn("`--reembed-legacy` ops contract", text)
         self.assertIn("embed_backfill.py --help", text)
         self.assertIn(REFUSE, text)
@@ -104,8 +105,8 @@ class ReembedLegacyOpsContractTests(unittest.TestCase):
         self.assertIn("No new flags", text)
         self.assertIn("Defaults unchanged", text)
         for needle in PRIVACY_NEEDLES:
-            self.assertNotIn(needle, text)
-        self.assertNotIn("EXAMPLE_USER_LOCAL", text)
+            self.assertNotIn(needle, raw)
+        self.assertNotIn("EXAMPLE_USER_LOCAL", raw)
 
     def test_operators_can_find_the_contract(self):
         for path in (README, OPS, DAILY):
