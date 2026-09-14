@@ -8,6 +8,8 @@ ask_mail with citations is the product; vectors/FTS/IMAP are infrastructure.
 
 iCloud mail retrieve scripts.
 
+Operator HARD DECKs stay **below** this About lede (and in [docs/ops-terminal.md](docs/ops-terminal.md)). Do not lead with crew-ops.
+
 ## Mini daily RAG
 
 LaunchAgent `com.mailroom.daily` on **mac-mini.local** (set your macOS login) runs the
