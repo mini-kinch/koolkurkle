@@ -41,6 +41,29 @@ one Action-required.
 - Open a new card when switching machines. Keychain items and `$HOME`
   paths then stay on the host they belong to.
 
+## Verify tool exists before Terminal AR
+
+Before a Terminal AR or a "run this tool" instruction, confirm the
+binary or script exists on the named machine (**MBP** vs **Mini**).
+Do not invent tool paths. Fail closed: no existence proof, no card.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email. If a path class is needed, use placeholders only
+(`/usr/bin/<tool>`, `$HOME` as generic, `/Users/<operator>/...`).
+
+```zsh
+# Mini — prove the named binary exists before the run card
+command -v <tool>
+```
+
+```zsh
+# MBP — prove the named binary exists before the run card
+command -v <tool>
+```
+
+This gate is docs/tests only. It does not SSH a live machine, open
+MailArchive or live sqlite, read Keychain, or change rem-legacy.
+
 ## One command per fence
 
 Put each Terminal command in its own fenced code block. Chat copy

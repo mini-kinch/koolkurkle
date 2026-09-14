@@ -19,7 +19,9 @@ proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
 Human Terminal cards, Keychain create, ZERO personal info on GitHub
 (placeholder classes only), GitHub SoR
 (`mini-kinch/koolkurkle`; Build is staging), Connect ≠ ACL
-(`repositories()` before CloudAgent), and Little Snitch:
+(`repositories()` before CloudAgent), verify-tool-exists before
+Terminal AR (named machine MBP vs Mini; do not invent tool paths),
+and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
 New/daily embed uses `--quote-strip` (MAILROOM §6.1 header-prefixed cleaned

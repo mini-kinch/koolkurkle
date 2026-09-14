@@ -24,6 +24,8 @@ class OpsTerminalDocTests(unittest.TestCase):
     def test_covers_required_topics(self):
         text = OPS.read_text(encoding="utf-8")
         self.assertIn("One machine per card", text)
+        self.assertIn("Verify tool exists before Terminal AR", text)
+        self.assertIn("Do not invent tool paths", text)
         self.assertIn("one Action-required card at a time", text)
         self.assertIn("TO DO", text)
         self.assertIn("first check whether the card's instructions", text)
