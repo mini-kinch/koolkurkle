@@ -52,6 +52,15 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
 
 Preferred split: **separate DBs and/or machines**, then merge.
 
+Supported CLI: `scripts/embed_merge_shards.py` wraps
+`embed_lib.merge_shards`. Missing-only: copy embed rows from
+`--secondary` that are absent on `--primary` for the same
+`(message_id, model, model_version)`. Existing primary rows stay
+untouched. Never deletes primary rows. Never writes `messages` / FTS.
+Never calls Ollama or IMAP. `--dry-run` counts without commit.
+`--primary` and `--secondary` must be **different files**. This merge
+does **not** make same-file 2-wide writers safe.
+
 Example names only:
 
 | Role | File |
@@ -76,8 +85,13 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py -
 ```
 
 ```zsh
-# merge host — after both embed writers EXIT 0; other writer paused
-$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_merge_shards.py
+# merge host — dry-run after both embed writers EXIT 0; other writer paused
+$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_merge_shards.py --primary $HOME/MailArchive/mailroom.sqlite --secondary $HOME/MailArchive/mailroom-copy.sqlite --dry-run
+```
+
+```zsh
+# merge host — commit missing-only rows (same paths; other writer paused)
+$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_merge_shards.py --primary $HOME/MailArchive/mailroom.sqlite --secondary $HOME/MailArchive/mailroom-copy.sqlite
 ```
 
 Same rule for `--id-mod` / `--id-rem`: separate files (and/or hosts),
