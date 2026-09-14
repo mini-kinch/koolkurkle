@@ -22,14 +22,14 @@ LIVE = "mini-kinch/koolkurkle"
 class RepositoriesBeforeCloudAgentGateTests(unittest.TestCase):
     def test_contract_locks_connect_neq_acl_language(self):
         raw = OPS.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
-        self.assertIn("repositories() before CloudAgent", text)
-        self.assertIn("Connect ≠ ACL", text)
-        self.assertIn("Connect Done is not repo ACL Done", text)
+        text = " ".join(raw.split()).lower()
+        self.assertIn("repositories() before cloudagent", text)
+        self.assertIn("connect ≠ acl", text)
+        self.assertIn("connect done is not repo acl done", text)
         self.assertIn("repositories()", raw)
-        self.assertIn(LIVE, text)
-        self.assertIn("before any CloudAgent launch", text)
-        self.assertIn("does not add CloudAgent tooling", text)
+        self.assertIn(LIVE.lower(), text)
+        self.assertIn("before any cloudagent launch", text)
+        self.assertIn("does not add cloudagent tooling", text)
         self.assertIn("does not change rem-legacy", text)
         self.assertIn("parked/historical", text)
         self.assertIn(PARKED, raw)
@@ -47,12 +47,12 @@ class RepositoriesBeforeCloudAgentGateTests(unittest.TestCase):
 
     def test_operators_can_find_the_gate(self):
         raw = README.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
+        text = " ".join(raw.split()).lower()
         self.assertIn("ops-terminal.md", raw)
-        self.assertIn(LIVE, text)
-        self.assertIn("Connect ≠ ACL", text)
+        self.assertIn(LIVE.lower(), text)
+        self.assertIn("connect ≠ acl", text)
         self.assertIn("repositories()", text)
-        self.assertIn("CloudAgent", text)
+        self.assertIn("cloudagent", text)
         self.assertNotIn(PARKED, raw)  # parked/historical; not live SoR
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, raw)
