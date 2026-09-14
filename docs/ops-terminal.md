@@ -21,6 +21,7 @@ Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; No Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0): section below.
 Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth; fail closed for classify/rules): section below.
+CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS orders Developer, collects status, issues user ARs only; Developer owns Mac process ownership and installs): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -175,6 +176,17 @@ This gate is docs/tests only. It does not run live classify, does not
 open MailArchive or live sqlite, does not write embed/SoR data, does
 not read Keychain, does not SSH a live machine, and does not change
 rem-legacy.
+
+## CoS HOLD Mac writers (Developer owns Mac ops)
+
+Standing ops contract: CoS HOLD on specialist Mac writer ops. CoS does not run Mac writer/recovery ops. CoS orders Developer, collects status, issues user ARs only. Developer owns Mac process ownership and installs.
+
+Fail closed: if a Mac writer, recovery, process, or install step would require CoS to run it, do not run it. Order Developer. Collect status. Issue a user AR only.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini daily (copy-only)
 

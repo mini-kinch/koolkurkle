@@ -33,6 +33,9 @@ IMAP live checks via `/usr/bin/curl imaps://` (never Python sockets
 to imap.mail.me.com; Errno 9),
 Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth;
 fail closed for classify/rules),
+CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS
+orders Developer, collects status, issues user ARs only; Developer
+owns Mac process ownership and installs),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
