@@ -25,7 +25,10 @@ interactive read), Keychain create, ZERO personal info on GitHub
 (`repositories()` before CloudAgent), verify-tool-exists before
 Terminal AR (named machine MBP vs Mini; do not invent tool paths),
 SWITCH TO Mini/MBP before a machine-specific Terminal AR
-(Sent-from-machine or hostname proof only; one machine per AR),
+(Sent-from-machine or hostname proof only; one machine per AR;
+detect machine only from prompt hostname / Sent-from-machine / pasted proof;
+loud SWITCH TO MBP/Mini callout when last input mismatches the target;
+agents cannot see which Terminal window is focused),
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; no Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
 generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
@@ -48,6 +51,9 @@ Warn before local-exec that may trigger macOS Allow sheets (warn the operator be
 No stacked ARs (never stack Action required / card-like prompts in one turn; exception only when the user explicitly asks for another AR during an active host-kept foreground job; one machine, one command, loud banner still applies),
 CoS Desk default theater (CoS Desk is the default theater for factory Merge ARs and status that needs user action; do not post Merge ARs to CoS private 1:1 unless the user asks for privacy; one thing at a time — no dual-window / stacked AR),
 Watch proof (quote last sample or say not watching; do not invent progress; do not claim LOCKED monitor; do not restart watched jobs from status reports),
+Factory docs batches (one combined PR per batch or stacked branches; forbid parallel PRs that all edit the same shared docs files, e.g. docs/ops-terminal.md + README),
+Continuous keepgoing (after Done on an authorized chain, immediately issue the next AR/task; forbid soft pause fillers like "next judgment when you want"),
+After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
