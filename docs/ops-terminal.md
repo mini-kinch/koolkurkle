@@ -166,6 +166,19 @@ Build is **staging**. GitHub `main` on
 source of record. Clone and remote URLs under
 `9zjf9jpv7z-glitch/koolkurkle` are parked/historical — not live SoR.
 
+### repositories() before CloudAgent (Connect ≠ ACL)
+
+Cursor **Connect Done is not repo ACL Done** (Connect ≠ ACL). Connect
+status does not mean a CloudAgent may launch against this tree.
+
+Before any CloudAgent launch, confirm `repositories()` includes
+`mini-kinch/koolkurkle`. If that listing omits this repo, do not
+launch. Do not treat `9zjf9jpv7z-glitch/koolkurkle` (parked/historical)
+as live SoR.
+
+This gate is ops practice. It does not add CloudAgent tooling and does
+not change rem-legacy, MailArchive, or sqlite writers.
+
 To change a PR description, edit the first Conversation comment
 (⋯ → Edit). The title pencil edits the title only.
 
