@@ -21,6 +21,8 @@ Human Terminal cards, Keychain create, ZERO personal info on GitHub
 (`mini-kinch/koolkurkle`; Build is staging), Connect ≠ ACL
 (`repositories()` before CloudAgent), verify-tool-exists before
 Terminal AR (named machine MBP vs Mini; do not invent tool paths),
+SWITCH TO Mini/MBP before a machine-specific Terminal AR
+(Sent-from-machine or hostname proof only; one machine per AR),
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; no Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
 and Little Snitch:

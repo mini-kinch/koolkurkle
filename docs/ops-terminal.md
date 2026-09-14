@@ -42,6 +42,25 @@ one Action-required.
 - Open a new card when switching machines. Keychain items and `$HOME`
   paths then stay on the host they belong to.
 
+## SWITCH TO Mini/MBP before machine-specific Terminal AR
+
+Before a machine-specific Terminal AR, check the last user input
+source. Detect the host from a **Sent-from-machine** tag or a pasted
+prompt **hostname** proof only. The operator cannot see the focused
+Terminal window.
+
+If last input was **Mini** and the task needs **MBP** (or vice versa),
+call out **SWITCH TO MBP** or **SWITCH TO Mini** explicitly before or
+with the AR. Fail closed: no host proof, no machine-specific card.
+
+One machine per Terminal AR. Open a new card when switching hosts.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not SSH a live machine, open
+MailArchive or live sqlite, read Keychain, or change rem-legacy.
+
 ## Verify tool exists before Terminal AR
 
 Before a Terminal AR or a "run this tool" instruction, confirm the
