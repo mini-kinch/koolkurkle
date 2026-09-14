@@ -66,6 +66,41 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
 Do not default Mini to the empty SoR stub. No RunAtLoad change. No
 PR-5 cutover here.
 
+## imap_tombstone IMAP verbs (local present_on_server only)
+
+The tombstone path is local `present_on_server` only. Never IMAP
+`STORE \Deleted`, `EXPUNGE`, or Trash-purge. Refuse those verbs.
+See [tombstone.md](tombstone.md).
+
+## with_writer_lock sole-writer wrapper
+
+`with_writer_lock` is the sole-writer wrapper. Busy/lock refuse
+before a second writer. Shipping this guard is not starting
+rem-legacy. See [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md).
+
+## mailroom_copy_db rem-gated copy
+
+Mini copy only when rem-legacy is not writing, or after rem-legacy
+**EXIT 0**. No SMB/NFS dual-write. No live MBP→Mini copy in this
+change. See [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
+
+## bind_copy_db / daily children honor MAILROOM_DB
+
+`bind_copy_db(argv=None)` reads `sys.argv[1:]`. Daily children open
+the copy DB. Refuse the SoR stub (`mailroom.sqlite`). No live SoR
+open from these tests.
+
+## PR-5 cutover checklist (docs only — do not enable)
+
+Gated on rem-legacy **EXIT 0** plus Mini SoR switch steps. This
+change does **not** enable PR-5 cutover and does **not** enable
+RunAtLoad. Checklist: [pr5-cutover.md](pr5-cutover.md).
+
+## sor_health_pack read-only / Mini-copy OK
+
+sor_health_pack is read-only. Mini on a copy DB is OK and is not
+a second writer. See [sor-health.md](sor-health.md).
+
 ## Mini bodies-fts curl + Keychain name
 
 BODY.PEEK prefers Homebrew curl ≥ 8.17 at

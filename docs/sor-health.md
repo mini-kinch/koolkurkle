@@ -1,8 +1,9 @@
 # SoR health pack
 
 Read-only integrity + FTS / hybrid smoke for the live Mac mailroom SoR.
-Does not write the DB, does not kill embed jobs, and does not print message
-bodies, Keychain values, or app passwords.
+sor_health_pack is read-only. Does not write the DB, does not kill
+embed jobs, and does not print message bodies, Keychain values, or app
+passwords. Mini on a copy DB is OK and is not a second writer.
 
 Human Terminal cards (one machine per card, one command per fence):
 [ops-terminal.md](ops-terminal.md). Never-purge / local tombstone only:

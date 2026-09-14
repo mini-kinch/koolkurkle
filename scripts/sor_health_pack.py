@@ -6,6 +6,8 @@ expanduser — no machine home hardcodes). Prints counts, integrity, FTS hit
 counts / top subjects, and hybrid ``retrieve()`` vec_rank presence. Never
 prints bodies, Keychain values, or app passwords. Does not kill writers.
 
+Read-only: does not write the DB. Mini on a copy DB is OK and is not a second writer. Do not treat health as a live SoR writer.
+
 Exit: 0 ok-or-warnings, 1 integrity not ok, 2 missing/unreadable DB.
 """
 

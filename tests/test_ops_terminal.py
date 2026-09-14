@@ -19,6 +19,8 @@ ASK = ROOT / "docs" / "ask_mail.md"
 EMBED = ROOT / "docs" / "embed-backfill.md"
 TOMBSTONE = ROOT / "docs" / "tombstone.md"
 GENERATE = ROOT / "docs" / "generate-mlx.md"
+PR5 = ROOT / "docs" / "pr5-cutover.md"
+MAILROOM = ROOT / "docs" / "MAILROOM.md"
 
 
 class OpsTerminalDocTests(unittest.TestCase):
@@ -136,6 +138,28 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("after user PASS / paste for a check", text)
         self.assertIn("ack PASS and proceed to the next AR", text)
         self.assertIn("do not re-issue the same check", text)
+        self.assertIn("IMAP tombstone never STORE Deleted / EXPUNGE", text)
+        self.assertIn("local present_on_server only", text)
+        self.assertIn("Trash-purge", text)
+        self.assertIn("with_writer_lock sole-writer wrapper", text)
+        self.assertIn("Busy/lock refuse before a second writer", text)
+        self.assertIn("Shipping this guard", text)
+        self.assertIn("is not starting rem-legacy", text)
+        self.assertIn("mailroom_copy_db rem-gated copy", text)
+        self.assertIn("Mini copy only when rem-legacy is", text)
+        self.assertIn("No SMB/NFS dual-write", text)
+        self.assertIn("bind_copy_db / daily children honor MAILROOM_DB", text)
+        self.assertIn("argv=None", text)
+        self.assertIn("sys.argv[1:]", text)
+        self.assertIn("Refuse the SoR stub", text)
+        self.assertIn("PR-5 cutover checklist (docs only — do not enable)", text)
+        self.assertIn("Mini SoR switch steps", text)
+        self.assertIn("does **not** enable PR-5 cutover", text)
+        self.assertIn("does **not** enable RunAtLoad", text)
+        self.assertIn("pr5-cutover.md", text)
+        self.assertIn("sor_health_pack read-only / Mini-copy OK", text)
+        self.assertIn("Mini on a copy DB is OK", text)
+        self.assertIn("is not a second writer", text)
         self.assertIn("one Action-required card at a time", text)
         self.assertIn("TO DO", text)
         self.assertIn("first check whether the card's instructions", text)
@@ -261,6 +285,8 @@ class OpsTerminalDocTests(unittest.TestCase):
             EMBED,
             TOMBSTONE,
             GENERATE,
+            PR5,
+            MAILROOM,
         ):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops-terminal.md", text, msg=path.name)

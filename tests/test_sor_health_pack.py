@@ -482,6 +482,18 @@ class HygieneTests(unittest.TestCase):
         self.assertNotIn("launchctl bootout", text)
         self.assertNotIn("launchctl kill", text)
 
+    def test_health_is_read_only_and_mini_copy_is_not_a_writer(self):
+        src = (SCRIPTS / "sor_health_pack.py").read_text(encoding="utf-8")
+        docs = (ROOT / "docs" / "sor-health.md").read_text(encoding="utf-8")
+        self.assertIn("Read-only", src)
+        self.assertIn("Mini on a copy DB is OK", src)
+        self.assertIn("not a second writer", src)
+        self.assertNotIn("INSERT ", src)
+        self.assertNotIn("UPDATE ", src)
+        self.assertNotIn("DELETE ", src)
+        self.assertIn("sor_health_pack is read-only", docs)
+        self.assertIn("Mini on a copy DB is OK and is not a second writer", docs)
+
     def test_docs_label_mbp_and_mini(self):
         docs = (ROOT / "docs" / "sor-health.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

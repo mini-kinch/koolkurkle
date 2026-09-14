@@ -59,6 +59,46 @@ class RefuseDestructiveUnitTests(unittest.TestCase):
             self.assertEqual(rd.main(["--json"]), 0)
 
 
+class RefuseImapPurgeVerbTests(unittest.TestCase):
+    def test_finds_store_deleted_expunge_trash_purge(self):
+        self.assertEqual(rd.find_imap_purge_verb(["STORE"]), "store")
+        self.assertEqual(rd.find_imap_purge_verb(["\\Deleted"]), "\\deleted")
+        self.assertEqual(rd.find_imap_purge_verb(["--expunge"]), "expunge")
+        self.assertEqual(rd.find_imap_purge_verb(["Trash-purge"]), "trash-purge")
+        self.assertIsNone(rd.find_imap_purge_verb(["--db", "/tmp/mailroom-copy.sqlite"]))
+
+    def test_refuse_imap_purge_message_is_local_only(self):
+        with self.assertRaises(rd.DestructiveRefuse) as ctx:
+            rd.refuse_imap_purge_cli(["STORE", "\\Deleted"])
+        msg = str(ctx.exception)
+        self.assertIn(rd.IMAP_PURGE_PREFIX, msg)
+        self.assertIn("STORE \\Deleted", msg)
+        self.assertIn("present_on_server", msg)
+        self.assertIn("Trash-purge", msg)
+        for needle in PRIVACY_NEEDLES:
+            self.assertNotIn(needle, msg)
+
+    def test_tombstone_refuses_imap_purge_verbs(self):
+        copy = "/tmp/mailroom-copy.sqlite"
+        for argv in (
+            ["STORE", "--db", copy],
+            ["\\Deleted", "--db", copy],
+            ["Trash-purge", "--db", copy],
+            ["--expunge", "--db", copy],
+        ):
+            err = io.StringIO()
+            out = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(out):
+                rc = imap_tombstone.main(argv)
+            self.assertEqual(rc, 2, msg=argv)
+            self.assertNotIn("opened_db=", out.getvalue())
+            self.assertTrue(
+                rd.REFUSE_PREFIX in err.getvalue()
+                or rd.IMAP_PURGE_PREFIX in err.getvalue(),
+                msg=err.getvalue(),
+            )
+
+
 class RefuseDestructiveWiredCliTests(unittest.TestCase):
     def _assert_refuses(self, fn, argv: list[str]) -> None:
         err = io.StringIO()

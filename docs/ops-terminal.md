@@ -37,6 +37,12 @@ Factory docs batches (one combined PR per batch or stacked branches; forbid para
 SWITCH TO Mini/MBP before machine-specific Terminal AR (detect machine only from prompt hostname / Sent-from-machine / pasted proof; loud SWITCH TO MBP/Mini callout on mismatch; agents cannot see which Terminal window is focused): section below.
 Continuous keepgoing (after Done on an authorized chain, immediately issue the next AR/task; forbid soft pause fillers like "next judgment when you want"): section below.
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check): section below.
+IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge): section below.
+with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy): section below.
+mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write): section below.
+bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub): section below.
+PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad): section below.
+sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer): section below.
 
 These cards are chat/operator steps. They are not the writer-lock file
 `~/MailArchive/ACTION_REQUIRED` (see
@@ -375,6 +381,93 @@ is **DECIDED**. Hard-refuse CLI verbs `purge` | `expunge` |
 `empty-trash` | `delete-gone` | `drop-messages`. Never physically
 purge. **Deleted-folder ≠ present=0.** `--live` is an additive SELECT
 filter only. See [MAILROOM.md](MAILROOM.md) and [tombstone.md](tombstone.md).
+
+## IMAP tombstone never STORE Deleted / EXPUNGE
+
+Standing tombstone contract: `imap_tombstone` / the tombstone path is
+local `present_on_server` only. Never IMAP `STORE \Deleted`,
+`EXPUNGE`, or Trash-purge. Refuse those verbs.
+
+Fail closed: if argv names IMAP `STORE`, `\Deleted`, `EXPUNGE`, or
+Trash-purge, refuse. Do not implement live IMAP delete here.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## with_writer_lock sole-writer wrapper
+
+Standing writer-lock contract: `with_writer_lock` is the sole-writer
+wrapper. Busy/lock refuse before a second writer. Shipping this guard
+is not starting rem-legacy.
+
+Fail closed: if the writer lock is busy or held, refuse before a
+second writer. Do not steal. Do not start rem-legacy from this wrapper.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## mailroom_copy_db rem-gated copy
+
+Standing rem-gated copy contract: Mini copy only when rem-legacy is
+not writing, or after rem-legacy **EXIT 0**. No SMB/NFS dual-write.
+No live MBP→Mini copy from this gate.
+
+Fail closed: if rem-legacy is still writing, do not live-copy
+MBP→Mini. Use `mailroom-daily-copy.sqlite` when rem still holds
+`mailroom-copy.sqlite`. Do not dual-write over SMB/NFS.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## bind_copy_db / daily children honor MAILROOM_DB
+
+Standing bind contract: `bind_copy_db(argv=None)` reads `sys.argv[1:]`.
+Daily children open the copy DB. Refuse the SoR stub
+(`mailroom.sqlite`). Tests only; no live SoR open.
+
+Fail closed: if `argv` is `None`, honor process `--db` via
+`sys.argv[1:]`. Do not treat `None` like `[]`. Do not open the SoR
+stub path.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## PR-5 cutover checklist (docs only — do not enable)
+
+Standing PR-5 contract: cutover checklist is docs only. Gated on
+rem-legacy **EXIT 0** plus Mini SoR switch steps. This change does **not** enable PR-5 cutover and does **not** enable RunAtLoad.
+Checklist: [pr5-cutover.md](pr5-cutover.md).
+
+Fail closed: if rem-legacy has not EXIT 0, do not enable cutover.
+Do not enable RunAtLoad in this change. Do not promote Mini
+`mailroom.sqlite` while rem-legacy is live.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## sor_health_pack read-only / Mini-copy OK
+
+Standing health-pack contract: sor_health_pack is read-only. Mini
+on a copy DB is OK and is not a second writer.
+
+Fail closed: if a step would write the DB or treat Mini copy as a
+second writer, do not run it. Health is read-only. Mini copy is a
+replica, not a second live writer.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
 
 ## Mini bodies-fts curl + Keychain name
 
