@@ -22,9 +22,14 @@ not open IMAP.
 
 Live modes are explicit **opt-in** filters. `--live` is an additive
 SELECT filter only (`present_on_server=1`). It does not open IMAP.
-**Deleted-folder ≠ present=0.** Existing retrieve args that operators
+**Deleted-folder ≠ present=0.** `--live-mailboxes` and `--trash-live`
+are further opt-in read-side SELECT filters. They do not decide Q2
+(Q2 trash in live remains deferred). Bare `--live` is unchanged.
+Existing retrieve args that operators
 may pass (`--lane`, `--after`, `--before`, `--fts-only`) also filter
 history retrieve; they do not enable live IMAP.
+
+Canonical soft-delete: [soft-delete.md](soft-delete.md).
 
 HARD DECK: never overwrite `scripts/ask_mail.py` with an MCP stub.
 Ready/merge is blocked if `tests/test_ask_mail_never_mcp_stub.py`
@@ -204,6 +209,13 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
 # Mini — ask_mail --live (additive SELECT present_on_server=1; copy DB until PR-5)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --live --json 'SDGE bill'
+```
+
+```zsh
+# Mini — ask_mail --live-mailboxes (opt-in folder SELECT; Q2 trash-in-live deferred)
+MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
+  $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py \
+  --live --live-mailboxes INBOX --trash-live --json 'SDGE bill'
 ```
 
 ```zsh

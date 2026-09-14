@@ -13,6 +13,10 @@ pick Homebrew. This GitHub contract does not open IMAP or Keychain.
 Keychain item name only: mailroom.imap.app-password (never secret
 values). Destructive CLI verbs are hard-refused (soft-delete).
 
+Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
+BODY.PEEK uses /opt/homebrew/opt/curl/bin/curl and needs its own
+Little Snitch allow. No live IMAP from this gate.
+
   /usr/bin/python3 imap_fetch_bodies_fts.py --db /tmp/mailroom-copy.sqlite
   /usr/bin/python3 imap_fetch_bodies_fts.py --db /tmp/mailroom.sqlite
 """
@@ -29,9 +33,11 @@ __all__ = [
     "APPLE_CURL",
     "HOMEBREW_CURL",
     "KEYCHAIN_ITEM_NAME",
+    "LITTLE_SNITCH_APPLE_CURL_NOTE",
     "MIN_CURL_VERSION",
     "CurlRefuse",
     "bind_copy_db",
+    "little_snitch_brew_curl_checklist",
     "main",
     "parse_curl_version",
     "refuse_apple_curl_for_body_peek",
@@ -42,6 +48,20 @@ HOMEBREW_CURL = Path("/opt/homebrew/opt/curl/bin/curl")
 APPLE_CURL = Path("/usr/bin/curl")
 MIN_CURL_VERSION = (8, 17)
 KEYCHAIN_ITEM_NAME = "mailroom.imap.app-password"
+LITTLE_SNITCH_APPLE_CURL_NOTE = (
+    "Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl"
+)
+
+
+def little_snitch_brew_curl_checklist() -> tuple[str, ...]:
+    """Operator checklist. Docs/tests only. No live IMAP."""
+    return (
+        LITTLE_SNITCH_APPLE_CURL_NOTE,
+        "BODY.PEEK uses /opt/homebrew/opt/curl/bin/curl and needs its own Little Snitch allow",
+        "Headers may still use Apple /usr/bin/curl",
+        "No live IMAP from this gate",
+        "No Keychain read/write from this gate",
+    )
 
 _CURL_VERSION_RE = re.compile(
     r"curl\s+(\d+)\.(\d+)(?:\.(\d+))?",

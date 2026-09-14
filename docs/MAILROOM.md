@@ -7,7 +7,8 @@ file is not a live SoR writer and does not start rem-legacy.
 Human Terminal cards: [ops-terminal.md](ops-terminal.md). Daily:
 [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
 Retrieve: [ask_mail.md](ask_mail.md). Tombstone:
-[tombstone.md](tombstone.md). Embed:
+[tombstone.md](tombstone.md). Canonical soft-delete one-pager:
+[soft-delete.md](soft-delete.md). Embed:
 [embed-backfill.md](embed-backfill.md).
 
 ## §5 Soft-delete (DECIDED)
@@ -25,19 +26,29 @@ still present on the server. Tombstone (`present_on_server=0`) means
 IMAP no longer lists the message. Do not treat Deleted-folder as
 `present=0`.
 
+SQL helpers fail-closed refuse `DELETE FROM messages` /
+`DROP TABLE messages` / `TRUNCATE` (`scripts/refuse_sql_maintenance.py`).
+Frozen `icloud_mail_all.jsonl` is immutable (no rewrite / reconcile).
+Canonical design: [soft-delete.md](soft-delete.md).
+
 ## History default (Q1 DECIDED)
 
 ask_mail retrieve default is **history** (local SoR sqlite). History
 is the standing default. There is no `--history` flag. Live is
 **opt-in**. `--live` is an additive SELECT filter only
 (`present_on_server=1`). It does not open IMAP. It does not mean
-"exclude Deleted-folder".
+"exclude Deleted-folder". `--live-mailboxes` and `--trash-live` are
+further opt-in read-side SELECT filters. They do not decide Q2
+(Q2 trash in live remains deferred).
 
 ## §6.1 Incremental embed (pointer)
 
 Daily incremental embed uses `--quote-strip` (header-prefixed cleaned
 body). Rem-legacy keeps the old text path until EXIT. Do not restart
-rem for daily. See [embed-backfill.md](embed-backfill.md).
+rem for daily. `--embed-live-only` is shipped for a future daily
+incremental (present_on_server=1 only; must not delete existing
+tombstone embeds). Shipping the flag ≠ starting a job. Guard ≠ run
+against rem-legacy. See [embed-backfill.md](embed-backfill.md).
 
 ## §6.2 Hybrid retrieve (pointer)
 
@@ -106,6 +117,8 @@ a second writer. See [sor-health.md](sor-health.md).
 BODY.PEEK prefers Homebrew curl ≥ 8.17 at
 `/opt/homebrew/opt/curl/bin/curl`. Apple `/usr/bin/curl` is
 fail-closed for BODY.PEEK. Headers may still use Apple curl.
+Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
+BODY.PEEK Homebrew curl needs its own Little Snitch allow. No live IMAP.
 Keychain item **name** only: `mailroom.imap.app-password`. Never
 secret values in this repo. No live IMAP. No Keychain read/write
 from GitHub tests.

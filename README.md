@@ -60,6 +60,7 @@ mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing o
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),
+Homebrew curl Little Snitch allow (Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl; BODY.PEEK `/opt/homebrew/opt/curl/bin/curl` needs its own Little Snitch allow; no live IMAP),
 and Little Snitch:
 **[docs/ops-terminal.md](docs/ops-terminal.md)**.
 
@@ -71,7 +72,9 @@ Homebrew curl ≥ 8.17 (`/opt/homebrew/opt/curl/bin/curl`); Apple
 `embed_backfill` writer per `.sqlite` (`--lock` is per-batch, not
 same-file 2-wide). Read the `--reembed-legacy` ops contract in
 **[docs/embed-backfill.md](docs/embed-backfill.md)** before starting a
-backfill. Long SoR embeds stay host-kept foreground (host Terminal +
+backfill. `--embed-live-only` is flag+docs only (future daily
+incremental; must not delete existing tombstone embeds; shipping the
+flag ≠ starting a job; guard ≠ run against rem-legacy). Long SoR embeds stay host-kept foreground (host Terminal +
 `caffeinate -w <pid>`). Do not `nohup &`. Rem-legacy is not the Mini
 daily path. Tombstone / never-purge: never physically
 delete iCloud or server mail; local tombstone only.
@@ -93,10 +96,12 @@ Ollama generate/chat **cannot** score Qwen3-Reranker. Practice + traps:
 Retrieve default is **history** (Q1 **DECIDED**; local SoR); live
 modes are opt-in. `--live` is an additive SELECT filter only
 (`present_on_server=1`). No `--history` flag. Deleted-folder ≠
-present=0. Existing retrieve args
+present=0. `--live-mailboxes` / `--trash-live` are further opt-in
+read-side SELECT filters (Q2 trash-in-live deferred). Existing retrieve args
 `--lane` / `--after` / `--before` / `--fts-only` also filter history.
 Soft-delete / never-purge + MAILROOM sync:
 **[docs/MAILROOM.md](docs/MAILROOM.md)**,
+**[docs/soft-delete.md](docs/soft-delete.md)**,
 **[docs/ask_mail.md](docs/ask_mail.md)**.
 
 `scripts/ask_mail.py` is the PR-8 CLI + HTTP `127.0.0.1:8743` (GET /ui

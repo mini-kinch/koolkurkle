@@ -380,7 +380,14 @@ Soft-delete is **DECIDED** (not a standby contract). History default
 is **DECIDED**. Hard-refuse CLI verbs `purge` | `expunge` |
 `empty-trash` | `delete-gone` | `drop-messages`. Never physically
 purge. **Deleted-folder ≠ present=0.** `--live` is an additive SELECT
-filter only. See [MAILROOM.md](MAILROOM.md) and [tombstone.md](tombstone.md).
+filter only. Canonical one-pager: [soft-delete.md](soft-delete.md).
+See [MAILROOM.md](MAILROOM.md) and [tombstone.md](tombstone.md).
+
+SQL helpers fail-closed refuse `DELETE FROM messages` /
+`DROP TABLE messages` / `TRUNCATE`. Frozen `icloud_mail_all.jsonl`
+is immutable (no rewrite / reconcile). `--live-mailboxes` and
+`--trash-live` are opt-in read-side SELECT filters. Q2 (trash in live)
+remains deferred.
 
 ## IMAP tombstone never STORE Deleted / EXPUNGE
 
@@ -473,9 +480,21 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 
 BODY.PEEK prefers Homebrew curl ≥ 8.17 at
 `/opt/homebrew/opt/curl/bin/curl`. Apple `/usr/bin/curl` is
-fail-closed for BODY.PEEK. Keychain item **name** only:
+fail-closed for BODY.PEEK. Apple `/usr/bin/curl` Little Snitch allow
+does not cover Homebrew curl. BODY.PEEK Homebrew curl needs its own
+Little Snitch allow. Keychain item **name** only:
 `mailroom.imap.app-password`. Never secret values. No live IMAP. No
 Keychain read/write from this gate.
+
+## Homebrew curl Little Snitch allow
+
+Operator checklist (docs/tests only; no live IMAP):
+
+1. Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl.
+2. BODY.PEEK uses `/opt/homebrew/opt/curl/bin/curl` and needs its own
+   Little Snitch allow.
+3. Headers may still use Apple `/usr/bin/curl`.
+4. No live IMAP from this gate. No Keychain read/write from this gate.
 
 ## Mini daily (copy-only)
 
@@ -520,6 +539,10 @@ Read [embed-backfill.md](embed-backfill.md) **before** starting
 6. **Host-kept foreground.** Long SoR embeds stay in a host Terminal.
    Do not `nohup` or `&`. Keep the host awake with `caffeinate -w <pid>`
    (placeholder, not a live PID). Rem-legacy is not the daily path.
+7. **`--embed-live-only`.** Flag + docs for a future daily incremental.
+   Must not delete existing tombstone embeds. Shipping the flag ≠
+   starting a job. Guard ≠ run against rem-legacy. Do not start an
+   embed job from this gate.
 
 ```zsh
 # SoR host — prevent sleep while the foreground embed PID is live

@@ -46,6 +46,11 @@ class MailroomDocsSyncTests(unittest.TestCase):
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("do not restart rem", text.lower())
         self.assertIn("quote-strip", text)
+        self.assertIn("soft-delete.md", text)
+        self.assertIn("DELETE FROM messages", text)
+        self.assertIn("icloud_mail_all.jsonl", text)
+        self.assertIn("--live-mailboxes", text)
+        self.assertIn("--embed-live-only", text)
         hay = text.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)

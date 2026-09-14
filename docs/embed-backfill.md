@@ -55,6 +55,27 @@ is the failure this default avoids.
 `--reembed-legacy` without `--quote-strip` is refused. Still one writer
 per `.sqlite`. `--lock` remains per-batch, not a 2-wide permit.
 
+## `--embed-live-only` (flag + docs; no run)
+
+Shipped CLI for a **future** daily incremental. Default off. Does
+**not** start an embed job. Shipping the flag ≠ starting a job.
+Guard ≠ run against rem-legacy.
+
+- **`--embed-live-only`** restricts candidates to
+  `present_on_server=1`.
+- **must not delete existing tombstone embeds.** `present=0` rows
+  stay `skipped_tombstone`; existing `message_embeddings` blobs stay.
+- **Not on rem-legacy argv.** Do not restart rem. Do not put this
+  flag on a running rem-legacy job.
+- **Not the current Mini daily argv.** Daily stays
+  `--skip-auth --quote-strip --lock` without `--embed-live-only`.
+
+```zsh
+# SoR host — FLAG ONLY / dry-run. Does not start rem-legacy.
+$HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
+  --db $HOME/MailArchive/mailroom.sqlite --quote-strip --embed-live-only --lock --dry-run
+```
+
 ```zsh
 # SoR host — default skip (daily / resume). Rem-legacy stays skipped.
 $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \

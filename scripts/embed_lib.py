@@ -740,7 +740,22 @@ def prepare_incremental_row(row: sqlite3.Row | dict, *, cap: int = CHAR_CAP) -> 
         "existing_content_hash": mapping.get("existing_content_hash"),
         "quote_stripped": mapping.get("quote_stripped"),
         "meta_present": mapping.get("meta_id") is not None,
+        "present_on_server": mapping.get("present_on_server"),
     }
+
+
+def row_present_on_server(row: sqlite3.Row | dict | None) -> bool:
+    """Missing / NULL present_on_server ⇒ treat as present (fail-open)."""
+    if row is None:
+        return True
+    mapping = dict(row) if not isinstance(row, dict) else row
+    val = mapping.get("present_on_server")
+    if val is None:
+        return True
+    try:
+        return int(val) != 0
+    except (TypeError, ValueError):
+        return True
 
 
 def write_message_incremental(conn: sqlite3.Connection, prepared: dict) -> None:
@@ -1004,6 +1019,7 @@ def _eligible_incremental_rows(
         mcol("from_name"),
         mcol("to_addrs"),
         mcol("date_utc"),
+        mcol("present_on_server"),
         mcol("message_id_header"),
         mcol("in_reply_to"),
         mcol("references_header"),
@@ -1057,6 +1073,7 @@ def iter_incremental_candidates(
     max_chars: int | None = None,
     min_chars: int | None = None,
     reembed_legacy: bool = False,
+    embed_live_only: bool = False,
 ) -> list[dict]:
     """§6.1 candidates: missing from embedding_meta or stale content_hash.
 
@@ -1065,6 +1082,10 @@ def iter_incremental_candidates(
     ``reembed_legacy`` is set (opt-in; default skip so daily/resume does
     not restart ~63k rem-legacy rows). Char bounds apply to the
     header-prefixed document (CHAR_CAP first).
+
+    ``embed_live_only`` skips ``present_on_server=0`` tombstones and must
+    not delete existing tombstone embeds. Default off. Shipping the flag
+    ≠ starting a job.
     """
     require_incremental_schema(conn)
     id_mod, id_rem = validate_shard(id_mod, id_rem)
@@ -1082,6 +1103,8 @@ def iter_incremental_candidates(
         if not in_id_shard(row["id"], id_mod, id_rem):
             continue
         prepared = prepare_incremental_row(row)
+        if embed_live_only and not row_present_on_server(prepared):
+            continue
         action = incremental_action(
             meta_present=bool(prepared["meta_present"]),
             quote_stripped=prepared.get("quote_stripped"),
@@ -1112,12 +1135,15 @@ def incremental_candidate_counts(
     max_chars: int | None = None,
     min_chars: int | None = None,
     reembed_legacy: bool = False,
+    embed_live_only: bool = False,
 ) -> dict[str, int]:
     """Dry-run stats for the §6.1 path.
 
     Default does not walk rem-owned rows (meta present, content_hash
     NULL) as due. ``reembed_legacy=True`` counts those rows as
     ``reembed_legacy`` candidates instead of ``skipped_legacy_embedded``.
+    ``embed_live_only`` counts tombstones as ``skipped_tombstone`` and
+    never treats them as due.
     """
     require_incremental_schema(conn)
     id_mod, id_rem = validate_shard(id_mod, id_rem)
@@ -1151,6 +1177,7 @@ def incremental_candidate_counts(
     skipped_legacy_embedded = 0
     skipped_too_long = 0
     skipped_too_short = 0
+    skipped_tombstone = 0
     stale = 0
     legacy = 0
     due = 0
@@ -1163,6 +1190,9 @@ def incremental_candidate_counts(
         id_rem=id_rem,
     ):
         prepared = prepare_incremental_row(row)
+        if embed_live_only and not row_present_on_server(prepared):
+            skipped_tombstone += 1
+            continue
         action = incremental_action(
             meta_present=bool(prepared["meta_present"]),
             quote_stripped=prepared.get("quote_stripped"),
@@ -1206,6 +1236,7 @@ def incremental_candidate_counts(
         "reembed_hash_changed": int(stale),
         "reembed_stale_content_hash": int(stale),
         "reembed_legacy": int(legacy),
+        "skipped_tombstone": int(skipped_tombstone),
         "candidates": int(due) + int(stale) + int(legacy),
     }
     if id_mod is not None:
@@ -1270,8 +1301,24 @@ def upsert_embedding(
     content_hash_value: str | None = None,
     embed_model: str | None = None,
     instruct_version: str | None = None,
+    embed_live_only: bool = False,
 ) -> None:
     stored = model_id(model)
+    if embed_live_only:
+        present = True
+        msg_cols = _table_columns(conn, "messages") if _has_table(conn, "messages") else set()
+        if "present_on_server" in msg_cols:
+            row = conn.execute(
+                "SELECT present_on_server FROM messages WHERE id = ?",
+                (message_id,),
+            ).fetchone()
+            present = row_present_on_server(
+                {"present_on_server": None if row is None else row[0]}
+            )
+        if not present:
+            raise EmbedError(
+                "--embed-live-only must not delete existing tombstone embeds"
+            )
     if len(vector) != dims:
         raise EmbedError(
             f"Embedding dim {len(vector)} != {dims} "
@@ -1356,6 +1403,7 @@ def backfill(
     min_chars: int | None = None,
     quote_strip: bool = False,
     reembed_legacy: bool = False,
+    embed_live_only: bool = False,
     num_ctx: int | None = None,
     lock: bool = False,
     lock_path: Path | None = None,
@@ -1372,6 +1420,8 @@ def backfill(
     (``subject + body``). ``quote_strip=True`` is MAILROOM §6.1 incremental:
     header-prefixed cleaned body, no vec0 create/drop, no 63k rem restart
     unless ``reembed_legacy=True`` (``--reembed-legacy``; default off).
+    ``embed_live_only`` skips tombstones and must not delete their embeds.
+    Shipping the flag ≠ starting a job. Guard ≠ run against rem-legacy.
     Writer lock is per batch/heartbeat when ``lock`` is set — not the whole rem.
     """
     id_mod, id_rem = validate_shard(id_mod, id_rem)
@@ -1395,6 +1445,7 @@ def backfill(
             max_chars=max_chars,
             min_chars=min_chars,
             reembed_legacy=reembed_legacy,
+            embed_live_only=embed_live_only,
         )
     else:
         apply_schema(conn, dims=dims)
@@ -1415,6 +1466,8 @@ def backfill(
         path_note = " quote_strip=1 instruct=%s" % INSTRUCT_VERSION
         if reembed_legacy:
             path_note += " reembed_legacy=1"
+        if embed_live_only:
+            path_note += " embed_live_only=1"
     emit(
         "backfill {c} candidate(s); skipped_auth={a} skipped_empty_body={e} "
         "skipped_already_embedded={s} skipped_too_long={tl} "
@@ -1442,12 +1495,13 @@ def backfill(
         )
         emit(
             "incremental §6.1: skipped_legacy_embedded=%s skipped_quote_stripped=%s "
-            "stale_content_hash=%s reembed_legacy=%s (%s)"
+            "stale_content_hash=%s reembed_legacy=%s skipped_tombstone=%s (%s)"
             % (
                 counts.get("skipped_legacy_embedded", 0),
                 counts.get("skipped_quote_stripped", 0),
                 counts.get("reembed_stale_content_hash", 0),
                 counts.get("reembed_legacy", 0),
+                counts.get("skipped_tombstone", 0),
                 legacy_note,
             )
         )
@@ -1475,6 +1529,7 @@ def backfill(
             max_chars=max_chars,
             min_chars=min_chars,
             reembed_legacy=reembed_legacy,
+            embed_live_only=embed_live_only,
         )
     else:
         rows = iter_candidates(
@@ -1547,6 +1602,7 @@ def backfill(
                     content_hash_value=row.get("content_hash"),
                     embed_model=EMBED_MODEL_TAG,
                     instruct_version=INSTRUCT_VERSION,
+                    embed_live_only=embed_live_only,
                 )
                 embedded += 1
             conn.commit()

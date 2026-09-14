@@ -341,6 +341,73 @@ def _date_bounds(after: str | None, before: str | None) -> tuple[str | None, str
     return lo, hi
 
 
+TRASH_MAILBOX_NAMES = frozenset(
+    {"deleted", "trash", "deleted messages", "inbox.trash"}
+)
+
+
+def parse_live_mailboxes(value: Any) -> list[str] | None:
+    """Parse an opt-in mailbox list. Empty / None ⇒ no folder filter."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.replace(";", ",").split(",") if p.strip()]
+        return parts or None
+    if isinstance(value, (list, tuple)):
+        parts = [str(p).strip() for p in value if str(p).strip()]
+        return parts or None
+    return None
+
+
+def is_trash_mailbox(name: str | None) -> bool:
+    return str(name or "").strip().lower() in TRASH_MAILBOX_NAMES
+
+
+def effective_live_mailboxes(
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
+) -> list[str] | None:
+    """Folder SELECT set. None means Q2 deferred (no mailbox filter).
+
+    ``trash_live`` only adds Deleted/Trash when ``live_mailboxes`` is set.
+    Bare ``--live`` is unchanged.
+    """
+    folders = parse_live_mailboxes(live_mailboxes)
+    if folders is None:
+        return None
+    if trash_live:
+        have = {f.lower() for f in folders}
+        for extra in ("Deleted", "Trash"):
+            if extra.lower() not in have:
+                folders.append(extra)
+    return folders
+
+
+def message_in_live_mailboxes(
+    conn: sqlite3.Connection,
+    message_id: str,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
+) -> bool:
+    """True when no mailbox filter applies, column missing, or folder matches."""
+    folders = effective_live_mailboxes(live_mailboxes, trash_live)
+    if folders is None:
+        return True
+    if not table_exists(conn, "messages"):
+        return True
+    cols = set(table_columns(conn, "messages"))
+    if "folder" not in cols:
+        return True
+    row = conn.execute(
+        "SELECT folder FROM messages WHERE id = ?",
+        (message_id,),
+    ).fetchone()
+    if row is None:
+        return True
+    name = str(row[0] or "").lower()
+    return name in {f.lower() for f in folders}
+
+
 def message_present_on_server(conn: sqlite3.Connection, message_id: str) -> bool:
     """History-safe presence. Missing column / NULL ⇒ treat as present.
 
@@ -374,6 +441,8 @@ def _message_filters_sql(
     after: str | None,
     before: str | None,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
 ) -> tuple[str, list[Any]]:
     cols = set(table_columns(conn, "messages"))
     clauses: list[str] = []
@@ -391,6 +460,13 @@ def _message_filters_sql(
         params.append(hi)
     if live and "present_on_server" in cols:
         clauses.append("COALESCE(%s.present_on_server, 1) != 0" % alias)
+    folders = effective_live_mailboxes(live_mailboxes, trash_live)
+    if folders and "folder" in cols:
+        clauses.append(
+            "LOWER(COALESCE(%s.folder, '')) IN (%s)"
+            % (alias, ",".join("?" for _ in folders))
+        )
+        params.extend(f.lower() for f in folders)
     if not clauses:
         return "", params
     return " AND " + " AND ".join(clauses), params
@@ -439,6 +515,7 @@ def _load_message(conn: sqlite3.Connection, message_id: str) -> dict[str, Any]:
         "subject": None,
         "snippet": None,
         "lane": None,
+        "folder": None,
     }
     if table_exists(conn, "messages"):
         cols = set(table_columns(conn, "messages"))
@@ -449,6 +526,7 @@ def _load_message(conn: sqlite3.Connection, message_id: str) -> dict[str, Any]:
             "subject": "subject" if "subject" in cols else None,
             "snippet": "snippet" if "snippet" in cols else None,
             "lane": "lane" if "lane" in cols else None,
+            "folder": "folder" if "folder" in cols else None,
         }
         pieces = ["id AS message_id"]
         for key, col in mapping.items():
@@ -468,6 +546,7 @@ def _load_message(conn: sqlite3.Connection, message_id: str) -> dict[str, Any]:
             out["subject"] = rec.get("subject")
             out["snippet"] = rec.get("snippet")
             out["lane"] = rec.get("lane")
+            out["folder"] = rec.get("folder")
     if table_exists(conn, "messages_fts"):
         fts_cols = set(table_columns(conn, "messages_fts"))
         fts = conn.execute(
@@ -499,6 +578,8 @@ def _subject_like_hits(
     before: str | None,
     k: int,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
 ) -> list[str]:
     """Fallback when messages_fts has no subject column: scan messages.subject."""
     if not table_exists(conn, "messages"):
@@ -510,7 +591,14 @@ def _subject_like_hits(
     if not tokens:
         return []
     extra, params = _message_filters_sql(
-        conn, alias="m", lane=lane, after=after, before=before, live=live
+        conn,
+        alias="m",
+        lane=lane,
+        after=after,
+        before=before,
+        live=live,
+        live_mailboxes=live_mailboxes,
+        trash_live=trash_live,
     )
     likes = []
     like_params: list[Any] = []
@@ -534,6 +622,8 @@ def fts_search(
     after: str | None = None,
     before: str | None = None,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
 ) -> list[dict[str, Any]]:
     """FTS5 BM25 top-k on messages_fts. Subject-boost when the column exists."""
     if not table_exists(conn, "messages_fts"):
@@ -546,7 +636,14 @@ def fts_search(
     extra, params = ("", [])
     if has_messages:
         extra, params = _message_filters_sql(
-            conn, alias="m", lane=lane, after=after, before=before, live=live
+            conn,
+            alias="m",
+            lane=lane,
+            after=after,
+            before=before,
+            live=live,
+            live_mailboxes=live_mailboxes,
+            trash_live=trash_live,
         )
     if "subject" in fts_set:
         bm25 = _bm25_weight_sql(fts_cols)
@@ -589,7 +686,15 @@ def fts_search(
         if (r["message_id"] if isinstance(r, sqlite3.Row) else r[0])
     ]
     subject_ids = _subject_like_hits(
-        conn, query, lane=lane, after=after, before=before, k=k, live=live
+        conn,
+        query,
+        lane=lane,
+        after=after,
+        before=before,
+        k=k,
+        live=live,
+        live_mailboxes=live_mailboxes,
+        trash_live=trash_live,
     )
     merged: list[str] = []
     seen: set[str] = set()
@@ -666,6 +771,8 @@ def vec_search(
     after: str | None = None,
     before: str | None = None,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
 ) -> list[dict[str, Any]]:
     """sqlite-vec KNN top-k on live message_embeddings. Join chunk_vec_map when present."""
     if not table_exists(conn, "message_embeddings"):
@@ -691,7 +798,8 @@ def vec_search(
         mid = rec.get("message_id")
         if not mid:
             continue
-        meta = _load_message(conn, str(mid)) if (lane or lo or hi or live) else None
+        need_meta = bool(lane or lo or hi or live or live_mailboxes or trash_live)
+        meta = _load_message(conn, str(mid)) if need_meta else None
         if lane or lo or hi:
             assert meta is not None
             if lane and meta.get("lane") and str(meta["lane"]).lower() != lane.lower():
@@ -704,6 +812,10 @@ def vec_search(
             if hi and date_s > hi:
                 continue
         if live and not message_present_on_server(conn, str(mid)):
+            continue
+        if not message_in_live_mailboxes(
+            conn, str(mid), live_mailboxes=live_mailboxes, trash_live=trash_live
+        ):
             continue
         rank += 1
         out.append(
@@ -959,6 +1071,8 @@ def retrieve(
     before: str | None = None,
     *,
     live: bool = False,
+    live_mailboxes: Any = None,
+    trash_live: bool = False,
     db: str | Path | None = None,
     conn: sqlite3.Connection | None = None,
     embed_fn: EmbedFn | None = None,
@@ -1016,6 +1130,8 @@ def retrieve(
                         after=after,
                         before=before,
                         live=live,
+                        live_mailboxes=live_mailboxes,
+                        trash_live=trash_live,
                     )
                     or []
                 )
@@ -1040,10 +1156,20 @@ def retrieve(
                 after=after,
                 before=before,
                 live=live,
+                live_mailboxes=live_mailboxes,
+                trash_live=trash_live,
             )
 
         fts_hits = fts_search(
-            used, q, k=FTS_K, lane=inferred, after=after, before=before, live=live
+            used,
+            q,
+            k=FTS_K,
+            lane=inferred,
+            after=after,
+            before=before,
+            live=live,
+            live_mailboxes=live_mailboxes,
+            trash_live=trash_live,
         )
         ids_hits: list[dict[str, Any]] = []
         if ident:
@@ -1056,10 +1182,24 @@ def retrieve(
                         used, str(item.get("message_id") or "")
                     )
                 ]
+            ids_hits = [
+                item
+                for item in ids_hits
+                if message_in_live_mailboxes(
+                    used,
+                    str(item.get("message_id") or ""),
+                    live_mailboxes=live_mailboxes,
+                    trash_live=trash_live,
+                )
+            ]
         def _passes_vec_filters(item: dict[str, Any], active_lane: str | None) -> bool:
             """Vec post-filter (KNN / mock hits): lane + date_utc window + live."""
             mid = str(item.get("message_id") or "")
             if live and not message_present_on_server(used, mid):
+                return False
+            if not message_in_live_mailboxes(
+                used, mid, live_mailboxes=live_mailboxes, trash_live=trash_live
+            ):
                 return False
             if not active_lane and not after and not before:
                 return True
@@ -1089,7 +1229,15 @@ def retrieve(
         if inferred_only and not fts_hits and not vec_hits and not ids_hits:
             inferred = None
             fts_hits = fts_search(
-                used, q, k=FTS_K, lane=None, after=after, before=before, live=live
+                used,
+                q,
+                k=FTS_K,
+                lane=None,
+                after=after,
+                before=before,
+                live=live,
+                live_mailboxes=live_mailboxes,
+                trash_live=trash_live,
             )
             vec_hits = [
                 item for item in _run_vec(None) if _passes_vec_filters(item, None)
@@ -1268,6 +1416,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--live-mailboxes",
+        default=None,
+        help=(
+            "Opt-in comma-separated IMAP folder SELECT filter. "
+            "Read-side only. Does not open IMAP. "
+            "Does not decide Q2 (trash in live)."
+        ),
+    )
+    parser.add_argument(
+        "--trash-live",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in: include Deleted/Trash when --live-mailboxes is set. "
+            "Q2 (trash in live) remains deferred. Bare --live is unchanged."
+        ),
+    )
+    parser.add_argument(
         "--cosine",
         action="store_true",
         help="Backward-compatible cosine KNN only (embed_lib.semantic_search).",
@@ -1365,6 +1531,8 @@ def main(argv: list[str] | None = None) -> int:
                 after=args.after,
                 before=args.before,
                 live=args.live,
+                live_mailboxes=args.live_mailboxes,
+                trash_live=args.trash_live,
                 db=db,
                 model=args.model,
                 ollama_url=args.ollama_url,
