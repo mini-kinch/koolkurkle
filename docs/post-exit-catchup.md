@@ -17,7 +17,11 @@ Freeze label: [rem-window-freeze.md](rem-window-freeze.md).
 4. **Then clear `sor_increment=frozen`.**
 
 Do not enable PR-5 in the same breath. RunAtLoad is a **separate GO**.
+**NON-GO.** EXIT ≠ cutover GO. Catch-up Done ≠ cutover GO. Order:
+EXIT → gate ALLOW → catch-up → later copy+integrity → then
+checklist; not enable with catch-up.
 One cutover + one rollback live in [pr5-cutover.md](pr5-cutover.md).
+Dry verify: [pr5_preflight.py](../scripts/pr5_preflight.py).
 
 ```zsh
 # SoR host — AFTER EXIT 0 + human go only. Catch-up is documented, not run here.

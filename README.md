@@ -68,6 +68,7 @@ rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CO
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
+PR-5 prep / post-rem gates (docs/verify only — NON-GO; EXIT ≠ cutover GO; rem EXIT 17223/17223 + #40 gate live + catch-up Done are not enable; separate CoS GO; this change does not enable cutover or RunAtLoad; [docs/pr5-cutover.md](docs/pr5-cutover.md)),
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),
 Homebrew curl Little Snitch allow (Apple /usr/bin/curl Little Snitch allow does not cover Homebrew curl; BODY.PEEK `/opt/homebrew/opt/curl/bin/curl` needs its own Little Snitch allow; no live IMAP),
 Post-rem embed batch bump (AFTER EXIT 0 only; first bump **32**, then 64 if stable; not 256 first; forbid mid-job bump; commit-per-batch; same qwen3-embedding:8b / 1024-d / instruction prefix),

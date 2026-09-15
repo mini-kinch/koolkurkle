@@ -30,3 +30,6 @@ After a later PR-5 (not this change):
   remote generate over the LAN as the default.
 
 No PR-5 enable here. No RunAtLoad change.
+EXIT ≠ cutover GO. Topology stays SoR=MBP until CoS says; mlx
+generate localhost. MBP and Mini names only.
+Prep: [pr5-cutover.md](pr5-cutover.md).

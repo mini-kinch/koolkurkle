@@ -43,6 +43,7 @@ Rem-aware SoR writer gate (look-ahead; rem/lock on live mailroom.sqlite → refu
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write): section below.
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub): section below.
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad): section below.
+PR-5 prep / post-rem gates (docs/verify only — NON-GO; EXIT ≠ cutover GO; #40 gate live + catch-up Done are not enable; this change does not enable cutover or RunAtLoad): section below.
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer): section below.
 Post-rem embed batch bump (AFTER EXIT 0 only; first bump 32, then 64 if stable; not 256 first; forbid mid-job bump): section below.
 Mini MLX embedder path (holdout required before cutover; Mini RAM law): section below.
@@ -504,10 +505,32 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 Standing PR-5 contract: cutover checklist is docs only. Gated on
 rem-legacy **EXIT 0** plus Mini SoR switch steps. This change does **not** enable PR-5 cutover and does **not** enable RunAtLoad.
 Checklist: [pr5-cutover.md](pr5-cutover.md).
+Dry verify: [pr5_preflight.py](../scripts/pr5_preflight.py).
+
+**NON-GO.** EXIT ≠ cutover GO — separate CoS GO each. Order:
+EXIT → gate ALLOW → catch-up → later copy+integrity → then
+checklist; not enable with catch-up. Standing cite (not enable):
+rem-legacy EXIT completed (`17223/17223`); #40 fail-closed
+`sor_writer_gate` live on operator MBP; Mailroom catch-up Done after
+rem EXIT. HOLD still: PR-5 enable / RunAtLoad / SoR host flip / ATT
+implement / money / external send.
+
+Post-rem gates before anyone considers enable: rem EXIT, #40 gate
+live, catch-up Done, single-writer HARD DECK, flock free. #40 gates
+**future SoR writes**; live rem refuses; stale dead-PID lock ≠ false
+`CONFLICT`. Mini copy-only until promote GO; refuse SoR stub.
+ask_mail default is history; live opt-in; no purge/EXPUNGE in this
+PR. Soft-delete landmines; never-purge; JSONL immutable. Read-only
+integrity / freshness / embed key verify needles. Mini BODY.PEEK
+rails (curl ≥ 8.17, Keychain name only) — no live IMAP this PR.
+Auth hard-gate (`lane=auth`) restated. One cutover + one rollback.
+Topology: SoR=MBP until CoS says; mlx generate localhost; MBP and
+Mini names only.
 
 Fail closed: if rem-legacy has not EXIT 0, do not enable cutover.
 Do not enable RunAtLoad in this change. Do not promote Mini
-`mailroom.sqlite` while rem-legacy is live.
+`mailroom.sqlite` while rem-legacy is live. Do not flip SoR host in
+this change.
 
 Name the machines as MBP and Mini only. Never a login, home path, or
 email.

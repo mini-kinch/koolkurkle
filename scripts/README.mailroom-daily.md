@@ -63,6 +63,9 @@ driver. After PR-5, the same label can point at SoR. Until then, refuse
 is hard-fail (`db_mode=refused`), not fail-open. PR-5 cutover checklist
 is docs only — do not enable cutover or RunAtLoad here
 ([pr5-cutover.md](../docs/pr5-cutover.md)).
+PR-5 prep is **NON-GO** (EXIT ≠ cutover GO; dry verify
+[pr5_preflight.py](pr5_preflight.py)). Mini copy-only until promote
+GO; refuse SoR stub.
 
 ## Pipeline
 
