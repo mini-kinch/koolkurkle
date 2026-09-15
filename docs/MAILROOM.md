@@ -142,6 +142,17 @@ open from these tests.
 Gated on rem-legacy **EXIT 0** plus Mini SoR switch steps. This
 change does **not** enable PR-5 cutover and does **not** enable
 RunAtLoad. Checklist: [pr5-cutover.md](pr5-cutover.md).
+Dry verify (plist absent / disabled, path mocks, #40 gate):
+[pr5_preflight.py](../scripts/pr5_preflight.py).
+
+**NON-GO.** EXIT ≠ cutover GO. Catch-up Done ≠ cutover GO. Separate
+CoS GO each. Order: EXIT → gate ALLOW → catch-up → later
+copy+integrity → then checklist; not enable with catch-up. Post-rem
+gates before anyone considers enable: rem EXIT (`17223/17223`), #40
+gate live, catch-up Done, single-writer HARD DECK, flock free.
+stale dead-PID lock ≠ false CONFLICT. Mini copy-only until promote GO;
+refuse SoR stub. One cutover + one rollback. Topology: SoR=MBP until
+CoS says; mlx generate localhost; MBP and Mini names only.
 
 ## sor_health_pack read-only / Mini-copy OK
 
