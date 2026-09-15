@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Dry / read-only PR-5 preflight (KOO-86). Docs/verify only.
 
-Never enables PR-5, never sets RunAtLoad, never launchctl
-enable/bootstrap/load/kickstart, never flips SoR host, never writes
-SoR, never opens live IMAP, never restarts rem.
+Never enables PR-5, never sets RunAtLoad, never shells out to
+launchctl, never flips SoR host, never writes SoR, never opens live
+IMAP, never restarts rem.
 
 Installed LaunchAgent: plist absent or RunAtLoad disabled is the
 HOLD-safe pair. The checked-in template is not an enable.
@@ -34,12 +34,12 @@ KEYCHAIN_NAME_ONLY = "mailroom.imap.app-password"
 BODY_PEEK_CURL = "/opt/homebrew/opt/curl/bin/curl"
 AUTH_HARD_GATE = "lane=auth"
 
-# launchctl verbs this helper must never invoke.
-FORBIDDEN_LAUNCHCTL = (
-    "launchctl enable",
-    "launchctl bootstrap",
-    "launchctl load",
-    "launchctl kickstart",
+# launchctl subcommands this helper must never invoke (no shell-out).
+FORBIDDEN_LAUNCHCTL_SUBCOMMANDS = (
+    "enable",
+    "bootstrap",
+    "load",
+    "kickstart",
 )
 
 REQUIRED_POST_REM_GATES = (
@@ -58,8 +58,6 @@ STANDING_CITE = (
 )
 
 ORDER_NEEDLE = "EXIT → gate ALLOW → catch-up → later copy+integrity → then checklist"
-
-PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 
 
 class PreflightRefuse(RuntimeError):

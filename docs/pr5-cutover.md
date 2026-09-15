@@ -14,8 +14,8 @@ Mini to SoR and do not enable cutover while rem-legacy is live.
 
 ## NON-GO (this PR)
 
-**NON-GO.** This PR does **not** enable PR-5 / RunAtLoad / flip SoR
-host. It does not set RunAtLoad, does not promote Mini
+**NON-GO.** This PR does not enable PR-5 / RunAtLoad / flip SoR host.
+It does not set RunAtLoad, does not promote Mini
 `mailroom.sqlite`, and does not restart rem. Docs/tests/verify only.
 
 EXIT ≠ cutover GO. Catch-up Done ≠ cutover GO. #40 gate live ≠
@@ -60,8 +60,9 @@ Fail-closed. Missing evidence = do not consider enable.
    file is **not** a false `CONFLICT` (flock free ⇒ not held).
 3. Mailroom **catch-up Done** after rem EXIT
    ([post-exit-catchup.md](post-exit-catchup.md)).
-4. **Single-writer HARD DECK** survives prep — never two-wide writers
-   on one `.sqlite`. Shipping the guard ≠ starting a writer.
+4. **Single-writer HARD DECK** survives prep — one writer per
+   `.sqlite`; never two-wide writers on one file. Shipping the guard
+   ≠ starting a writer.
 5. **flock free** — writer lock probe without steal; leftover file
    with a dead PID and no flock is free.
 

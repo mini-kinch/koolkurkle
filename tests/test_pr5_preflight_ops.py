@@ -43,7 +43,8 @@ DOC_PATHS = (CHECKLIST, CATCHUP, OPS, README, MAILROOM, EMBED, DAILY, FREEZE)
 
 class Pr5PrepDocNeedleTests(unittest.TestCase):
     def test_checklist_has_integrity_rollback_preflight_gates_non_go(self):
-        text = CHECKLIST.read_text(encoding="utf-8")
+        raw = CHECKLIST.read_text(encoding="utf-8")
+        text = " ".join(raw.split())
         self.assertIn("Integrity pack", text)
         self.assertIn("Rollback procedure", text)
         self.assertIn("Operator-facing preflight", text)
@@ -57,7 +58,7 @@ class Pr5PrepDocNeedleTests(unittest.TestCase):
             "EXIT → gate ALLOW → catch-up → later copy+integrity → then checklist",
             text,
         )
-        self.assertIn("not enable with catch-up", text)
+        self.assertIn("not enable with catch-up", text.lower())
         self.assertIn("17223/17223", text)
         self.assertIn("#40", text)
         self.assertIn("sor_writer_gate", text)
@@ -86,26 +87,27 @@ class Pr5PrepDocNeedleTests(unittest.TestCase):
         self.assertIn("pr5_preflight.py", text)
         self.assertIn("gated on rem-legacy EXIT 0", text)
         self.assertIn("Mini SoR switch steps", text)
-        hay = text.replace("/Users/<operator>/", "")
+        hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)
 
     def test_cross_links_from_mailroom_ops_embed_readme(self):
         for path in (MAILROOM, OPS, EMBED, README, DAILY, CATCHUP):
-            text = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8")
+            text = " ".join(raw.split())
             self.assertIn("pr5-cutover.md", text, msg=path.name)
             self.assertIn("NON-GO", text, msg=path.name)
             self.assertIn("do not enable", text.lower(), msg=path.name)
-            hay = text.replace("/Users/<operator>/", "")
+            hay = raw.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)
 
     def test_mailroom_needles_folded_into_ops_and_mailroom(self):
         for path in (OPS, MAILROOM):
-            text = path.read_text(encoding="utf-8")
+            text = " ".join(path.read_text(encoding="utf-8").split())
             self.assertIn("EXIT ≠ cutover GO", text, msg=path.name)
             self.assertIn("gate ALLOW", text, msg=path.name)
-            self.assertIn("not enable with catch-up", text, msg=path.name)
+            self.assertIn("not enable with catch-up", text.lower(), msg=path.name)
             self.assertIn("stale dead-PID lock", text, msg=path.name)
             self.assertIn("promote GO", text, msg=path.name)
             self.assertIn("SoR=MBP until CoS says", text, msg=path.name)
@@ -343,11 +345,16 @@ class Pr5PreflightHelperTests(unittest.TestCase):
 
     def test_helper_source_never_enables_launchagents_or_writes_sor(self):
         src = HELPER.read_text(encoding="utf-8")
-        for verb in pre.FORBIDDEN_LAUNCHCTL:
-            self.assertNotIn(verb, src)
+        for verb in pre.FORBIDDEN_LAUNCHCTL_SUBCOMMANDS:
+            self.assertNotRegex(
+                src,
+                r"launchctl\s+" + verb,
+                msg="helper must not invoke launchctl %s" % verb,
+            )
+        self.assertNotIn("subprocess", src)
+        self.assertNotIn("Popen", src)
         self.assertIn("Never enables PR-5", src)
         self.assertIn("stale dead-PID", src)
-        self.assertNotIn("launchctl enable", src)
         # Do not open ask_mail or overwrite it.
         self.assertNotIn("ask_mail.py", src)
 

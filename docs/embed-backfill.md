@@ -43,8 +43,8 @@ PR-5 prep is docs/verify only — **NON-GO**. Checklist:
 [pr5-cutover.md](pr5-cutover.md). Dry helper:
 [pr5_preflight.py](../scripts/pr5_preflight.py). EXIT ≠ cutover GO.
 #40 gate on future SoR writes; stale dead-PID lock ≠ false CONFLICT;
-live rem refuses. Single-writer HARD DECK survives prep. Do not
-enable PR-5 / RunAtLoad / flip SoR host here.
+live rem refuses. Single-writer HARD DECK survives prep. Do not enable
+PR-5 / RunAtLoad / flip SoR host here.
 
 ALLOW: ask_mail/semantic_search/sor_health read-only; Mini daily copy-only; file-stage on copy; rem-safe docs/tests.
 `--lock` takes the PR-0 writer lock **per batch / heartbeat** (not the

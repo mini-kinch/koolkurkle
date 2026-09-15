@@ -149,8 +149,8 @@ Dry verify (plist absent / disabled, path mocks, #40 gate):
 CoS GO each. Order: EXIT → gate ALLOW → catch-up → later
 copy+integrity → then checklist; not enable with catch-up. Post-rem
 gates before anyone considers enable: rem EXIT (`17223/17223`), #40
-gate live, catch-up Done, single-writer HARD DECK, flock free. Stale
-dead-PID lock ≠ false CONFLICT. Mini copy-only until promote GO;
+gate live, catch-up Done, single-writer HARD DECK, flock free.
+stale dead-PID lock ≠ false CONFLICT. Mini copy-only until promote GO;
 refuse SoR stub. One cutover + one rollback. Topology: SoR=MBP until
 CoS says; mlx generate localhost; MBP and Mini names only.
 
