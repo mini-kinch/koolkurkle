@@ -29,6 +29,7 @@ from embed_generation_key import (  # noqa: E402
     embed_generation_key,
     refuse_generation_mismatch,
 )
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict  # noqa: E402
 
 LIVE_REM_SOR_BASENAME = "mailroom.sqlite"
 APPLIED_SHARDS_TABLE = "sidecar_applied_shards"
@@ -293,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-lock", action="store_true")
     args = parser.parse_args(argv)
     try:
+        refuse_if_sor_writer_conflict(args.db)
         refuse_live_rem_sor(args.db)
         shards = load_shard_file(args.shards)
         result = apply_shards(
@@ -303,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             reembed=args.reembed,
             reembed_human_go=args.reembed_human_go,
         )
-    except (SidecarApplyRefuse, GenerationKeyRefuse) as exc:
+    except (SidecarApplyRefuse, GenerationKeyRefuse, SorWriterRefuse) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")

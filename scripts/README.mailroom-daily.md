@@ -23,7 +23,10 @@ Copy-only keeps one writer on the live rem copy and leaves SoR promotion
 to PR-5 (out of scope here). Rem-gated copy: Mini copy only when
 rem-legacy is not writing, or after rem-legacy EXIT 0. Do not mount
 the live SQLite over SMB/NFS and do not dual-write. No live MBP→Mini
-copy is required from this tree.
+copy is required from this tree. Look-ahead calendar jobs: if rem/writer
+on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe
+before the clock. Do not run the classic MBP SoR 8pm chain while
+rem-legacy is alive; use Mini/copy until rem EXIT 0.
 
 ### Daily children use the same copy path
 

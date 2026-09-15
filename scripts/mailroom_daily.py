@@ -42,6 +42,7 @@ from mailroom_copy_db import (
     resolve_copy_db,
 )
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
+from sor_writer_gate import SorWriterRefuse, refuse_intended_sor_writer
 
 APPLE_CURL = "/usr/bin/curl"
 APPLE_PY = "/usr/bin/python3"
@@ -574,7 +575,12 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     try:
+        refuse_intended_sor_writer(argv, db=args.db)
         db = resolve_driver_db(args.db, archive)
+    except SorWriterRefuse as exc:
+        emit_db_mode("refused")
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     except DailyRefuse as exc:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)

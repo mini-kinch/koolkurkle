@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import IO, Iterable
 
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict
 from embed_lib import (
     CHAR_CAP,
     DEFAULT_BATCH_SIZE,
@@ -440,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         max_chars, min_chars = validate_char_bounds(args.max_chars, args.min_chars)
         if args.reembed_legacy and not args.quote_strip:
             raise EmbedError("--reembed-legacy requires --quote-strip")
+        refuse_if_sor_writer_conflict(db, self_pid=os.getpid())
         guard = refuse_second_embed(db)
         conn = connect_db(db, args.vec_extension)
         try:
@@ -474,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         finally:
             conn.close()
-    except EmbedError as exc:
+    except (EmbedError, SorWriterRefuse) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:

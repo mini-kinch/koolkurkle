@@ -32,6 +32,8 @@ SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict  # noqa: E402
+
 DEFAULT_DB = Path.home() / "MailArchive" / "mailroom.sqlite"
 TARGET_USER_VERSION = 1
 
@@ -401,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        refuse_if_sor_writer_conflict(db)
         if args.lock:
             lock_file = Path(args.lock_file).expanduser() if args.lock_file else None
             action = (
@@ -410,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _run_locked(args.purpose, lock_file, action, _go)
         return _go()
-    except MigrateError as exc:
+    except (MigrateError, SorWriterRefuse) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
 
