@@ -92,6 +92,39 @@ See [tombstone.md](tombstone.md).
 before a second writer. Shipping this guard is not starting
 rem-legacy. See [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md).
 
+## Rem-aware SoR writer gate (look-ahead)
+
+Same-sqlite dual-writer HARD DECK: never two-wide writers on one
+`.sqlite`. While rem-legacy is the sole writer on live basename
+`mailroom.sqlite`, classic SoR writers CONFLICT. Look-ahead calendar
+jobs: do not run the classic MBP SoR 8pm chain while rem-legacy is
+alive; use Mini/copy until rem EXIT 0.
+
+Wording: if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
+
+`scripts/sor_writer_gate.py` is fail-closed. Detect rem-legacy /
+`embed_backfill --reembed-legacy` / known rem PID pattern, **or** a
+foreign `mailroom.write.lock`. Refuse with non-zero exit and a
+`CONFLICT` log; prefer `MAILROOM_DB=copy`. Copy DBs (name contains
+copy / mailroom-copy / not basename `mailroom.sqlite`) are allowed.
+This gate does not restart rem, does not touch live SoR, and does
+not require MBP.
+
+REFUSE while rem/sole-writer on live basename mailroom.sqlite:
+
+1. Classic MBP 8pm (`imap_newmail`+`classify`+`notify_bills` → SoR)
+2. IMAP writers on SoR (`imap_newmail`/`tombstone`/`fetch_bodies*`)
+3. Classify/bills SoR writes
+4. Second `embed_backfill` / shard / merge-apply on same sqlite
+5. `embed_merge_shards` into live SoR
+6. `mailroom_copy_db` from live SoR while rem writing
+7. ATT SoR A/D/F (catalog/apply-text/apply-vec); file-only B/C/E OK
+8. Destructive maintenance (purge/EXPUNGE/DELETE messages/JSONL rewrite)
+9. PR-5 cutover / RunAtLoad enable
+10. Post-rem levers (batch bump / Mini MLX / sidecar) against live rem SoR
+
+ALLOW: ask_mail/semantic_search/sor_health read-only; Mini daily copy-only; file-stage on copy; rem-safe docs/tests.
+
 ## mailroom_copy_db rem-gated copy
 
 Mini copy only when rem-legacy is not writing, or after rem-legacy

@@ -7,7 +7,9 @@ not fail-open. No silent default to the SoR name.
 
 Rem-gated copy: Mini copy only when rem-legacy is not writing, or
 after rem-legacy EXIT 0. No SMB/NFS dual-write. No live MBP→Mini
-copy from this helper.
+copy from this helper. The rem-aware SoR writer gate refuses
+mailroom.sqlite (CONFLICT) when rem-legacy or the writer lock is
+held; prefer MAILROOM_DB=copy.
 
 Daily children (imap_newmail, imap_tombstone, imap_fetch_bodies_fts /
 imap_fetch_bodies, classify, notify_bills) resolve the DB through
@@ -33,6 +35,11 @@ from refuse_destructive import (
     DestructiveRefuse,
     refuse_destructive_cli,
     refuse_imap_purge_cli,
+)
+from sor_writer_gate import (
+    SorWriterRefuse,
+    refuse_copy_from_live_sor,
+    refuse_intended_sor_writer,
 )
 
 COPY_DB_BASENAMES = frozenset(
@@ -140,18 +147,36 @@ def bind_copy_db(argv: list[str] | None = None) -> Path:
     return path
 
 
-def child_main(argv: list[str] | None = None, *, name: str = "child") -> int:
-    """Shared daily-child entry: bind copy DB, print opened_db, fail closed.
+def child_main(
+    argv: list[str] | None = None,
+    *,
+    name: str = "child",
+    cmdlines=None,
+    lock_held: bool | None = None,
+    lock_path=None,
+) -> int:
+    """Shared daily-child entry: rem-aware gate, bind copy DB, fail closed.
 
     No IMAP, Keychain, or classify work. GitHub contract is SoR bind.
     Mini-local live bodies should call bind_copy_db() the same way.
+    Live SoR + rem/lock → CONFLICT (skip/rem-safe before the clock).
     """
     del name
     try:
         refuse_destructive_cli(argv)
         refuse_imap_purge_cli(argv)
+        refuse_intended_sor_writer(
+            argv,
+            cmdlines=cmdlines,
+            lock_path=lock_path,
+            lock_held=lock_held,
+        )
         path = bind_copy_db(argv)
     except DestructiveRefuse as exc:
+        emit_db_mode("refused")
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    except SorWriterRefuse as exc:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)
         return 2
@@ -239,7 +264,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     args = build_parser().parse_args(argv)
     try:
+        if args.db:
+            refuse_copy_from_live_sor(args.db)
         path = resolve_copy_db(args.db)
+    except SorWriterRefuse as exc:
+        emit_db_mode("refused")
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     except CopyDbRefuse as exc:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)

@@ -34,6 +34,7 @@ from embed_lib import (
     load_sqlite_vec,
     merge_shards,
 )
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         primary, secondary = resolve_merge_paths(args.primary, args.secondary)
+        refuse_if_sor_writer_conflict(primary)
         pri_conn = connect_merge_db(primary, args.vec_extension)
         try:
             sec_conn = connect_merge_db(secondary, args.vec_extension)
@@ -155,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                 sec_conn.close()
         finally:
             pri_conn.close()
-    except EmbedError as exc:
+    except (EmbedError, SorWriterRefuse) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:

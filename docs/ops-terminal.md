@@ -39,6 +39,7 @@ Continuous keepgoing (after Done on an authorized chain, immediately issue the n
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check): section below.
 IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge): section below.
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy): section below.
+Rem-aware SoR writer gate (look-ahead; rem/lock on live mailroom.sqlite → refuse calendar SoR writers same cycle; skip/rem-safe before the clock): section below.
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write): section below.
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub): section below.
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad): section below.
@@ -422,6 +423,46 @@ is not starting rem-legacy.
 
 Fail closed: if the writer lock is busy or held, refuse before a
 second writer. Do not steal. Do not start rem-legacy from this wrapper.
+
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
+This gate is docs/tests only. It does not run live Mac writers, does not run live classify, does not run live IMAP, does not open MailArchive or live sqlite, does not write embed/SoR data, does not read Keychain, does not SSH a live machine, and does not change rem-legacy.
+
+## Rem-aware SoR writer gate (look-ahead)
+
+Standing rem-aware writer contract: same-sqlite dual-writer HARD DECK
+(never two-wide writers on one `.sqlite`). While rem-legacy is the
+sole writer on live basename `mailroom.sqlite`, classic SoR writers
+CONFLICT. Look-ahead calendar jobs: do not run the classic MBP SoR
+8pm chain while rem-legacy is alive; use Mini/copy until rem EXIT 0.
+
+Wording: if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
+
+`scripts/sor_writer_gate.py` is fail-closed. Detect rem-legacy /
+`embed_backfill --reembed-legacy` / known rem PID pattern, **or** a
+foreign writer lock. Refuse with a `CONFLICT` exit/log; prefer
+`MAILROOM_DB=copy`. Copy DBs are allowed. This gate does not restart
+rem, does not touch live SoR, and does not require MBP.
+
+REFUSE while rem/sole-writer on live basename mailroom.sqlite:
+
+1. Classic MBP 8pm (`imap_newmail`+`classify`+`notify_bills` → SoR)
+2. IMAP writers on SoR (`imap_newmail`/`tombstone`/`fetch_bodies*`)
+3. Classify/bills SoR writes
+4. Second `embed_backfill` / shard / merge-apply on same sqlite
+5. `embed_merge_shards` into live SoR
+6. `mailroom_copy_db` from live SoR while rem writing
+7. ATT SoR A/D/F (catalog/apply-text/apply-vec); file-only B/C/E OK
+8. Destructive maintenance (purge/EXPUNGE/DELETE messages/JSONL rewrite)
+9. PR-5 cutover / RunAtLoad enable
+10. Post-rem levers (batch bump / Mini MLX / sidecar) against live rem SoR
+
+ALLOW: ask_mail/semantic_search/sor_health read-only; Mini daily copy-only; file-stage on copy; rem-safe docs/tests.
+
+Fail closed: if rem/writer is on live SoR, refuse calendar SoR
+writers the same cycle. Skip/rem-safe **before** the clock. Do not
+start rem-legacy from this gate.
 
 Name the machines as MBP and Mini only. Never a login, home path, or
 email.

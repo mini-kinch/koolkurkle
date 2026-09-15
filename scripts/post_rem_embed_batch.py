@@ -10,6 +10,10 @@ bump against a live rem job.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from sor_writer_gate import refuse_if_sor_writer_conflict
+
 # Rem-legacy stays on 8 until EXIT 0. Do not mid-job hot-swap.
 REM_LEGACY_BATCH_SIZE = 8
 # Heavy 04 / §5: first bump 32, then 64 if stable — NOT 256 first.
@@ -72,6 +76,11 @@ def validate_post_rem_batch_size(
         "post-EXIT next-run batch is 32 first, then 64 if stable (got %s)"
         % size
     )
+
+
+def refuse_post_rem_against_live_rem_sor(db: str | Path, **kwargs) -> None:
+    """Post-rem levers refuse live rem SoR (batch bump / sidecar / Mini MLX)."""
+    refuse_if_sor_writer_conflict(db, **kwargs)
 
 
 def next_run_default_argv() -> tuple[str, ...]:

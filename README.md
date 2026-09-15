@@ -64,6 +64,7 @@ Continuous keepgoing (after Done on an authorized chain, immediately issue the n
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check),
 IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge),
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy),
+rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run classic MBP SoR 8pm while rem-legacy is alive),
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),

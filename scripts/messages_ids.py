@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict
+
 DEFAULT_DB = Path.home() / "MailArchive" / "mailroom.sqlite"
 
 # Identifier-shaped queries / extractors (APN, invoice, UUID).
@@ -344,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     db = Path(args.db).expanduser() if args.db else default_db_path()
     try:
+        refuse_if_sor_writer_conflict(db)
         _ci_refuses_default_sor(db)
         if not db.is_file():
             raise MessagesIdsError("database not found: %s" % db)
@@ -353,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             conn.commit()
         finally:
             conn.close()
-    except MessagesIdsError as exc:
+    except (MessagesIdsError, SorWriterRefuse) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     sys.stdout.write(
