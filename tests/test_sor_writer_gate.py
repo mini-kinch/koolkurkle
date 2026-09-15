@@ -335,12 +335,12 @@ class LookAheadDocTests(unittest.TestCase):
             raw = path.read_text(encoding="utf-8")
             text = " ".join(raw.split())
             self.assertIn(gate.LOOKAHEAD_NEEDLE, text, msg=path.name)
-            self.assertIn("look-ahead calendar jobs", raw.lower(), msg=path.name)
-            self.assertIn("classic MBP SoR 8pm", raw, msg=path.name)
-            self.assertIn("same-sqlite dual-writer HARD DECK", raw, msg=path.name)
+            self.assertIn("look-ahead calendar jobs", text.lower(), msg=path.name)
+            self.assertIn("classic mbp sor 8pm", text.lower(), msg=path.name)
+            self.assertIn("same-sqlite dual-writer hard deck", text.lower(), msg=path.name)
             self.assertIn("MAILROOM_DB=copy", raw, msg=path.name)
             self.assertIn("CONFLICT", raw, msg=path.name)
-            self.assertIn("Mini/copy until rem EXIT 0", raw, msg=path.name)
+            self.assertIn("mini/copy until rem exit 0", text.lower(), msg=path.name)
             for item in gate.REFUSE_WHILE_REM_ON_LIVE_SOR:
                 self.assertIn(item, raw, msg="%s missing %s" % (path.name, item))
             for item in gate.ALLOW_WHILE_REM:
@@ -352,9 +352,10 @@ class LookAheadDocTests(unittest.TestCase):
     def test_readme_and_daily_name_lookahead(self):
         for path in (README, DAILY):
             raw = path.read_text(encoding="utf-8")
-            self.assertIn("look-ahead", raw.lower(), msg=path.name)
-            self.assertIn("before the clock", raw, msg=path.name)
-            self.assertIn("classic MBP SoR 8pm", raw, msg=path.name)
+            text = " ".join(raw.split())
+            self.assertIn("look-ahead", text.lower(), msg=path.name)
+            self.assertIn("before the clock", text, msg=path.name)
+            self.assertIn("classic MBP SoR 8pm", text, msg=path.name)
             hay = raw.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)

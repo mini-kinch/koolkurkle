@@ -73,7 +73,7 @@ ALLOW_WHILE_REM = (
 )
 
 COPY_DB_SUGGEST = (
-    "Use a copy DB (MAILROOM_DB=mailroom-copy.sqlite) until rem EXIT 0."
+    "Use a copy DB (MAILROOM_DB=copy / mailroom-copy.sqlite) until rem EXIT 0."
 )
 
 
@@ -240,8 +240,8 @@ def writer_lock_held(
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         info = wwl.read_lock_info(lock)
-        detail = "writer lock held: %s" % info.summary()
-        return True, detail
+        fh.close()
+        return True, "writer lock held: %s" % info.summary()
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     finally:
