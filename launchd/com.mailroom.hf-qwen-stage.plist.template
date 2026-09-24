@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.mailroom.hf-qwen-stage</string>
+  <key>ProgramArguments</key>
+  <array><string>__MAILARCHIVE_HOME__/scripts/hf_qwen_stage_start_watcher.sh</string></array>
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__MAILARCHIVE_HOME__/logs/hf_qwen_stage_watcher_launchd.log</string>
+  <key>StandardErrorPath</key><string>__MAILARCHIVE_HOME__/logs/hf_qwen_stage_watcher_launchd.log</string>
+</dict>
+</plist>

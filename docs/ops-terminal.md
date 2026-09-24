@@ -9,7 +9,11 @@ CrossEncoder (fail-open if the optional extra is missing); Ollama
 cannot score Qwen3-Reranker: [rerank.md](rerank.md).
 ask_mail probe: [ask_mail.md](ask_mail.md). Generate process
 (`mlx_lm.server` on `127.0.0.1:1234`, venv-mlx, not LM Studio):
-[generate-mlx.md](generate-mlx.md). Retrieve default is
+[generate-mlx.md](generate-mlx.md). Path A Mini Qwen chat is a
+parallel track (`com.mailroom.mlx-lm-server`, `$HOME/qwen-mlx`,
+`--fts-only --no-generate`; does not replace
+`com.mailroom.mlx-generate`):
+[path-a-qwen-chat.md](path-a-qwen-chat.md). Retrieve default is
 history (DECIDED); live modes are opt-in (`--live` additive SELECT
 filter; `--lane` / `--after` / `--before` /
 `--fts-only` also filter history). Mini-only slim:
