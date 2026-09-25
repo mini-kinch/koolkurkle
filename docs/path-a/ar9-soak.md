@@ -72,9 +72,10 @@ watchdog=left-loaded
 
 That only means the job was submitted. The soak result is in the log when the job exits. PASS for the run is the bench summary:
 
-- `PASS soak` with `failures=0`. `hung` may be greater than 0.
-- Every hung request is followed by a request that passed (the next request exits 0).
+- `PASS soak` with `failures=0`. `hung` may be greater than 0. This line is timing and hangs only.
+- Every hung request is followed by a timing pass (`next=pass`): the next request returned inside the timeout with HTTP 200 and `finish_reason` `stop`.
 - If a request hung, the watchdog log has a line whose timestamp (`YYYY-MM-DD HH:MM:SS` at the start of the line) falls within 5 minutes after the hang. The summary prints `HUNG soak idx=<n> local_time=<ts> next=pass watchdog=<stamp>`.
+- `PASS soak_content short=0`. A reply can be fast and still fail the content check. `path_a_bench.py` marks `content_len` <= 300 (`CONTENT_MIN`) as FAIL even when the clock, HTTP status, and finish reason pass. Seen live: 34 s, HTTP 200, `finish=stop`, `content_len=202` -> content FAIL. With `--continue-on-hang` that is its own line, `FAIL soak_content short=1 limit=content_len<=300 idx=<n> content_len=202`, and it does not flip `PASS soak` or `next=pass`. `OVERALL` is still FAIL while that line is FAIL.
 - `PASS soak_mem_at k=24` with `swap_used_mb` under 1024 and `ollama=down`.
 - `PASS ask_mail` and `OVERALL PASS`.
 

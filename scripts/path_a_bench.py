@@ -405,6 +405,47 @@ def classify_probe(result: dict):
     return "pass", None
 
 
+def short_content_only(error) -> bool:
+    """True when the only miss is content_len <= CONTENT_MIN.
+
+    HTTP, finish_reason, and transport errors are not this case. A soak
+    --continue-on-hang timing line ignores these so a short answer cannot
+    look like a hang or a failed recovery.
+    """
+    if not isinstance(error, str) or not error.strip():
+        return False
+    parts = [part.strip() for part in error.split(";") if part.strip()]
+    if not parts:
+        return False
+    prefix = "content_len="
+    for part in parts:
+        if not part.startswith(prefix) or part == prefix:
+            return False
+    return True
+
+
+def timing_ok(row: dict) -> bool:
+    """Request came back in time with a usable HTTP stop, ignoring length."""
+    verdict = row.get("verdict")
+    if verdict == "pass":
+        return True
+    if verdict == "fail" and short_content_only(row.get("error")):
+        return True
+    return False
+
+
+def soak_content_line(rows: list):
+    """Own summary line for content_len <= CONTENT_MIN. Returns (line, ok)."""
+    limit = "content_len<=%d" % CONTENT_MIN
+    if not rows:
+        return "PASS soak_content short=0 limit=%s" % limit, True
+    bits = []
+    for row in rows:
+        bits.append("idx=%s content_len=%s" % (row.get("idx"), row.get("content_len")))
+    line = "FAIL soak_content short=%d limit=%s %s" % (len(rows), limit, " ".join(bits))
+    return line, False
+
+
 def classify_request(mode: str, wall_s: float, result: dict, limits: dict):
     """Return (verdict, error). Soak timeouts are 'hung'; other modes fail."""
     if result.get("timed_out"):
@@ -539,6 +580,14 @@ def chat_summary(
 ):
     failures = sum(1 for row in rows if row.get("verdict") == "fail")
     hung = sum(1 for row in rows if row.get("verdict") == "hung")
+    content_short_rows = []
+    if mode == "soak" and continue_on_hang:
+        content_short_rows = [
+            row
+            for row in rows
+            if row.get("verdict") == "fail" and short_content_only(row.get("error"))
+        ]
+        failures = failures - len(content_short_rows)
     n = len(rows)
     min_s, med_s, max_s = _wall_bits(rows)
     numbers = "n=%d failures=%d hung=%d min_s=%s median_s=%s max_s=%s" % (
@@ -605,6 +654,11 @@ def chat_summary(
         if hang_notes:
             lines.extend(hang_notes)
         ok = req_ok
+        if continue_on_hang:
+            content_line, content_ok = soak_content_line(content_short_rows)
+            lines.append(content_line)
+            if not content_ok:
+                ok = False
         if mem_line:
             lines.append(mem_line)
             if not mem_ok:
@@ -639,6 +693,8 @@ def chat_summary(
     }
     if mem_line:
         summary["soak_mem_at"] = mem_line
+    if mode == "soak" and continue_on_hang:
+        summary["content_short"] = len(content_short_rows)
     return lines, code, summary
 
 
@@ -1071,9 +1127,12 @@ def hang_recoveries(rows: list, watchdog_status, stamps: list):
         if nxt is None:
             next_v = "missing"
             recovered = False
+        elif timing_ok(nxt):
+            next_v = "pass"
+            recovered = True
         else:
             next_v = nxt.get("verdict") or "missing"
-            recovered = next_v == "pass"
+            recovered = False
         evidence = "next=%s" % next_v
         if watchdog_status is not None:
             if watchdog_status == "missing":

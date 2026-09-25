@@ -185,6 +185,9 @@ class _Handler(BaseHTTPRequestHandler):
         if kind == "short":
             self._send(200, _completion("S" * 300, finish="stop", reasoning="note"))
             return
+        if kind == "len202":
+            self._send(200, _completion("C" * 202, finish="stop", reasoning="note"))
+            return
         self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
 
 
@@ -1084,10 +1087,50 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
-        self.assertIn("next=fail", proc.stdout)
+        self.assertIn("PASS soak n=2 failures=0 hung=1", proc.stdout)
+        self.assertIn("next=pass watchdog=2026-09-25 03:01:00", proc.stdout)
+        self.assertIn("FAIL soak_content short=1 limit=content_len<=300 idx=2 content_len=300", proc.stdout)
         self.assertIn("OVERALL FAIL", proc.stdout)
         requests = [row for row in self._rows() if row.get("kind") == "request"]
         self.assertEqual([row["verdict"] for row in requests], ["hung", "fail"])
+        self.assertEqual(requests[1]["error"], "content_len=300")
+
+    def test_soak_continue_on_hang_short_content_does_not_fail_timing(self) -> None:
+        """Live shape: 34s, HTTP 200, finish=stop, content_len=202 is not a hang."""
+        base = self._start("len202")
+        proc = self._run(
+            self._cmd(
+                "soak",
+                base,
+                self._ask(),
+                ["-n", "1", "--interval", "0", "--timeout", "60", "--continue-on-hang"],
+            ),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_WALL_ADD": "34",
+            },
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertRegex(proc.stdout, r"wall_s=34\.")
+        self.assertIn(
+            "FAIL soak_content short=1 limit=content_len<=300 idx=1 content_len=202",
+            proc.stdout,
+        )
+        self.assertIn("OVERALL FAIL", proc.stdout)
+        self.assertNotIn("FAIL soak n=", proc.stdout)
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertEqual(row["verdict"], "fail")
+        self.assertEqual(row["http_status"], 200)
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["content_len"], 202)
+        self.assertEqual(row["error"], "content_len=202")
+        summary = self._rows()[-1]
+        self.assertEqual(summary["failures"], 0)
+        self.assertEqual(summary["hung"], 0)
+        self.assertEqual(summary["content_short"], 1)
+        self.assertEqual(summary["overall"], "FAIL")
 
     def test_soak_mem_at_sample_in_summary(self) -> None:
         base = self._start("ok")
