@@ -34,7 +34,7 @@ Does not copy or overwrite `ask_mail.py`. If that file is already in `$MAILARCHI
 Expect stderr `k=20`. The pack is fuller than the old k=8 default. See [fts_caveat.md](fts_caveat.md) and [wire-readme.md](wire-readme.md).
 
 ## Wedged generate
-If `/v1/models` is OK but chat completions hang or time out (~300s), the chat server is wedged. Run `qwen-chat-down.sh` then `qwen-chat-up.sh` (Path A ops pack), confirm a tiny chat probe, then retry the wire. Do not blame paste/k first.
+If `/v1/models` is OK but generate is wedged, the v4 preflight probe fails in about 20s (`QWEN_PROBE_TIMEOUT`) with exit 3 and the restart hint (stdout empty). The main post timeout is 180s (`QWEN_TIMEOUT`). Run `qwen-chat-down.sh` then `qwen-chat-up.sh` (Path A ops pack), confirm a tiny chat probe, then retry the wire. Do not blame paste/k first. See [Timeouts](wire-readme.md#timeouts).
 
 ## HOLD
 No ATT. No `ask_mail.py` overwrite. No `/ui`.
