@@ -110,6 +110,8 @@ A bad fixture, a bad flag, or a chat server that is unreachable at start (reques
 
 Run the Phase E soak in the foreground on the host. A 4 h soak must not run as a background job inside a remote shell.
 
+Operator runbooks for the live host: `docs/path-a/ar7-drills.md` (Phase C), `docs/path-a/ar8-cold.md` (Phase D), `docs/path-a/ar9-soak.md` (Phase E). The harness flags those runbooks call are already this script: `cold --idle`, `soak --continue-on-hang`, and `soak --mem-at`.
+
 ## Modes and bars
 
 ### probe
