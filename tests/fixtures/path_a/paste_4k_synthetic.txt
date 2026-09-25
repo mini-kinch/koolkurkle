@@ -1,0 +1,94 @@
+DATA:
+1. message_id: syn-0001
+   date: 2026-01-03
+   from: sender1@example.com
+   subject: Brindle Mercantile receipt 4419
+   snippet: Fictional receipt for a wool blanket from Brindle Mercantile. Amount listed as 42.00. No action requested.
+2. message_id: syn-0002
+   date: 2026-01-06
+   from: sender2@example.com
+   subject: Aster Parcel Co delay notice
+   snippet: Fictional shipping note from Aster Parcel Co. Crate A17 is delayed two days. Tracking code SYN-A17.
+3. message_id: syn-0003
+   date: 2026-01-09
+   from: sender3@example.com
+   subject: Lowmoon Market produce box
+   snippet: Fictional weekly box from Lowmoon Market. Contents listed as oats, pears, and tea. Amount 16.50.
+4. message_id: syn-0004
+   date: 2026-01-12
+   from: sender4@example.com
+   subject: Kindling Receipts lantern oil
+   snippet: Fictional receipt from Kindling Receipts for lamp oil. Amount listed as 9.25. Paid in full.
+5. message_id: syn-0005
+   date: 2026-01-15
+   from: sender5@example.com
+   subject: Sable Harbor Goods rope coil
+   snippet: Fictional order note from Sable Harbor Goods. One rope coil reserved. Amount listed as 27.00.
+6. message_id: syn-0006
+   date: 2026-01-18
+   from: sender6@example.com
+   subject: Mossglass Billing studio rental
+   snippet: Fictional studio rental bill from Mossglass Billing. Period January. Amount listed as 60.00.
+7. message_id: syn-0007
+   date: 2026-02-14
+   from: sender7@example.com
+   subject: Copperline Notices renewal
+   snippet: Fictional renewal notice from Copperline Notices. Amount listed as 18.00. Reply not required.
+8. message_id: syn-0008
+   date: 2026-01-22
+   from: sender8@example.com
+   subject: Yellowpier Deliveries crate
+   snippet: Fictional delivery card from Yellowpier Deliveries. Crate B2 arrived at the dock. No fee listed.
+9. message_id: syn-0009
+   date: 2026-01-25
+   from: sender9@example.com
+   subject: Pebbleoak Supply notebook order
+   snippet: Fictional supply note from Pebbleoak Supply. Twelve notebooks shipped. Amount listed as 24.00.
+10. message_id: syn-0010
+   date: 2026-01-28
+   from: sender10@example.com
+   subject: Northglass Tickets lecture seats
+   snippet: Fictional ticket note from Northglass Tickets. Two seats held for a lecture. Amount listed as 30.00.
+11. message_id: syn-0011
+   date: 2026-02-02
+   from: sender11@example.com
+   subject: Quillbarrel Office paper restock
+   snippet: Fictional restock note from Quillbarrel Office. Paper reams delivered. Amount listed as 14.75.
+12. message_id: syn-0012
+   date: 2026-02-05
+   from: sender12@example.com
+   subject: Fernwharf Customs declaration copy
+   snippet: Fictional copy of a customs declaration from Fernwharf Customs. Reference SYN-FW-05. No duty due.
+13. message_id: syn-0013
+   date: 2026-02-08
+   from: sender13@example.com
+   subject: Lampblack Press subscription
+   snippet: Fictional subscription note from Lampblack Press. Next issue dated March. Amount listed as 8.00.
+14. message_id: syn-0014
+   date: 2026-02-11
+   from: sender14@example.com
+   subject: Cinderrow Hardware hinge set
+   snippet: Fictional hardware receipt from Cinderrow Hardware. Hinge set in stock. Amount listed as 11.40.
+15. message_id: syn-0015
+   date: 2026-02-17
+   from: sender15@example.com
+   subject: Driftmail Notices mailbox status
+   snippet: Fictional status note from Driftmail Notices. Mailbox quota is normal. No amount listed.
+16. message_id: syn-0016
+   date: 2026-02-20
+   from: sender16@example.com
+   subject: Hollymint Bakery invoice 220
+   snippet: Fictional bakery invoice from Hollymint Bakery. Loaves and tea. Amount listed as 13.10.
+17. message_id: syn-0017
+   date: 2026-02-23
+   from: sender17@example.com
+   subject: Starling Dock Co storage fee
+   snippet: Fictional storage fee from Starling Dock Co. Locker 4 for February. Amount listed as 21.00.
+18. message_id: syn-0018
+   date: 2026-02-26
+   from: sender18@example.com
+   subject: Wrenfield Alerts quiet hours
+   snippet: Fictional alert from Wrenfield Alerts. Quiet hours set to evenings. No amount listed.
+
+QUESTION:
+Which message_id, date, and sender reported the Copperline Notices renewal, and what amount did the snippet list?
