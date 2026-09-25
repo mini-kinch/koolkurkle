@@ -24,6 +24,22 @@ SCRIPT = ROOT / "scripts" / "path_a_bench.py"
 _LOGFMT_PATH = ROOT / "tests" / "path_a" / "watchdog_logfmt.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k_synthetic.txt"
 FIXTURES_DIR = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k"
+EXACT_ANSWER = (
+    "message_id: syn-0007, date: 2026-02-14, from: sender7@example.com, amount: 18.00"
+)
+ANSWER_KEYS = {
+    "paste_4k_synthetic": ["syn-0007", "2026-02-14", "sender7@example.com", "18.00"],
+    "paste_01_amber": ["amber-1003", "2026-04-07", "sender3@example.com", "12.40"],
+    "paste_02_birch": ["birch-1003", "2026-05-08", "sender3@example.com"],
+    "paste_03_cedar": ["19.10", "2026-06-09", "cedar-1003"],
+    "paste_04_dune": ["sender3@example.com", "2026-07-10", "dune-1003"],
+    "paste_05_ember": ["6.25", "ember-1003"],
+    "paste_06_flint": ["sender3@example.com", "2026-04-12", "flint-1003"],
+    "paste_07_grove": ["2026-05-13", "11.05", "grove-1003"],
+    "paste_08_helix": ["helix-1003", "33.40"],
+    "paste_09_inlet": ["sender3@example.com", "2026-07-15", "inlet-1003"],
+    "paste_10_juniper": ["juniper-1003", "2026-08-16", "9.90"],
+}
 FIXED_HEADER = "DATA:\n1. message_id: "
 POST = ROOT / "scripts" / "qwen_paste_chat_post.py"
 SENTINEL = "SENTINEL_CONTENT_DO_NOT_PRINT"
@@ -125,6 +141,10 @@ class _Server(ThreadingHTTPServer):
         self.posts = []
         self.kind = "ok"
         self.delay = 1.0
+        self.reply = None
+        self.reply_finish = "stop"
+        self.reply_tokens = 40
+        self.replies = None
         self.model_id = "synth-model"
         self.mutate_ask = None
         self.ask_mutated = False
@@ -172,6 +192,34 @@ class _Handler(BaseHTTPRequestHandler):
             path.write_bytes(path.read_bytes() + b"\n# changed\n")
             server.ask_mutated = True
         kind = server.kind
+        if server.replies:
+            content = server.replies.pop(0)
+            self._send(
+                200,
+                _completion(
+                    content,
+                    finish=server.reply_finish,
+                    reasoning="note",
+                    completion_tokens=server.reply_tokens,
+                ),
+            )
+            return
+        if server.reply is not None:
+            try:
+                posted = json.loads(raw.decode("utf-8") or "{}")
+            except ValueError:
+                posted = {}
+            if posted.get("max_tokens") != 1:
+                self._send(
+                    200,
+                    _completion(
+                        server.reply,
+                        finish=server.reply_finish,
+                        reasoning="note",
+                        completion_tokens=server.reply_tokens,
+                    ),
+                )
+                return
         if kind == "hang":
             time.sleep(server.delay)
             self._send(200, _completion(_long()))
@@ -291,6 +339,12 @@ class PathABenchTests(unittest.TestCase):
         self.httpd.kind = kind
         return "http://127.0.0.1:%d" % self.httpd.server_address[1]
 
+    def _unkeyed_paste(self) -> Path:
+        """Same words as the default paste, with no answer sidecar."""
+        path = self.tmp / "paste_unkeyed.txt"
+        path.write_bytes(FIXTURE.read_bytes())
+        return path
+
     def _ask(self, payload: bytes = b"# synthetic ask_mail fixture\n") -> Path:
         path = self.tmp / "ask_mail.py"
         path.write_bytes(payload)
@@ -326,11 +380,20 @@ class PathABenchTests(unittest.TestCase):
     def _rows(self) -> list:
         path = self.tmp / "out.jsonl"
         text = path.read_text(encoding="utf-8")
-        self.assertNotIn(SENTINEL, text)
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
         self.assertNotIn(USERS_PREFIX, text)
         self.assertNotIn(HOME_PREFIX, text)
-        self.assertNotIn("Brindle Mercantile", text)
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
+        self.assertNotIn(ICLOUD_MARK, text.lower())
+        self.assertNotIn(ME_MARK, text.lower())
+        redacted = []
+        for row in rows:
+            copy = dict(row)
+            copy.pop("content", None)
+            redacted.append(json.dumps(copy))
+        blob = "\n".join(redacted)
+        self.assertNotIn(SENTINEL, blob)
+        self.assertNotIn("Brindle Mercantile", blob)
+        return rows
 
     def _cmd(self, mode: str, base: str, ask: Path, extra: list | None = None) -> list:
         return [
@@ -338,7 +401,7 @@ class PathABenchTests(unittest.TestCase):
             "--base-url",
             base,
             "--fixture",
-            str(FIXTURE),
+            str(self._unkeyed_paste()),
             "--ask-mail",
             str(ask),
             "--out",
@@ -1532,6 +1595,280 @@ class PathABenchTests(unittest.TestCase):
         summary = self._rows()[-1]
         self.assertIn("soak_mem_at", summary)
         self.assertIn("swap_used_mb=100.00", summary["soak_mem_at"])
+
+    def test_answer_keys_match_fixture_data(self) -> None:
+        files = [FIXTURE, *sorted(FIXTURES_DIR.glob("*.txt"))]
+        self.assertEqual(
+            [path.stem for path in files],
+            list(ANSWER_KEYS),
+        )
+        for path in files:
+            key = BENCH.load_answer_key(path)
+            self.assertIsNotNone(key)
+            self.assertEqual(key["name"], path.stem)
+            self.assertEqual(key["facts"], ANSWER_KEYS[path.stem])
+            text = path.read_text(encoding="utf-8")
+            sidecar = path.with_name(path.stem + ".answer.json").read_text(encoding="utf-8")
+            self.assertNotIn(ICLOUD_MARK, sidecar.lower())
+            self.assertNotIn(ME_MARK, sidecar.lower())
+            self.assertNotIn(USERS_PREFIX, sidecar)
+            for fact in key["facts"]:
+                self.assertIn(fact, text)
+                self.assertIn(fact, sidecar)
+
+    def test_fact_match_amount_date_and_case(self) -> None:
+        self.assertEqual(len(EXACT_ANSWER), 80)
+        self.assertEqual(BENCH.missing_facts(ANSWER_KEYS["paste_4k_synthetic"], EXACT_ANSWER), [])
+        self.assertEqual(
+            BENCH.missing_facts(
+                ["18.00"],
+                "amount: 18",
+            ),
+            [],
+        )
+        self.assertEqual(BENCH.missing_facts(["18.00"], "amount: $18.00"), [])
+        self.assertEqual(BENCH.missing_facts(["18.00"], "amount: $18"), [])
+        self.assertEqual(BENCH.missing_facts(["18.00"], "  18.00  "), [])
+        self.assertEqual(
+            BENCH.missing_facts(["18.00"], "saw 18.50 and 180"),
+            ["18.00"],
+        )
+        self.assertEqual(BENCH.missing_facts(["12.40"], "amount: 12"), ["12.40"])
+        self.assertEqual(BENCH.missing_facts(["12.40"], "amount: $12.40"), [])
+        self.assertEqual(
+            BENCH.missing_facts(
+                ["sender7@example.com"],
+                "From: Sender7@Example.com",
+            ),
+            [],
+        )
+        self.assertEqual(
+            BENCH.missing_facts(["2026-02-14"], "date: 2026-02-14"),
+            [],
+        )
+        self.assertEqual(
+            BENCH.missing_facts(["2026-02-14"], "February 14, 2026"),
+            ["2026-02-14"],
+        )
+        spaced = "message_id:  syn-0007,\ndate: 2026-02-14, from: sender7@example.com, amount: 18"
+        self.assertEqual(BENCH.missing_facts(ANSWER_KEYS["paste_4k_synthetic"], spaced), [])
+
+    def _cold_keyed(self, content: str, finish: str = "stop", tokens: int = 40):
+        base = self._start("ok")
+        self.httpd.reply = content
+        self.httpd.reply_finish = finish
+        self.httpd.reply_tokens = tokens
+        proc = self._run(
+            [
+                "cold",
+                "--base-url",
+                base,
+                "--fixture",
+                str(FIXTURE),
+                "--ask-mail",
+                str(self._ask()),
+                "--out",
+                str(self.tmp / "out.jsonl"),
+                "--timeout",
+                "5",
+            ]
+        )
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        return proc, requests, self._rows()[-1]
+
+    def test_exact_short_answer_passes_cold_answer(self) -> None:
+        proc, requests, summary = self._cold_keyed(EXACT_ANSWER, tokens=80)
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(len(EXACT_ANSWER), 80)
+        row = requests[0]
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["content"], EXACT_ANSWER)
+        self.assertEqual(row["answer_key"], "paste_4k_synthetic")
+        self.assertEqual(row["answer_missing"], [])
+        self.assertEqual(row["length"], "ok")
+        self.assertEqual(row["verdict"], "pass")
+        self.assertIsNone(row["error"])
+        self.assertIn("content_len=80", proc.stdout)
+        self.assertIn("length=ok", proc.stdout)
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS cold_answer matched=4/4", proc.stdout)
+        self.assertNotIn("cold_content", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertNotIn("FAIL cold", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertEqual(summary["fails"], [])
+        self.assertEqual(summary["cold_answer"], "PASS cold_answer matched=4/4")
+        self.assertNotIn(SENTINEL, proc.stdout + proc.stderr)
+
+    def test_missing_amount_fails_cold_answer(self) -> None:
+        reply = "message_id: syn-0007, date: 2026-02-14, from: sender7@example.com"
+        proc, requests, summary = self._cold_keyed(reply)
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["answer_missing"], ["18.00"])
+        self.assertEqual(row["error"], "answer_missing=18.00")
+        self.assertEqual(row["verdict"], "fail")
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("FAIL cold_answer missing=18.00 idx=1", proc.stdout)
+        self.assertIn("FAILS cold_answer", proc.stdout)
+        self.assertNotIn("cold_content", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_answer"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_correct_truncated_reply_fails_cold_truncated(self) -> None:
+        proc, requests, summary = self._cold_keyed(
+            EXACT_ANSWER, finish="length", tokens=80
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["content"], EXACT_ANSWER)
+        self.assertEqual(row["length"], "TRUNCATED")
+        self.assertEqual(row["answer_missing"], [])
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn(
+            "FAIL cold_truncated truncated=1 idx=1 finish=length "
+            "content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn("PASS cold_answer matched=4/4", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertNotIn("cold_content", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_truncated"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_unkeyed_fixture_keeps_content_len_bar(self) -> None:
+        base = self._start("ok")
+        self.httpd.reply = "x" * 80
+        proc = self._run(
+            [
+                "cold",
+                "--base-url",
+                base,
+                "--fixture",
+                str(self._unkeyed_paste()),
+                "--ask-mail",
+                str(self._ask()),
+                "--out",
+                str(self.tmp / "out.jsonl"),
+                "--timeout",
+                "5",
+            ]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertIsNone(row["content"])
+        self.assertIsNone(row["answer_key"])
+        self.assertEqual(row["answer_missing"], [])
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertEqual(row["error"], "content_len=80")
+        self.assertIn(
+            "FAIL cold_content short=1 limit=content_len<=300 idx=1 content_len=80",
+            proc.stdout,
+        )
+        self.assertNotIn("cold_answer", proc.stdout)
+        self.assertIn("FAILS cold_content", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_answer_rollup_counts_misses(self) -> None:
+        base = self._start("ok")
+        self.httpd.replies = [
+            EXACT_ANSWER,
+            "message_id: syn-0007, date: 2026-02-14, from: sender7@example.com, amount: 18",
+            "message_id: syn-0007, date: 2026-02-14, from: sender7@example.com",
+        ]
+        proc = self._run(
+            [
+                "soak",
+                "--base-url",
+                base,
+                "--fixture",
+                str(FIXTURE),
+                "--ask-mail",
+                str(self._ask()),
+                "--out",
+                str(self.tmp / "out.jsonl"),
+                "-n",
+                "3",
+                "--interval",
+                "0",
+                "--timeout",
+                "5",
+                "--continue-on-hang",
+            ]
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("PASS soak n=3 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
+        self.assertIn(
+            "FAIL soak_answer missing=1 idx=3 facts=18.00",
+            proc.stdout,
+        )
+        self.assertNotIn("soak_content", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertIn("FAILS soak_answer", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(requests[0]["content"], EXACT_ANSWER)
+        self.assertEqual(requests[0]["answer_missing"], [])
+        self.assertEqual(requests[0]["answer_key"], "paste_4k_synthetic")
+        self.assertEqual(requests[0]["verdict"], "pass")
+        self.assertEqual(requests[1]["verdict"], "pass")
+        self.assertEqual(requests[1]["answer_missing"], [])
+        self.assertEqual(requests[1]["length"], "ok")
+        self.assertEqual(requests[2]["verdict"], "fail")
+        self.assertEqual(requests[2]["answer_missing"], ["18.00"])
+        self.assertEqual(requests[2]["error"], "answer_missing=18.00")
+        summary = self._rows()[-1]
+        self.assertEqual(summary["fails"], ["soak_answer"])
+        self.assertIn("missing=1", summary["soak_answer"])
+
+    def test_jsonl_content_only_for_path_a_fixtures(self) -> None:
+        outside = self.tmp / "outside_paste.txt"
+        outside.write_bytes(FIXTURE.read_bytes())
+        sidecar = self.tmp / "outside_paste.answer.json"
+        sidecar.write_text(
+            (FIXTURE.with_name(FIXTURE.stem + ".answer.json")).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        base = self._start("ok")
+        self.httpd.reply = EXACT_ANSWER
+        proc = self._run(
+            [
+                "cold",
+                "--base-url",
+                base,
+                "--fixture",
+                str(outside),
+                "--ask-mail",
+                str(self._ask()),
+                "--out",
+                str(self.tmp / "out.jsonl"),
+                "--timeout",
+                "5",
+            ]
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertIsNone(row["content"])
+        self.assertEqual(row["answer_key"], "outside_paste")
+        self.assertEqual(row["answer_missing"], [])
+        self.assertIn("PASS cold_answer matched=4/4", proc.stdout)
+        self.assertNotIn(EXACT_ANSWER, (self.tmp / "out.jsonl").read_text(encoding="utf-8"))
+        _stop(self.httpd)
+        self.httpd = None
+        _proc, requests, _summary = self._cold_keyed(EXACT_ANSWER)
+        self.assertEqual(requests[0]["content"], EXACT_ANSWER)
+        self.assertIn(EXACT_ANSWER, (self.tmp / "out.jsonl").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

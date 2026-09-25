@@ -69,6 +69,11 @@ def _ephemeral_port():
     return port
 
 
+EXACT_ANSWER = (
+    "message_id: syn-0007, date: 2026-02-14, from: sender7@example.com, amount: 18.00"
+)
+
+
 def _completion(content):
     payload = {
         "choices": [
@@ -136,7 +141,7 @@ class _Handler(BaseHTTPRequestHandler):
         if body.get("max_tokens") == 1:
             self._send(200, _completion("ok"))
             return
-        self._send(200, _completion("E" * 360))
+        self._send(200, _completion(EXACT_ANSWER))
 
 
 def _serve():
@@ -687,7 +692,7 @@ class ColdTests(OperatorCase):
         self.assertIn("PASS cold_probe", proc.stdout)
         self.assertIn("PASS cold_request", proc.stdout)
         self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
-        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertIn("PASS cold_answer matched=4/4", proc.stdout)
         self.assertIn("OVERALL PASS", proc.stdout)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertIn("PASS cold ", proc.stdout)
@@ -904,7 +909,7 @@ class BenchFlagTests(unittest.TestCase):
         self.assertIn("PASS cold_probe", proc.stdout)
         self.assertIn("PASS cold_request", proc.stdout)
         self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
-        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertIn("PASS cold_answer matched=4/4", proc.stdout)
         self.assertIn("limit_s=90.000", proc.stdout)
         self.assertEqual(len(self.httpd.posts), 2)
         probe = json.loads(self.httpd.posts[0].decode("utf-8"))

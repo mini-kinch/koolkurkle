@@ -352,9 +352,11 @@ def perform_chat(url: str, paste: str, model: str, max_tokens: int, timeout: flo
         "error": err,
         "timed_out": timed_out,
         "elapsed": elapsed,
+        "content": None,
     }
     if parsed is not None and not err and not timed_out:
         result["finish_reason"] = parsed["finish"]
+        result["content"] = parsed["content"]
         result["content_len"] = len(parsed["content"])
         result["reasoning_len"] = parsed["reasoning_len"]
         usage = parsed["usage"]
@@ -408,6 +410,135 @@ def classify_probe(result: dict):
     return "pass", None
 
 
+_AMOUNT_FACT = re.compile(r"^(\d+)\.(\d{2})$")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_JSONL_SKIP = ("answer_facts",)
+
+
+def answer_sidecar(path: Path) -> Path:
+    return path.with_name(path.stem + ".answer.json")
+
+
+def load_answer_key(path: Path):
+    """Sidecar facts for a paste, or None when the paste has no key.
+
+    The name is the fixture stem. facts is the required-string list.
+    """
+    sidecar = answer_sidecar(path)
+    if not sidecar.is_file():
+        return None
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        raise ConfigError("bad answer key")
+    facts = data.get("facts") if isinstance(data, dict) else None
+    if (
+        not isinstance(facts, list)
+        or not facts
+        or not all(isinstance(item, str) and item.strip() for item in facts)
+    ):
+        raise ConfigError("bad answer key")
+    return {"name": path.stem, "facts": [item.strip() for item in facts]}
+
+
+def synth_paste(path: Optional[Path]) -> bool:
+    """True when the paste lives under tests/fixtures/path_a/."""
+    if path is None:
+        return False
+    root = (repo_root() / "tests" / "fixtures" / "path_a").resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def normalize_reply(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip().casefold()
+
+
+def _amount_present(whole: str, frac: str, hay: str) -> bool:
+    """18.00 matches 18.00, $18.00, and (when cents are zero) 18 and $18."""
+    forms = [whole + "." + frac]
+    if set(frac) <= {"0"}:
+        forms.append(whole)
+    for form in forms:
+        if form == whole:
+            tail = r"(?!\d)(?!\.\d)"
+        else:
+            tail = r"(?!\d)"
+        pattern = r"(?<![\w])\$?" + re.escape(form) + tail
+        if re.search(pattern, hay):
+            return True
+    return False
+
+
+def fact_present(fact: str, content: str) -> bool:
+    """True when one required fact appears in the reply.
+
+    Matching is case-insensitive with whitespace collapsed. Dates must appear
+    in the ISO form stored in the key. Amounts also accept a whole-dollar
+    form when the cents are zero, with or without a leading $.
+    """
+    raw = (fact or "").strip()
+    if not raw or not isinstance(content, str):
+        return False
+    hay = normalize_reply(content)
+    amount = _AMOUNT_FACT.match(raw)
+    if amount:
+        return _amount_present(amount.group(1), amount.group(2), hay)
+    folded = raw.casefold()
+    if _ISO_DATE.match(raw):
+        pattern = r"(?<!\d)" + re.escape(folded) + r"(?!\d)"
+    else:
+        pattern = r"(?<![\w])" + re.escape(folded) + r"(?![\w])"
+    return re.search(pattern, hay) is not None
+
+
+def missing_facts(facts, content) -> list:
+    if not isinstance(content, str):
+        return list(facts)
+    return [fact for fact in facts if not fact_present(fact, content)]
+
+
+def _csv(items) -> str:
+    return ",".join(str(item) for item in items)
+
+
+def cold_answer_line(row: dict):
+    """PASS cold_answer matched=<k>/<n> or FAIL cold_answer missing=<facts>."""
+    facts = list(row.get("answer_facts") or [])
+    missing = list(row.get("answer_missing") or [])
+    total = len(facts)
+    if not missing:
+        return "PASS cold_answer matched=%d/%d" % (total, total), True
+    return (
+        "FAIL cold_answer missing=%s idx=%s" % (_csv(missing), row.get("idx")),
+        False,
+    )
+
+
+def soak_answer_line(rows: list):
+    """Count of keyed rows whose reply is missing any fact. Hangs are not counted."""
+    misses = []
+    for row in rows:
+        if not row.get("answer_key") or row.get("verdict") == "hung":
+            continue
+        missing = list(row.get("answer_missing") or [])
+        if missing:
+            misses.append((row, missing))
+    if not misses:
+        return "PASS soak_answer missing=0", True
+    bits = [
+        "idx=%s facts=%s" % (row.get("idx"), _csv(missing)) for row, missing in misses
+    ]
+    return "FAIL soak_answer missing=%d %s" % (len(misses), " ".join(bits)), False
+
+
 def short_content_only(error) -> bool:
     """True when the only miss is content_len <= CONTENT_MIN.
 
@@ -427,12 +558,32 @@ def short_content_only(error) -> bool:
     return True
 
 
+def body_bar_only(error) -> bool:
+    """True when every miss is a short body or a missing answer fact.
+
+    Those bars have their own lines. A soak timing line ignores them so a
+    short or wrong answer cannot look like a hang.
+    """
+    if not isinstance(error, str) or not error.strip():
+        return False
+    parts = [part.strip() for part in error.split(";") if part.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        if part.startswith("content_len=") and part != "content_len=":
+            continue
+        if part.startswith("answer_missing=") and part != "answer_missing=":
+            continue
+        return False
+    return True
+
+
 def timing_ok(row: dict) -> bool:
     """Request came back in time with a usable HTTP stop, ignoring length."""
     verdict = row.get("verdict")
     if verdict == "pass":
         return True
-    if verdict == "fail" and short_content_only(row.get("error")):
+    if verdict == "fail" and body_bar_only(row.get("error")):
         return True
     return False
 
@@ -482,6 +633,8 @@ def length_report_only(error) -> bool:
             continue
         if part.startswith("content_len=") and part != "content_len=":
             continue
+        if part.startswith("answer_missing=") and part != "answer_missing=":
+            continue
         return False
     return True
 
@@ -493,24 +646,27 @@ def cold_timing_miss(row: dict) -> bool:
     return not length_report_only(row.get("error"))
 
 
-def length_labels(finish, content_len) -> list:
+def length_labels(finish, content_len, keyed: bool = False) -> list:
     """TRUNCATED and SHORT are independent.
 
     finish_reason length is a cut-off reply (TRUNCATED). content_len at or
     under CONTENT_MIN is SHORT even when finish_reason is stop. A missing
-    content_len is not SHORT.
+    content_len is not SHORT. A keyed paste does not take SHORT: content_len
+    is informational and the answer line is the pass/fail bar.
     """
     labels = []
     if finish == "length":
         labels.append("TRUNCATED")
+    if keyed:
+        return labels
     if isinstance(content_len, int) and not isinstance(content_len, bool):
         if content_len <= CONTENT_MIN:
             labels.append("SHORT")
     return labels
 
 
-def length_word(finish, content_len) -> str:
-    labels = length_labels(finish, content_len)
+def length_word(finish, content_len, keyed: bool = False) -> str:
+    labels = length_labels(finish, content_len, keyed=keyed)
     if labels:
         return ",".join(labels)
     if not isinstance(content_len, int) or isinstance(content_len, bool):
@@ -550,7 +706,11 @@ def soak_length_line(rows: list):
     short = 0
     bits = []
     for row in rows:
-        labels = length_labels(row.get("finish_reason"), row.get("content_len"))
+        labels = length_labels(
+            row.get("finish_reason"),
+            row.get("content_len"),
+            keyed=bool(row.get("answer_key")),
+        )
         if "TRUNCATED" in labels:
             truncated += 1
         if "SHORT" in labels:
@@ -592,10 +752,16 @@ def classify_request(mode: str, wall_s: float, result: dict, limits: dict):
     finish = result.get("finish_reason") or ""
     if finish != "stop":
         reasons.append("finish_reason=%s" % finish)
-    content_len = result.get("content_len")
-    if content_len is None or content_len <= CONTENT_MIN:
-        shown = "na" if content_len is None else str(content_len)
-        reasons.append("content_len=%s" % shown)
+    keyed = mode in ("cold", "soak") and bool(result.get("answer_facts"))
+    if not keyed:
+        content_len = result.get("content_len")
+        if content_len is None or content_len <= CONTENT_MIN:
+            shown = "na" if content_len is None else str(content_len)
+            reasons.append("content_len=%s" % shown)
+    elif result.get("answer_scored"):
+        missing = result.get("answer_missing") or []
+        if missing:
+            reasons.append("answer_missing=%s" % ",".join(missing))
     if mode == "warm" and wall_s > limits["warm_wall"]:
         reasons.append("wall_s=%.3f" % wall_s)
     if mode == "cold" and wall_s > limits["cold_wall"]:
@@ -666,7 +832,8 @@ class Jsonl:
     def write(self, row: dict) -> None:
         if self.fp is None:
             return
-        self.fp.write(json.dumps(row, sort_keys=True) + "\n")
+        payload = {key: value for key, value in row.items() if key not in _JSONL_SKIP}
+        self.fp.write(json.dumps(payload, sort_keys=True) + "\n")
         self.fp.flush()
 
     def close(self) -> None:
@@ -713,12 +880,15 @@ def chat_summary(
     hung = sum(1 for row in rows if row.get("verdict") == "hung")
     content_short_rows = []
     if mode == "soak" and continue_on_hang:
-        content_short_rows = [
+        ignored = [
             row
             for row in rows
-            if row.get("verdict") == "fail" and short_content_only(row.get("error"))
+            if row.get("verdict") == "fail" and body_bar_only(row.get("error"))
         ]
-        failures = failures - len(content_short_rows)
+        content_short_rows = [
+            row for row in ignored if short_content_only(row.get("error"))
+        ]
+        failures = failures - len(ignored)
     n = len(rows)
     min_s, med_s, max_s = _wall_bits(rows)
     numbers = "n=%d failures=%d hung=%d min_s=%s median_s=%s max_s=%s" % (
@@ -739,6 +909,8 @@ def chat_summary(
     content_ok = True
     cold_content_line = None
     cold_content_ok = True
+    answer_line = None
+    answer_ok = True
     req_ok = True
     p_ok = True
     if mode == "warm":
@@ -779,12 +951,16 @@ def chat_summary(
         )
         trunc_line, trunc_ok = truncated_line("cold_truncated", generate)
         lines.append(trunc_line)
-        cold_content_line, cold_content_ok = soak_content_line(
-            measured_short_rows(generate),
-            name="cold_content",
-        )
-        lines.append(cold_content_line)
-        ok = req_ok and trunc_ok and cold_content_ok
+        if generate and generate[0].get("answer_key"):
+            answer_line, answer_ok = cold_answer_line(generate[0])
+            lines.append(answer_line)
+        else:
+            cold_content_line, cold_content_ok = soak_content_line(
+                measured_short_rows(generate),
+                name="cold_content",
+            )
+            lines.append(cold_content_line)
+        ok = req_ok and trunc_ok and answer_ok and cold_content_ok
         if probes:
             p_ok = len(probes) == 1 and probes[0].get("verdict") == "pass"
             p_verdict = probes[0].get("verdict") or "missing"
@@ -805,9 +981,17 @@ def chat_summary(
         lines.append(length_line)
         if hang_notes:
             lines.extend(hang_notes)
-        content_line, content_ok = soak_content_line(measured_short_rows(rows))
-        lines.append(content_line)
-        ok = req_ok and trunc_ok and length_ok and content_ok
+        keyed_rows = [row for row in rows if row.get("answer_key")]
+        unkeyed_rows = [row for row in rows if not row.get("answer_key")]
+        if keyed_rows:
+            answer_line, answer_ok = soak_answer_line(rows)
+            lines.append(answer_line)
+        if unkeyed_rows:
+            content_line, content_ok = soak_content_line(
+                measured_short_rows(unkeyed_rows)
+            )
+            lines.append(content_line)
+        ok = req_ok and trunc_ok and length_ok and answer_ok and content_ok
         if mem_line:
             lines.append(mem_line)
             if not mem_ok:
@@ -826,7 +1010,9 @@ def chat_summary(
             fails.append("soak_truncated")
         if not length_ok:
             fails.append("soak_length")
-        if not content_ok:
+        if answer_line is not None and not answer_ok:
+            fails.append("soak_answer")
+        if content_line is not None and not content_ok:
             fails.append("soak_content")
         if mem_line and not mem_ok:
             fails.append("soak_mem_at")
@@ -838,7 +1024,9 @@ def chat_summary(
             fails.append("cold_request")
         if not trunc_ok:
             fails.append("cold_truncated")
-        if not cold_content_ok:
+        if answer_line is not None and not answer_ok:
+            fails.append("cold_answer")
+        if cold_content_line is not None and not cold_content_ok:
             fails.append("cold_content")
         if probes and not p_ok:
             fails.append("cold_probe")
@@ -878,12 +1066,18 @@ def chat_summary(
     if mode == "soak":
         summary["soak_truncated"] = trunc_line
         summary["soak_length"] = length_line
-        summary["soak_content"] = content_line
+        if answer_line is not None:
+            summary["soak_answer"] = answer_line
+        if content_line is not None:
+            summary["soak_content"] = content_line
         summary["fails"] = fails
         summary["invalids"] = []
     if mode == "cold":
         summary["cold_truncated"] = trunc_line
-        summary["cold_content"] = cold_content_line
+        if answer_line is not None:
+            summary["cold_answer"] = answer_line
+        if cold_content_line is not None:
+            summary["cold_content"] = cold_content_line
         summary["fails"] = fails
         summary["invalids"] = []
     return lines, code, summary
@@ -898,7 +1092,13 @@ def request_row(
     error,
     fixture_name: str,
     role: Optional[str] = None,
+    answer_key=None,
+    answer_missing=None,
+    answer_facts=None,
+    log_content: bool = False,
 ) -> dict:
+    probe = mode == "cold" and role == "probe"
+    keyed = bool(answer_key) and not probe
     row = {
         "kind": "request",
         "ts": local_iso(),
@@ -914,10 +1114,24 @@ def request_row(
         "completion_tokens": result.get("completion_tokens"),
         "length": (
             "na"
-            if mode == "cold" and role == "probe"
-            else length_word(result.get("finish_reason"), result.get("content_len"))
+            if probe
+            else length_word(
+                result.get("finish_reason"),
+                result.get("content_len"),
+                keyed=keyed,
+            )
         ),
     }
+    if mode in ("cold", "soak"):
+        content = result.get("content")
+        if log_content and isinstance(content, str):
+            row["content"] = content
+        else:
+            row["content"] = None
+        row["answer_missing"] = list(answer_missing or [])
+        row["answer_key"] = answer_key
+        if answer_facts is not None:
+            row["answer_facts"] = list(answer_facts)
     if role:
         row["role"] = role
     if result.get("reasoning_len") is not None:
@@ -962,11 +1176,16 @@ def fixture_index(request_idx: int, count: int) -> int:
     return (request_idx - 1) % count
 
 
+def _pack_fixture(path: Path):
+    return (path.name, load_fixture(path), path, load_answer_key(path))
+
+
 def resolve_chat_fixtures(args):
-    """Return [(filename, text), ...] in rotation order.
+    """Return [(filename, text, path, answer_key or None), ...] in rotation order.
 
     --fixture and --fixtures-dir together are a config error. Neither flag
-    uses the default single paste.
+    uses the default single paste. An answer key is the sidecar
+    <stem>.answer.json beside the paste, when that file exists.
     """
     fixture = (args.fixture or "").strip()
     folder = (getattr(args, "fixtures_dir", "") or "").strip()
@@ -986,9 +1205,9 @@ def resolve_chat_fixtures(args):
         )
         if not paths:
             raise ConfigError("bad fixtures-dir")
-        return [(path.name, load_fixture(path)) for path in paths]
+        return [_pack_fixture(path) for path in paths]
     path = Path(fixture) if fixture else default_fixture()
-    return [(path.name, load_fixture(path))]
+    return [_pack_fixture(path)]
 
 
 def _finite_non_negative(value: float) -> bool:
@@ -1126,8 +1345,28 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
             for idx in range(1, n + 1):
                 if idx > 1 and interval > 0:
                     time.sleep(interval)
-                fixture_name, paste = fixtures[fixture_index(idx, len(fixtures))]
+                fixture_name, paste, fixture_path, answer = fixtures[
+                    fixture_index(idx, len(fixtures))
+                ]
                 result = perform_chat(url, paste, model, args.max_tokens, timeout)
+                answer_key = None
+                answer_missing = []
+                answer_facts = None
+                log_content = False
+                if mode in ("cold", "soak"):
+                    log_content = synth_paste(fixture_path)
+                    if answer:
+                        answer_key = answer["name"]
+                        answer_facts = list(answer["facts"])
+                        content = result.get("content")
+                        scored = isinstance(content, str)
+                        if scored:
+                            answer_missing = missing_facts(answer_facts, content)
+                        else:
+                            answer_missing = list(answer_facts)
+                        result["answer_facts"] = list(answer_facts)
+                        result["answer_missing"] = list(answer_missing)
+                        result["answer_scored"] = scored
                 wall_s = adjusted_wall(result["elapsed"], limits)
                 verdict, error = classify_request(mode, wall_s, result, limits)
                 row_idx = idx
@@ -1138,7 +1377,18 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
                     total = 2
                     role = "generate"
                 row = request_row(
-                    mode, row_idx, wall_s, result, verdict, error, fixture_name, role=role
+                    mode,
+                    row_idx,
+                    wall_s,
+                    result,
+                    verdict,
+                    error,
+                    fixture_name,
+                    role=role,
+                    answer_key=answer_key,
+                    answer_missing=answer_missing,
+                    answer_facts=answer_facts,
+                    log_content=log_content,
                 )
                 rows.append(row)
                 jsonl.write(row)
@@ -1187,7 +1437,7 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
             mem_line=mem_line,
             mem_ok=mem_ok,
         )
-        summary["fixtures"] = [name for name, _text in fixtures]
+        summary["fixtures"] = [name for name, _text, _path, _key in fixtures]
         jsonl.write(summary)
         for line in lines:
             print(line, flush=True)
