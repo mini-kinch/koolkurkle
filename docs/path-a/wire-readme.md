@@ -12,6 +12,9 @@ Companion to the Path A Qwen chat ops pack (up/down and LaunchAgent templates li
 - `docs/path-a/wire-readme.md` — this note
 
 ## Install
+Prefer `scripts/install_path_a_wire_to_mailarchive.sh` — see [mini-install.md](mini-install.md).
+Copies the five scripts and `docs/path-a/` into `$MAILARCHIVE` (default `$HOME/MailArchive`). Does not replace `ask_mail.py`.
+
 In this repo the scripts stay under `scripts/`. These notes stay under `docs/path-a/`.
 
 On Mini, copy the five script files into `$HOME/MailArchive/scripts/`. The wrappers resolve `$MAILARCHIVE/scripts/` (default `$HOME/MailArchive`). Then:
