@@ -14,7 +14,7 @@ Python 3.9, standard library only. On macOS, `/usr/bin/python3` is enough.
 - No server restarts and no reconfiguration.
 - No writes to mail, sqlite, LaunchAgents, or model config.
 - `warm`, `cold`, and `soak` POST `/v1/chat/completions` and GET `/v1/models` once at start.
-- `mem` runs `sysctl vm.swapusage`, `vm_stat`, `pgrep -x ollama`, and a TCP connect to `127.0.0.1:11434`. On non-macOS, swap and `vm_stat` are `UNKNOWN` (the process exits 1; it does not crash).
+- `mem` runs `sysctl vm.swapusage`, `vm_stat`, `pgrep -x ollama`, and a TCP connect to `127.0.0.1:11434`. On non-macOS, swap and `vm_stat` are `UNKNOWN` (the process exits 1; it does not crash). `--baseline-out` writes only the JSON snapshot you asked for.
 - Each run hashes `ask_mail.py` at start and end (`--ask-mail`, default `$HOME/MailArchive/scripts/ask_mail.py`). A missing file is reported as `absent` and is not a failure. If the hash changes during the run, the run fails. The file is only read.
 
 The chat body matches `scripts/qwen_paste_chat_post.py` with thinking left off: the same system prompt, `temperature` 0.2, `chat_template_kwargs.enable_thinking` false, and `/no_think` appended to the paste. If the first reply is reasoning-only, one retry is sent the same way that script retries, and `content_len` is the stripped assistant `content` (reasoning is not substituted for content). Wall time includes that retry. The separate max-tokens-1 probe from that script is not sent, so the clock is the paste completion itself.
@@ -28,6 +28,11 @@ From a clone of this repo:
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-warm.jsonl"
 
+/usr/bin/python3 scripts/path_a_bench.py warm \
+  --fixtures-dir tests/fixtures/path_a/paste_4k \
+  --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
+  --out "$HOME/path-a-warm-honest.jsonl"
+
 /usr/bin/python3 scripts/path_a_bench.py cold \
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-cold.jsonl"
@@ -37,6 +42,12 @@ From a clone of this repo:
   --out "$HOME/path-a-soak.jsonl"
 
 /usr/bin/python3 scripts/path_a_bench.py mem \
+  --baseline-out "$HOME/path-a-mem-baseline.json" \
+  --ask-mail "$HOME/MailArchive/scripts/ask_mail.py"
+
+/usr/bin/python3 scripts/path_a_bench.py mem \
+  --baseline "$HOME/path-a-mem-baseline.json" \
+  --settle 120 \
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-mem.jsonl"
 ```
@@ -47,15 +58,21 @@ Common flags:
 | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:1234` | Chat server origin. `/v1` is appended if missing. |
 | `--model` | first id from `GET /v1/models` | Override the model id. |
-| `--fixture` | `tests/fixtures/path_a/paste_4k_synthetic.txt` | DATA+QUESTION paste, resolved from the repo for the default. |
+| `--fixture` | `tests/fixtures/path_a/paste_4k_synthetic.txt` | One DATA+QUESTION paste. Omit both paste flags to use this default. |
+| `--fixtures-dir` | (none) | Directory of `.txt` pastes for `warm`, `cold`, and `soak`. Sorted by filename. Request `i` (counting from 0) uses file `i mod n`. |
 | `--max-tokens` | `512` | Completion cap (retry uses at least 768, same as the paste client). |
 | `--timeout` | warm 60s, cold 120s, soak 300s | Per-request urllib timeout. |
 | `--out` | (none) | JSONL path. One object per line. |
 | `--ask-mail` | `$HOME/MailArchive/scripts/ask_mail.py` | File to hash at start and end. |
 | `-n` / `--n` | warm 10, soak 48 | Request count. |
 | `--interval` | soak 300 | Seconds to wait between soak requests. |
+| `--baseline-out` | (none) | `mem`: write a JSON snapshot of the measurement just taken. |
+| `--baseline` | (none) | `mem`: snapshot taken before the model was loaded. |
+| `--settle` | `0` | `mem`: seconds to wait after a clean baseline, then measure. A countdown line prints every 30 seconds. Requires `--baseline`. |
 
-`cold` is always one request. Idle time is the operator's job; the harness prints a note and does not check it.
+Passing `--fixture` and `--fixtures-dir` together is a config error (exit 2). A missing or unreadable `--baseline` file is also exit 2.
+
+`cold` is always one request. With `--fixtures-dir` it uses the first sorted file. Idle time is the operator's job; the harness prints a note and does not check it.
 
 A bad fixture, a bad flag, or a chat server that is unreachable at start (request modes) exits 2. `mem` does not contact the chat server.
 
@@ -64,6 +81,10 @@ A bad fixture, a bad flag, or a chat server that is unreachable at start (reques
 ### warm
 
 N sequential paste requests (default 10).
+
+Single-fixture warm (`--fixture`, or the default paste) is **warm cached**: the same prompt every request, so a prompt-cache hit. Treat a fast median as falsifier-2 style evidence, not as a cold clock. The harness prints `NOTE warm_cached`.
+
+`--fixtures-dir` warm is the **honest clock gate**. Requests rotate through the sorted `.txt` files in that directory (ten distinct pastes live in `tests/fixtures/path_a/paste_4k/`). Different prompts, so the wall clock is not a cache hit on one prefix. The harness prints `NOTE warm_honest`. `tests/fixtures/path_a/paste_4k_synthetic.txt` stays the single-fixture default and is not part of that directory.
 
 Per request, PASS means all of:
 
@@ -96,7 +117,15 @@ Read-only host check.
 - `vm_stat`: free, active, and wired pages are printed as `INFO` and do not change the result.
 - Ollama is down when `pgrep -x ollama` finds no process and nothing accepts a TCP connection on `127.0.0.1:11434`.
 
-PASS means swap is under 1 GB and Ollama is down, and the `ask_mail.py` hash did not change. On non-macOS, swap and `vm_stat` are `UNKNOWN` and the overall result is FAIL (exit 1) without a crash.
+Without `--baseline`, PASS means swap is under 1 GB and Ollama is down, and the `ask_mail.py` hash did not change. On non-macOS, swap and `vm_stat` are `UNKNOWN` and the overall result is FAIL (exit 1) without a crash.
+
+`--baseline-out FILE` writes a snapshot of the measurement just taken: `timestamp`, `swap_used_mb`, `vm_stat` (`free_pages`, `active_pages`, `wired_pages`), and `ollama_down` (true only when the process is down and port 11434 is closed). Take this **before** loading the model, while the machine is still clean.
+
+`--baseline FILE --settle SECONDS` reads that snapshot, then waits `SECONDS` (a `settle remaining_s=` line every 30 seconds), then measures.
+
+- **INVALID** (exit 5) if the baseline swap was already at least 1024 MB. The machine was dirty before model load; the harness says so explicitly and does not treat the later number as evidence. It returns before the settle sleep.
+- **PASS** (exit 0) if the baseline was clean and the new measurement has swap under 1024 MB and Ollama down.
+- **FAIL** (exit 1) otherwise (swap at or above 1024 MB, Ollama up, an unconfirmed check, or an `ask_mail.py` hash change).
 
 ## Verdicts
 
@@ -116,7 +145,7 @@ PASS means swap is under 1 GB and Ollama is down, and the `ask_mail.py` hash did
 
 ## JSONL
 
-Request rows (`kind` `request`) include: local ISO timestamp (`ts`), `mode`, `idx`, `wall_s`, `http_status`, `finish_reason`, `content_len`, `verdict`, `error`. `reasoning_len` is present when the message included a reasoning string. `prompt_tokens` and `completion_tokens` are present when the server returned `usage`.
+Request rows (`kind` `request`) include: local ISO timestamp (`ts`), `mode`, `idx`, `fixture` (filename only), `wall_s`, `http_status`, `finish_reason`, `content_len`, `verdict`, `error`. `reasoning_len` is present when the message included a reasoning string. `prompt_tokens` and `completion_tokens` are present when the server returned `usage`.
 
 The last line of a chat run is `kind` `summary` (counts, min/median/max wall, both ask-mail hashes, overall). `mem` writes one `kind` `mem` row.
 
@@ -126,8 +155,9 @@ The last line of a chat run is `kind` `summary` (counts, min/median/max wall, bo
 | --- | --- |
 | 0 | Overall PASS |
 | 1 | Overall FAIL (a bar missed, or `mem` could not confirm the bars) |
-| 2 | Usage or config error: bad flags, bad fixture, chat server unreachable at start, JSONL path not writable |
+| 2 | Usage or config error: bad flags, both paste flags, bad fixture, missing or unreadable baseline, chat server unreachable at start, JSONL or baseline path not writable |
 | 4 | Soak wedge. A request hung. The run stopped. |
+| 5 | `mem --baseline` is INVALID: baseline swap was already >= 1024 MB (machine dirty before model load) |
 
 The human summary ends with one line per bar (`PASS` or `FAIL` plus n, min/median/max wall, failures, and hung where those apply) and an `OVERALL` line.
 

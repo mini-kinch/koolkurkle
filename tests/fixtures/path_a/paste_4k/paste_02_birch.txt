@@ -1,0 +1,79 @@
+DATA:
+1. message_id: birch-1001
+   date: 2026-05-04
+   from: sender1@example.com
+   subject: birch crate card 1
+   snippet: Fictional birch update about a crate card. Amount listed as 4.20. Reference birch-01.
+2. message_id: birch-1002
+   date: 2026-05-06
+   from: sender2@example.com
+   subject: birch delay slip 2
+   snippet: Fictional birch update about a delay slip. Amount listed as 5.20. Reference birch-02.
+3. message_id: birch-1003
+   date: 2026-05-08
+   from: sender3@example.com
+   subject: Birchlane Supply ink set
+   snippet: Fictional birch note from Birchlane Supply about a ink set. Amount listed as 7.85. Reference birch-r3.
+4. message_id: birch-1004
+   date: 2026-05-10
+   from: sender4@example.com
+   subject: birch invoice copy 4
+   snippet: Fictional birch update about an invoice copy. Amount listed as 7.20. Reference birch-04.
+5. message_id: birch-1005
+   date: 2026-05-12
+   from: sender5@example.com
+   subject: birch storage chit 5
+   snippet: Fictional birch update about a storage chit. Amount listed as 8.20. Reference birch-05.
+6. message_id: birch-1006
+   date: 2026-05-14
+   from: sender6@example.com
+   subject: birch ticket stub 6
+   snippet: Fictional birch update about a ticket stub. Amount listed as 9.20. Reference birch-06.
+7. message_id: birch-1007
+   date: 2026-05-16
+   from: sender7@example.com
+   subject: birch restock memo 7
+   snippet: Fictional birch update about a restock memo. Amount listed as 10.20. Reference birch-07.
+8. message_id: birch-1008
+   date: 2026-05-18
+   from: sender8@example.com
+   subject: birch quiet alert 8
+   snippet: Fictional birch update about a quiet alert. Amount listed as 11.20. Reference birch-08.
+9. message_id: birch-1009
+   date: 2026-05-20
+   from: sender9@example.com
+   subject: birch delivery card 9
+   snippet: Fictional birch update about a delivery card. Amount listed as 12.20. Reference birch-09.
+10. message_id: birch-1010
+   date: 2026-05-22
+   from: sender10@example.com
+   subject: birch subscription 10
+   snippet: Fictional birch update about a subscription. Amount listed as 13.20. Reference birch-10.
+11. message_id: birch-1011
+   date: 2026-05-24
+   from: sender11@example.com
+   subject: birch hinge note 11
+   snippet: Fictional birch update about a hinge note. Amount listed as 14.20. Reference birch-11.
+12. message_id: birch-1012
+   date: 2026-05-26
+   from: sender12@example.com
+   subject: birch tea receipt 12
+   snippet: Fictional birch update about a tea receipt. Amount listed as 15.20. Reference birch-12.
+13. message_id: birch-1013
+   date: 2026-05-01
+   from: sender13@example.com
+   subject: birch dock bill 13
+   snippet: Fictional birch update about a dock bill. Amount listed as 16.20. Reference birch-13.
+14. message_id: birch-1014
+   date: 2026-05-03
+   from: sender14@example.com
+   subject: birch declaration 14
+   snippet: Fictional birch update about a declaration. Amount listed as 17.20. Reference birch-14.
+15. message_id: birch-1015
+   date: 2026-05-05
+   from: sender15@example.com
+   subject: birch quota note 15
+   snippet: Fictional birch update about a quota note. Amount listed as 18.20. Reference birch-15. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1. Extra birch detail 1.
+
+QUESTION:
+Which message_id and date belong to the Birchlane Supply ink set, and which sender wrote it?

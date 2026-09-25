@@ -11,6 +11,10 @@ Test hooks (ignored unless PATH_A_BENCH_TEST_HOOKS=1):
   PATH_A_BENCH_WARM_WALL_MAX    override the 45s per-request warm bar
   PATH_A_BENCH_WARM_MEDIAN_MAX  override the 35s warm median bar
   PATH_A_BENCH_COLD_WALL_MAX    override the 90s cold bar
+  PATH_A_BENCH_SETTLE_SLEEP=0   skip the real settle sleep (lines still print)
+  PATH_A_BENCH_INJECT_SWAP_MB   fake swap MB and parse mem as macOS text
+  PATH_A_BENCH_OLLAMA_PROCESS   down, up, or unknown when swap is injected
+  PATH_A_BENCH_OLLAMA_PORT      closed, open, or unknown when swap is injected
 """
 from __future__ import annotations
 
@@ -520,12 +524,21 @@ def chat_summary(mode: str, rows: list, limits: dict, ask_start: str, ask_end: s
     return lines, code, summary
 
 
-def request_row(mode: str, idx: int, wall_s: float, result: dict, verdict: str, error) -> dict:
+def request_row(
+    mode: str,
+    idx: int,
+    wall_s: float,
+    result: dict,
+    verdict: str,
+    error,
+    fixture_name: str,
+) -> dict:
     row = {
         "kind": "request",
         "ts": local_iso(),
         "mode": mode,
         "idx": idx,
+        "fixture": fixture_name,
         "wall_s": wall_s,
         "http_status": result.get("http_status"),
         "finish_reason": result.get("finish_reason"),
@@ -548,16 +561,59 @@ def _progress(mode: str, idx: int, total: int, row: dict) -> str:
     finish = row.get("finish_reason") or "na"
     status = row.get("http_status")
     status_s = "na" if status is None else str(status)
-    return "%s %d/%d verdict=%s wall_s=%s http=%s finish=%s content_len=%s" % (
-        mode,
-        idx,
-        total,
-        row["verdict"],
-        fmt_num(row["wall_s"]),
-        status_s,
-        finish,
-        content_s,
+    return (
+        "%s %d/%d fixture=%s verdict=%s wall_s=%s http=%s finish=%s content_len=%s"
+        % (
+            mode,
+            idx,
+            total,
+            row.get("fixture") or "na",
+            row["verdict"],
+            fmt_num(row["wall_s"]),
+            status_s,
+            finish,
+            content_s,
+        )
     )
+
+
+def fixture_index(request_idx: int, count: int) -> int:
+    """0-based file index. Request i (0-based) uses file i mod count.
+
+    request_idx is 1-based, matching JSONL idx.
+    """
+    if count < 1 or request_idx < 1:
+        raise ConfigError("bad fixture rotation")
+    return (request_idx - 1) % count
+
+
+def resolve_chat_fixtures(args):
+    """Return [(filename, text), ...] in rotation order.
+
+    --fixture and --fixtures-dir together are a config error. Neither flag
+    uses the default single paste.
+    """
+    fixture = (args.fixture or "").strip()
+    folder = (getattr(args, "fixtures_dir", "") or "").strip()
+    if fixture and folder:
+        raise ConfigError("pass only one of --fixture and --fixtures-dir")
+    if folder:
+        directory = Path(folder)
+        if not directory.is_dir():
+            raise ConfigError("bad fixtures-dir")
+        paths = sorted(
+            (
+                path
+                for path in directory.iterdir()
+                if path.is_file() and path.suffix == ".txt" and not path.name.startswith(".")
+            ),
+            key=lambda path: path.name,
+        )
+        if not paths:
+            raise ConfigError("bad fixtures-dir")
+        return [(path.name, load_fixture(path)) for path in paths]
+    path = Path(fixture) if fixture else default_fixture()
+    return [(path.name, load_fixture(path))]
 
 
 def run_chat(args, limits: Optional[dict] = None) -> int:
@@ -576,7 +632,7 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
         interval = args.interval
         if interval < 0:
             raise ConfigError("bad interval")
-    paste = load_fixture(Path(args.fixture))
+    fixtures = resolve_chat_fixtures(args)
     ask_path = Path(args.ask_mail)
     ask_start = hash_ask_mail(ask_path)
     model = resolve_model(args.base_url, (args.model or "").strip(), timeout)
@@ -587,16 +643,31 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
             print(COLD_NOTE, flush=True)
         elif mode == "soak":
             print(SOAK_NOTE, flush=True)
+        if mode == "warm":
+            if (getattr(args, "fixtures_dir", "") or "").strip():
+                print(
+                    "NOTE warm_honest fixtures-dir rotation (clock gate)",
+                    flush=True,
+                )
+            else:
+                print(
+                    "NOTE warm_cached single fixture "
+                    "(prompt-cache hit, falsifier-2 style)",
+                    flush=True,
+                )
         print("model %s" % safe_label(model), flush=True)
         rows = []
         wedged = False
         for idx in range(1, n + 1):
             if idx > 1 and interval > 0:
                 time.sleep(interval)
+            fixture_name, paste = fixtures[fixture_index(idx, len(fixtures))]
             result = perform_chat(url, paste, model, args.max_tokens, timeout)
             wall_s = adjusted_wall(result["elapsed"], limits)
             verdict, error = classify_request(mode, wall_s, result, limits)
-            row = request_row(mode, idx, wall_s, result, verdict, error)
+            row = request_row(
+                mode, idx, wall_s, result, verdict, error, fixture_name
+            )
             rows.append(row)
             jsonl.write(row)
             print(_progress(mode, idx, n, row), flush=True)
@@ -614,6 +685,7 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
         lines, code, summary = chat_summary(
             mode, rows, limits, ask_start, ask_end, wedged
         )
+        summary["fixtures"] = [name for name, _text in fixtures]
         jsonl.write(summary)
         for line in lines:
             print(line, flush=True)
@@ -695,7 +767,7 @@ def evaluate_mem(platform_name: str, swap_text, vm_text, process: str, port: str
     }
 
 
-def render_mem(result: dict, ask_start: str, ask_end: str):
+def render_mem(result: dict, ask_start: str, ask_end: str, baseline_swap=None):
     used = result.get("swap_used_mb")
     used_s = "unknown" if used is None else "%.2f" % used
     pages = result.get("pages") or {}
@@ -711,6 +783,11 @@ def render_mem(result: dict, ask_start: str, ask_end: str):
         "%s ollama process=%s port_11434=%s"
         % (result["ollama_status"], result["process"], result["port"]),
     ]
+    if baseline_swap is not None:
+        lines.append(
+            "INFO baseline swap_used_mb=%.2f limit_mb=1024 clean_before_load=yes"
+            % baseline_swap
+        )
     ask_status, ask_detail = ask_mail_bar(ask_start, ask_end)
     lines.append("%s %s" % (ask_status, ask_detail))
     ok = (
@@ -720,6 +797,86 @@ def render_mem(result: dict, ask_start: str, ask_end: str):
     )
     lines.append("OVERALL %s" % ("PASS" if ok else "FAIL"))
     return lines, (0 if ok else 1)
+
+
+def _fmt_remaining(seconds: float) -> str:
+    if abs(seconds - round(seconds)) < 0.001:
+        return str(int(round(seconds)))
+    return "%.3f" % seconds
+
+
+def sleep_seconds(seconds: float) -> None:
+    """Real sleep, unless the settle test hook says to skip it."""
+    if os.environ.get("PATH_A_BENCH_TEST_HOOKS", "").strip() == "1":
+        if os.environ.get("PATH_A_BENCH_SETTLE_SLEEP", "").strip() == "0":
+            return
+    time.sleep(seconds)
+
+
+def settle_wait(seconds: float, sleep_fn=None, emit=None) -> None:
+    """Sleep seconds, printing a countdown line every 30 seconds."""
+    if sleep_fn is None:
+        sleep_fn = sleep_seconds
+    if emit is None:
+        emit = lambda line: print(line, flush=True)
+    remaining = float(seconds)
+    if remaining < 0 or remaining != remaining or remaining == float("inf"):
+        raise ConfigError("bad settle")
+    while remaining > 0:
+        emit("settle remaining_s=%s" % _fmt_remaining(remaining))
+        chunk = 30.0 if remaining > 30.0 else remaining
+        sleep_fn(chunk)
+        remaining -= chunk
+        if remaining < 1e-6:
+            remaining = 0.0
+
+
+def baseline_snapshot(result: dict, timestamp: Optional[str] = None) -> dict:
+    pages = result.get("pages") or {}
+    ollama_down = result.get("process") == "down" and result.get("port") == "closed"
+    return {
+        "timestamp": timestamp or local_iso(),
+        "swap_used_mb": result.get("swap_used_mb"),
+        "vm_stat": {
+            "free_pages": pages.get("free"),
+            "active_pages": pages.get("active"),
+            "wired_pages": pages.get("wired"),
+        },
+        "ollama_down": ollama_down,
+    }
+
+
+def load_baseline(path: Path) -> dict:
+    if not path.is_file():
+        raise ConfigError("baseline missing")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        raise ConfigError("baseline unreadable")
+    if not isinstance(data, dict):
+        raise ConfigError("baseline unreadable")
+    swap = data.get("swap_used_mb")
+    if isinstance(swap, bool) or not isinstance(swap, (int, float)):
+        raise ConfigError("baseline unreadable")
+    value = float(swap)
+    if value < 0 or value != value or value == float("inf") or value == float("-inf"):
+        raise ConfigError("baseline unreadable")
+    data["swap_used_mb"] = value
+    return data
+
+
+def write_baseline(path: Path, snapshot: dict) -> None:
+    try:
+        path.write_text(
+            json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        raise ConfigError("cannot write baseline")
+
+
+def _hooks_enabled() -> bool:
+    return os.environ.get("PATH_A_BENCH_TEST_HOOKS", "").strip() == "1"
 
 
 def _run_text(argv: list) -> str:
@@ -771,6 +928,25 @@ def ollama_port_state() -> str:
 
 
 def collect_host_mem(platform_name: Optional[str] = None):
+    injected = os.environ.get("PATH_A_BENCH_INJECT_SWAP_MB", "").strip()
+    if _hooks_enabled() and injected:
+        try:
+            used = float(injected)
+        except ValueError:
+            raise ConfigError("bad injected swap")
+        swap_text = (
+            "vm.swapusage: total = 8192.00M  used = %.2fM  free = 0.00M\n" % used
+        )
+        free = int(os.environ.get("PATH_A_BENCH_VM_FREE", "10") or "10")
+        active = int(os.environ.get("PATH_A_BENCH_VM_ACTIVE", "20") or "20")
+        wired = int(os.environ.get("PATH_A_BENCH_VM_WIRED", "30") or "30")
+        vm_text = (
+            "Pages free: %d.\nPages active: %d.\nPages wired down: %d.\n"
+            % (free, active, wired)
+        )
+        process = os.environ.get("PATH_A_BENCH_OLLAMA_PROCESS", "down").strip() or "down"
+        port = os.environ.get("PATH_A_BENCH_OLLAMA_PORT", "closed").strip() or "closed"
+        return "darwin", swap_text, vm_text, process, port
     platform_name = platform_name or sys.platform
     if platform_name != "darwin":
         swap_text = None
@@ -787,38 +963,85 @@ def collect_host_mem(platform_name: Optional[str] = None):
     )
 
 
-def run_mem(args) -> int:
-    ask_path = Path(args.ask_mail)
-    ask_start = hash_ask_mail(ask_path)
-    collected = collect_host_mem()
-    ask_end = hash_ask_mail(ask_path)
-    result = evaluate_mem(*collected)
-    lines, code = render_mem(result, ask_start, ask_end)
-    pages = result["pages"]
+def _mem_row(result, ask_start, ask_end, code, baseline_swap=None, invalid=False) -> dict:
+    pages = (result or {}).get("pages") or {}
+    if invalid:
+        verdict = "invalid"
+        error = "machine dirty before model load"
+    elif code == 0:
+        verdict = "pass"
+        error = None
+    else:
+        verdict = "fail"
+        error = None
     row = {
         "kind": "mem",
         "ts": local_iso(),
         "mode": "mem",
-        "swap_used_mb": result["swap_used_mb"],
-        "swap_status": result["swap_status"],
+        "swap_used_mb": None if result is None else result.get("swap_used_mb"),
+        "swap_status": None if result is None else result.get("swap_status"),
         "vm_free_pages": pages.get("free"),
         "vm_active_pages": pages.get("active"),
         "vm_wired_pages": pages.get("wired"),
-        "ollama_process": result["process"],
-        "ollama_port": result["port"],
-        "ollama_status": result["ollama_status"],
+        "ollama_process": None if result is None else result.get("process"),
+        "ollama_port": None if result is None else result.get("port"),
+        "ollama_status": None if result is None else result.get("ollama_status"),
         "ask_mail_sha256_start": ask_start,
         "ask_mail_sha256_end": ask_end,
-        "verdict": "pass" if code == 0 else "fail",
+        "verdict": verdict,
+        "error": error,
     }
+    if baseline_swap is not None:
+        row["baseline_swap_used_mb"] = baseline_swap
+    return row
+
+
+def run_mem(args) -> int:
+    ask_path = Path(args.ask_mail)
+    baseline_path = (getattr(args, "baseline", "") or "").strip()
+    baseline_out = (getattr(args, "baseline_out", "") or "").strip()
+    settle = float(getattr(args, "settle", 0) or 0)
+    if settle < 0:
+        raise ConfigError("bad settle")
+    if settle and not baseline_path:
+        raise ConfigError("settle requires --baseline")
+    baseline = load_baseline(Path(baseline_path)) if baseline_path else None
     jsonl = Jsonl(args.out)
     try:
-        jsonl.write(row)
+        if baseline is not None and float(baseline["swap_used_mb"]) >= SWAP_LIMIT_MB:
+            swap = float(baseline["swap_used_mb"])
+            ask_start = hash_ask_mail(ask_path)
+            ask_end = hash_ask_mail(ask_path)
+            lines = [
+                (
+                    "INVALID baseline swap_used_mb=%.2f limit_mb=1024 "
+                    "machine dirty before model load" % swap
+                ),
+                "%s %s" % ask_mail_bar(ask_start, ask_end),
+                "OVERALL INVALID",
+            ]
+            jsonl.write(
+                _mem_row(None, ask_start, ask_end, 5, baseline_swap=swap, invalid=True)
+            )
+            for line in lines:
+                print(line, flush=True)
+            return 5
+        ask_start = hash_ask_mail(ask_path)
+        if settle:
+            settle_wait(settle)
+        collected = collect_host_mem()
+        ask_end = hash_ask_mail(ask_path)
+        result = evaluate_mem(*collected)
+        if baseline_out:
+            write_baseline(Path(baseline_out), baseline_snapshot(result))
+        base_swap = None if baseline is None else float(baseline["swap_used_mb"])
+        lines, code = render_mem(result, ask_start, ask_end, baseline_swap=base_swap)
+        jsonl.write(_mem_row(result, ask_start, ask_end, code, baseline_swap=base_swap))
+        for line in lines:
+            print(line, flush=True)
+        return code
     finally:
         jsonl.close()
-    for line in lines:
-        print(line, flush=True)
-    return code
 
 
 def _positive_timeout(value: str) -> float:
@@ -835,7 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--base-url", default="http://127.0.0.1:1234")
     common.add_argument("--model", default="")
-    common.add_argument("--fixture", default=str(default_fixture()))
+    common.add_argument("--fixture", default=None)
     common.add_argument("--max-tokens", type=int, default=512)
     common.add_argument("--timeout", type=_positive_timeout, default=None)
     common.add_argument("--out", default="")
@@ -849,14 +1072,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     warm = sub.add_parser("warm", parents=[common], help="N sequential paste requests")
     warm.add_argument("-n", "--n", type=int, default=10)
+    warm.add_argument("--fixtures-dir", default="")
 
-    sub.add_parser("cold", parents=[common], help="one request after an operator idle")
+    cold = sub.add_parser("cold", parents=[common], help="one request after an operator idle")
+    cold.add_argument("--fixtures-dir", default="")
 
     soak = sub.add_parser("soak", parents=[common], help="N requests on an interval")
     soak.add_argument("-n", "--n", type=int, default=48)
     soak.add_argument("--interval", type=float, default=300.0)
+    soak.add_argument("--fixtures-dir", default="")
 
-    sub.add_parser("mem", parents=[common], help="read-only swap, vm_stat, and Ollama checks")
+    mem = sub.add_parser("mem", parents=[common], help="read-only swap, vm_stat, and Ollama checks")
+    mem.add_argument("--baseline-out", default="")
+    mem.add_argument("--baseline", default="")
+    mem.add_argument("--settle", type=float, default=0.0)
     return parser
 
 

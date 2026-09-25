@@ -1,0 +1,79 @@
+DATA:
+1. message_id: helix-1001
+   date: 2026-06-10
+   from: sender1@example.com
+   subject: helix crate card 1
+   snippet: Fictional helix update about a crate card. Amount listed as 9.00. Reference helix-01.
+2. message_id: helix-1002
+   date: 2026-06-12
+   from: sender2@example.com
+   subject: helix delay slip 2
+   snippet: Fictional helix update about a delay slip. Amount listed as 10.00. Reference helix-02.
+3. message_id: helix-1003
+   date: 2026-06-14
+   from: sender3@example.com
+   subject: Helixford Billing studio stool
+   snippet: Fictional helix note from Helixford Billing about a studio stool. Amount listed as 33.40. Reference helix-r3.
+4. message_id: helix-1004
+   date: 2026-06-16
+   from: sender4@example.com
+   subject: helix invoice copy 4
+   snippet: Fictional helix update about an invoice copy. Amount listed as 12.00. Reference helix-04.
+5. message_id: helix-1005
+   date: 2026-06-18
+   from: sender5@example.com
+   subject: helix storage chit 5
+   snippet: Fictional helix update about a storage chit. Amount listed as 13.00. Reference helix-05.
+6. message_id: helix-1006
+   date: 2026-06-20
+   from: sender6@example.com
+   subject: helix ticket stub 6
+   snippet: Fictional helix update about a ticket stub. Amount listed as 14.00. Reference helix-06.
+7. message_id: helix-1007
+   date: 2026-06-22
+   from: sender7@example.com
+   subject: helix restock memo 7
+   snippet: Fictional helix update about a restock memo. Amount listed as 15.00. Reference helix-07.
+8. message_id: helix-1008
+   date: 2026-06-24
+   from: sender8@example.com
+   subject: helix quiet alert 8
+   snippet: Fictional helix update about a quiet alert. Amount listed as 16.00. Reference helix-08.
+9. message_id: helix-1009
+   date: 2026-06-26
+   from: sender9@example.com
+   subject: helix delivery card 9
+   snippet: Fictional helix update about a delivery card. Amount listed as 17.00. Reference helix-09.
+10. message_id: helix-1010
+   date: 2026-06-01
+   from: sender10@example.com
+   subject: helix subscription 10
+   snippet: Fictional helix update about a subscription. Amount listed as 18.00. Reference helix-10.
+11. message_id: helix-1011
+   date: 2026-06-03
+   from: sender11@example.com
+   subject: helix hinge note 11
+   snippet: Fictional helix update about a hinge note. Amount listed as 19.00. Reference helix-11.
+12. message_id: helix-1012
+   date: 2026-06-05
+   from: sender12@example.com
+   subject: helix tea receipt 12
+   snippet: Fictional helix update about a tea receipt. Amount listed as 20.00. Reference helix-12.
+13. message_id: helix-1013
+   date: 2026-06-07
+   from: sender13@example.com
+   subject: helix dock bill 13
+   snippet: Fictional helix update about a dock bill. Amount listed as 21.00. Reference helix-13.
+14. message_id: helix-1014
+   date: 2026-06-09
+   from: sender14@example.com
+   subject: helix declaration 14
+   snippet: Fictional helix update about a declaration. Amount listed as 22.00. Reference helix-14.
+15. message_id: helix-1015
+   date: 2026-06-11
+   from: sender15@example.com
+   subject: helix quota note 15
+   snippet: Fictional helix update about a quota note. Amount listed as 23.00. Reference helix-15. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7. Extra helix detail 7.
+
+QUESTION:
+Which message_id reports the Helixford Billing studio stool, and what amount is listed?

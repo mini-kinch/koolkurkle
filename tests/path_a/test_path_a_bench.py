@@ -22,6 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "path_a_bench.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k_synthetic.txt"
+FIXTURES_DIR = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k"
+FIXED_HEADER = "DATA:\n1. message_id: "
 POST = ROOT / "scripts" / "qwen_paste_chat_post.py"
 SENTINEL = "SENTINEL_CONTENT_DO_NOT_PRINT"
 USERS_PREFIX = "/" + "Users" + "/"
@@ -36,6 +38,13 @@ _HOOKS = (
     "PATH_A_BENCH_WARM_WALL_MAX",
     "PATH_A_BENCH_WARM_MEDIAN_MAX",
     "PATH_A_BENCH_COLD_WALL_MAX",
+    "PATH_A_BENCH_SETTLE_SLEEP",
+    "PATH_A_BENCH_INJECT_SWAP_MB",
+    "PATH_A_BENCH_OLLAMA_PROCESS",
+    "PATH_A_BENCH_OLLAMA_PORT",
+    "PATH_A_BENCH_VM_FREE",
+    "PATH_A_BENCH_VM_ACTIVE",
+    "PATH_A_BENCH_VM_WIRED",
 )
 
 
@@ -312,6 +321,9 @@ class PathABenchTests(unittest.TestCase):
         self.assertNotIn(ME_MARK, doc.lower())
         self.assertIn("$HOME", doc)
         self.assertIn("does not restart", doc.lower())
+        self.assertIn("warm cached", doc.lower())
+        self.assertIn("clock gate", doc.lower())
+        self.assertIn("machine dirty before model load", doc)
 
     def test_system_prompt_matches_post_py(self) -> None:
         post = POST.read_text(encoding="utf-8")
@@ -655,6 +667,232 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(row["swap_status"], "UNKNOWN")
         self.assertEqual(row["ask_mail_sha256_start"], "absent")
         self.assertEqual(row["ask_mail_sha256_end"], "absent")
+
+    def _sorted_fixtures(self) -> list:
+        return sorted(path.name for path in FIXTURES_DIR.glob("*.txt"))
+
+    def test_fixture_dir_sizes_and_distinct_prefixes(self) -> None:
+        names = self._sorted_fixtures()
+        self.assertEqual(len(names), 10)
+        texts = []
+        for name in names:
+            raw = (FIXTURES_DIR / name).read_bytes()
+            self.assertGreaterEqual(len(raw), 3800, msg=name)
+            self.assertLessEqual(len(raw), 4200, msg=name)
+            text = raw.decode("utf-8")
+            self.assertTrue(text.startswith("DATA:\n"), msg=name)
+            self.assertIn("\nQUESTION:\n", text)
+            self.assertNotIn(ICLOUD_MARK, text.lower())
+            self.assertNotIn(ME_MARK, text.lower())
+            self.assertNotIn(USERS_PREFIX, text)
+            texts.append(text)
+        self.assertEqual(len(set(texts)), 10)
+        questions = []
+        for text in texts:
+            questions.append(text.split("QUESTION:\n", 1)[1].strip())
+        self.assertEqual(len(set(questions)), 10)
+        for i in range(len(texts)):
+            for j in range(i + 1, len(texts)):
+                prefix = os.path.commonprefix([texts[i], texts[j]])
+                self.assertLessEqual(len(prefix), len(FIXED_HEADER))
+                self.assertTrue(FIXED_HEADER.startswith(prefix) or prefix == FIXED_HEADER)
+
+    def test_fixture_rotation_order_and_wrap(self) -> None:
+        names = self._sorted_fixtures()
+        self.assertEqual(
+            [BENCH.fixture_index(i, 10) for i in range(1, 13)],
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1],
+        )
+        base = self._start("ok")
+        ask = self._ask()
+        proc = self._run(
+            [
+                "warm",
+                "--base-url",
+                base,
+                "--fixtures-dir",
+                str(FIXTURES_DIR),
+                "--ask-mail",
+                str(ask),
+                "--out",
+                str(self.tmp / "out.jsonl"),
+                "-n",
+                "12",
+                "--timeout",
+                "5",
+            ]
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("NOTE warm_honest fixtures-dir rotation (clock gate)", proc.stdout)
+        self.assertNotIn("warm_cached", proc.stdout)
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual(len(requests), 12)
+        self.assertEqual(len(self.httpd.posts), 12)
+        blob = (self.tmp / "out.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("Amberline", blob)
+        for idx, row in enumerate(requests, start=1):
+            expect = names[(idx - 1) % 10]
+            self.assertEqual(row["fixture"], expect)
+            body = json.loads(self.httpd.posts[idx - 1].decode("utf-8"))
+            user = body["messages"][1]["content"]
+            self.assertIn(expect.split("_")[2].split(".")[0] + "-", user)
+        self.assertEqual(requests[0]["fixture"], requests[10]["fixture"])
+        self.assertEqual(requests[1]["fixture"], requests[11]["fixture"])
+        self.assertNotEqual(requests[0]["fixture"], requests[1]["fixture"])
+
+    def test_fixture_and_fixtures_dir_conflict(self) -> None:
+        base = self._start("ok")
+        proc = self._run(
+            self._cmd(
+                "warm",
+                base,
+                self._ask(),
+                ["-n", "1", "--timeout", "2", "--fixtures-dir", str(FIXTURES_DIR)],
+            )
+        )
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("only one of --fixture and --fixtures-dir", proc.stderr)
+        self.assertEqual(self.httpd.posts, [])
+
+    def test_settle_countdown_is_injectable(self) -> None:
+        slept = []
+        lines = []
+        BENCH.settle_wait(75, sleep_fn=slept.append, emit=lines.append)
+        self.assertEqual(slept, [30.0, 30.0, 15.0])
+        self.assertEqual(
+            lines,
+            [
+                "settle remaining_s=75",
+                "settle remaining_s=45",
+                "settle remaining_s=15",
+            ],
+        )
+        BENCH.settle_wait(0, sleep_fn=slept.append, emit=lines.append)
+        self.assertEqual(slept, [30.0, 30.0, 15.0])
+
+    def _write_baseline(self, swap) -> Path:
+        path = self.tmp / "baseline.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                    "swap_used_mb": swap,
+                    "vm_stat": {
+                        "free_pages": 1,
+                        "active_pages": 2,
+                        "wired_pages": 3,
+                    },
+                    "ollama_down": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    def _mem_args(self, extra: list) -> list:
+        missing = self.tmp / "no-ask.py"
+        return [
+            "mem",
+            "--ask-mail",
+            str(missing),
+            "--out",
+            str(self.tmp / "out.jsonl"),
+            *extra,
+        ]
+
+    def test_mem_baseline_dirty_is_invalid(self) -> None:
+        path = self._write_baseline(1024)
+        proc = self._run(
+            self._mem_args(["--baseline", str(path), "--settle", "30"]),
+            timeout=5,
+        )
+        self.assertEqual(proc.returncode, 5, msg=proc.stdout + proc.stderr)
+        self.assertIn(
+            "INVALID baseline swap_used_mb=1024.00 limit_mb=1024 "
+            "machine dirty before model load",
+            proc.stdout,
+        )
+        self.assertIn("OVERALL INVALID", proc.stdout)
+        self.assertNotIn("settle remaining_s=", proc.stdout)
+        row = self._rows()[0]
+        self.assertEqual(row["verdict"], "invalid")
+        self.assertEqual(row["baseline_swap_used_mb"], 1024.0)
+
+    def test_mem_clean_baseline_low_swap_passes(self) -> None:
+        path = self._write_baseline(100)
+        proc = self._run(
+            self._mem_args(["--baseline", str(path), "--settle", "75"]),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_SETTLE_SLEEP": "0",
+                "PATH_A_BENCH_INJECT_SWAP_MB": "200",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("settle remaining_s=75", proc.stdout)
+        self.assertIn("settle remaining_s=45", proc.stdout)
+        self.assertIn("settle remaining_s=15", proc.stdout)
+        self.assertIn("PASS swap used_mb=200.00 limit_mb=1024", proc.stdout)
+        self.assertIn("clean_before_load=yes", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+
+    def test_mem_clean_baseline_high_swap_fails(self) -> None:
+        path = self._write_baseline(50)
+        proc = self._run(
+            self._mem_args(["--baseline", str(path), "--settle", "0"]),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_INJECT_SWAP_MB": "1500",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+            },
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("FAIL swap used_mb=1500.00", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+        self.assertNotIn("OVERALL INVALID", proc.stdout)
+        self.assertNotIn("machine dirty before model load", proc.stdout)
+
+    def test_mem_missing_baseline_exits_2(self) -> None:
+        missing = self.tmp / "no-baseline.json"
+        proc = self._run(self._mem_args(["--baseline", str(missing)]))
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("baseline missing", proc.stderr)
+        self.assertNotIn("OVERALL", proc.stdout)
+
+    def test_mem_unreadable_baseline_exits_2(self) -> None:
+        path = self.tmp / "bad-baseline.json"
+        path.write_text("{", encoding="utf-8")
+        proc = self._run(self._mem_args(["--baseline", str(path)]))
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("baseline unreadable", proc.stderr)
+
+    def test_mem_baseline_out_snapshot(self) -> None:
+        dest = self.tmp / "snap.json"
+        proc = self._run(
+            self._mem_args(["--baseline-out", str(dest)]),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_INJECT_SWAP_MB": "12.5",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+                "PATH_A_BENCH_VM_FREE": "11",
+                "PATH_A_BENCH_VM_ACTIVE": "22",
+                "PATH_A_BENCH_VM_WIRED": "33",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        snap = json.loads(dest.read_text(encoding="utf-8"))
+        self.assertIn("T", snap["timestamp"])
+        self.assertEqual(snap["swap_used_mb"], 12.5)
+        self.assertEqual(
+            snap["vm_stat"],
+            {"active_pages": 22, "free_pages": 11, "wired_pages": 33},
+        )
+        self.assertIs(snap["ollama_down"], True)
+        self.assertNotIn(USERS_PREFIX, dest.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

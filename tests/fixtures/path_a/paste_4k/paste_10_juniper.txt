@@ -1,0 +1,79 @@
+DATA:
+1. message_id: juniper-1001
+   date: 2026-08-12
+   from: sender1@example.com
+   subject: juniper crate card 1
+   snippet: Fictional juniper update about a crate card. Amount listed as 10.60. Reference juniper-01.
+2. message_id: juniper-1002
+   date: 2026-08-14
+   from: sender2@example.com
+   subject: juniper delay slip 2
+   snippet: Fictional juniper update about a delay slip. Amount listed as 11.60. Reference juniper-02.
+3. message_id: juniper-1003
+   date: 2026-08-16
+   from: sender3@example.com
+   subject: Juniper Dock Co locker fee
+   snippet: Fictional juniper note from Juniper Dock Co about a locker fee. Amount listed as 9.90. Reference juniper-r3.
+4. message_id: juniper-1004
+   date: 2026-08-18
+   from: sender4@example.com
+   subject: juniper invoice copy 4
+   snippet: Fictional juniper update about an invoice copy. Amount listed as 13.60. Reference juniper-04.
+5. message_id: juniper-1005
+   date: 2026-08-20
+   from: sender5@example.com
+   subject: juniper storage chit 5
+   snippet: Fictional juniper update about a storage chit. Amount listed as 14.60. Reference juniper-05.
+6. message_id: juniper-1006
+   date: 2026-08-22
+   from: sender6@example.com
+   subject: juniper ticket stub 6
+   snippet: Fictional juniper update about a ticket stub. Amount listed as 15.60. Reference juniper-06.
+7. message_id: juniper-1007
+   date: 2026-08-24
+   from: sender7@example.com
+   subject: juniper restock memo 7
+   snippet: Fictional juniper update about a restock memo. Amount listed as 16.60. Reference juniper-07.
+8. message_id: juniper-1008
+   date: 2026-08-26
+   from: sender8@example.com
+   subject: juniper quiet alert 8
+   snippet: Fictional juniper update about a quiet alert. Amount listed as 17.60. Reference juniper-08.
+9. message_id: juniper-1009
+   date: 2026-08-01
+   from: sender9@example.com
+   subject: juniper delivery card 9
+   snippet: Fictional juniper update about a delivery card. Amount listed as 18.60. Reference juniper-09.
+10. message_id: juniper-1010
+   date: 2026-08-03
+   from: sender10@example.com
+   subject: juniper subscription 10
+   snippet: Fictional juniper update about a subscription. Amount listed as 19.60. Reference juniper-10.
+11. message_id: juniper-1011
+   date: 2026-08-05
+   from: sender11@example.com
+   subject: juniper hinge note 11
+   snippet: Fictional juniper update about a hinge note. Amount listed as 20.60. Reference juniper-11.
+12. message_id: juniper-1012
+   date: 2026-08-07
+   from: sender12@example.com
+   subject: juniper tea receipt 12
+   snippet: Fictional juniper update about a tea receipt. Amount listed as 21.60. Reference juniper-12.
+13. message_id: juniper-1013
+   date: 2026-08-09
+   from: sender13@example.com
+   subject: juniper dock bill 13
+   snippet: Fictional juniper update about a dock bill. Amount listed as 22.60. Reference juniper-13.
+14. message_id: juniper-1014
+   date: 2026-08-11
+   from: sender14@example.com
+   subject: juniper declaration 14
+   snippet: Fictional juniper update about a declaration. Amount listed as 23.60. Reference juniper-14.
+15. message_id: juniper-1015
+   date: 2026-08-13
+   from: sender15@example.com
+   subject: juniper quota note 15
+   snippet: Fictional juniper update about a quota note. Amount listed as 24.60. Reference juniper-15. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9. Extra juniper detail 9.
+
+QUESTION:
+Which message_id, date, and amount describe the Juniper Dock Co locker fee?

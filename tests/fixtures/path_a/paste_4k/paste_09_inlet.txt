@@ -1,0 +1,79 @@
+DATA:
+1. message_id: inlet-1001
+   date: 2026-07-11
+   from: sender1@example.com
+   subject: inlet crate card 1
+   snippet: Fictional inlet update about a crate card. Amount listed as 9.80. Reference inlet-01.
+2. message_id: inlet-1002
+   date: 2026-07-13
+   from: sender2@example.com
+   subject: inlet delay slip 2
+   snippet: Fictional inlet update about a delay slip. Amount listed as 10.80. Reference inlet-02.
+3. message_id: inlet-1003
+   date: 2026-07-15
+   from: sender3@example.com
+   subject: Inletmarch Customs tag copy
+   snippet: Fictional inlet note from Inletmarch Customs about a tag copy. Amount listed as 4.75. Reference inlet-r3.
+4. message_id: inlet-1004
+   date: 2026-07-17
+   from: sender4@example.com
+   subject: inlet invoice copy 4
+   snippet: Fictional inlet update about an invoice copy. Amount listed as 12.80. Reference inlet-04.
+5. message_id: inlet-1005
+   date: 2026-07-19
+   from: sender5@example.com
+   subject: inlet storage chit 5
+   snippet: Fictional inlet update about a storage chit. Amount listed as 13.80. Reference inlet-05.
+6. message_id: inlet-1006
+   date: 2026-07-21
+   from: sender6@example.com
+   subject: inlet ticket stub 6
+   snippet: Fictional inlet update about a ticket stub. Amount listed as 14.80. Reference inlet-06.
+7. message_id: inlet-1007
+   date: 2026-07-23
+   from: sender7@example.com
+   subject: inlet restock memo 7
+   snippet: Fictional inlet update about a restock memo. Amount listed as 15.80. Reference inlet-07.
+8. message_id: inlet-1008
+   date: 2026-07-25
+   from: sender8@example.com
+   subject: inlet quiet alert 8
+   snippet: Fictional inlet update about a quiet alert. Amount listed as 16.80. Reference inlet-08.
+9. message_id: inlet-1009
+   date: 2026-07-27
+   from: sender9@example.com
+   subject: inlet delivery card 9
+   snippet: Fictional inlet update about a delivery card. Amount listed as 17.80. Reference inlet-09.
+10. message_id: inlet-1010
+   date: 2026-07-02
+   from: sender10@example.com
+   subject: inlet subscription 10
+   snippet: Fictional inlet update about a subscription. Amount listed as 18.80. Reference inlet-10.
+11. message_id: inlet-1011
+   date: 2026-07-04
+   from: sender11@example.com
+   subject: inlet hinge note 11
+   snippet: Fictional inlet update about a hinge note. Amount listed as 19.80. Reference inlet-11.
+12. message_id: inlet-1012
+   date: 2026-07-06
+   from: sender12@example.com
+   subject: inlet tea receipt 12
+   snippet: Fictional inlet update about a tea receipt. Amount listed as 20.80. Reference inlet-12.
+13. message_id: inlet-1013
+   date: 2026-07-08
+   from: sender13@example.com
+   subject: inlet dock bill 13
+   snippet: Fictional inlet update about a dock bill. Amount listed as 21.80. Reference inlet-13.
+14. message_id: inlet-1014
+   date: 2026-07-10
+   from: sender14@example.com
+   subject: inlet declaration 14
+   snippet: Fictional inlet update about a declaration. Amount listed as 22.80. Reference inlet-14.
+15. message_id: inlet-1015
+   date: 2026-07-12
+   from: sender15@example.com
+   subject: inlet quota note 15
+   snippet: Fictional inlet update about a quota note. Amount listed as 23.80. Reference inlet-15. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8. Extra inlet detail 8.
+
+QUESTION:
+Which sender wrote the Inletmarch Customs tag copy, and what are the date and message_id?

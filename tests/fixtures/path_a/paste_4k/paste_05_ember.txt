@@ -1,0 +1,79 @@
+DATA:
+1. message_id: ember-1001
+   date: 2026-08-07
+   from: sender1@example.com
+   subject: ember crate card 1
+   snippet: Fictional ember update about a crate card. Amount listed as 6.60. Reference ember-01.
+2. message_id: ember-1002
+   date: 2026-08-09
+   from: sender2@example.com
+   subject: ember delay slip 2
+   snippet: Fictional ember update about a delay slip. Amount listed as 7.60. Reference ember-02.
+3. message_id: ember-1003
+   date: 2026-08-11
+   from: sender3@example.com
+   subject: Emberfield Alerts lantern wick
+   snippet: Fictional ember note from Emberfield Alerts about a lantern wick. Amount listed as 6.25. Reference ember-r3.
+4. message_id: ember-1004
+   date: 2026-08-13
+   from: sender4@example.com
+   subject: ember invoice copy 4
+   snippet: Fictional ember update about an invoice copy. Amount listed as 9.60. Reference ember-04.
+5. message_id: ember-1005
+   date: 2026-08-15
+   from: sender5@example.com
+   subject: ember storage chit 5
+   snippet: Fictional ember update about a storage chit. Amount listed as 10.60. Reference ember-05.
+6. message_id: ember-1006
+   date: 2026-08-17
+   from: sender6@example.com
+   subject: ember ticket stub 6
+   snippet: Fictional ember update about a ticket stub. Amount listed as 11.60. Reference ember-06.
+7. message_id: ember-1007
+   date: 2026-08-19
+   from: sender7@example.com
+   subject: ember restock memo 7
+   snippet: Fictional ember update about a restock memo. Amount listed as 12.60. Reference ember-07.
+8. message_id: ember-1008
+   date: 2026-08-21
+   from: sender8@example.com
+   subject: ember quiet alert 8
+   snippet: Fictional ember update about a quiet alert. Amount listed as 13.60. Reference ember-08.
+9. message_id: ember-1009
+   date: 2026-08-23
+   from: sender9@example.com
+   subject: ember delivery card 9
+   snippet: Fictional ember update about a delivery card. Amount listed as 14.60. Reference ember-09.
+10. message_id: ember-1010
+   date: 2026-08-25
+   from: sender10@example.com
+   subject: ember subscription 10
+   snippet: Fictional ember update about a subscription. Amount listed as 15.60. Reference ember-10.
+11. message_id: ember-1011
+   date: 2026-08-27
+   from: sender11@example.com
+   subject: ember hinge note 11
+   snippet: Fictional ember update about a hinge note. Amount listed as 16.60. Reference ember-11.
+12. message_id: ember-1012
+   date: 2026-08-02
+   from: sender12@example.com
+   subject: ember tea receipt 12
+   snippet: Fictional ember update about a tea receipt. Amount listed as 17.60. Reference ember-12.
+13. message_id: ember-1013
+   date: 2026-08-04
+   from: sender13@example.com
+   subject: ember dock bill 13
+   snippet: Fictional ember update about a dock bill. Amount listed as 18.60. Reference ember-13.
+14. message_id: ember-1014
+   date: 2026-08-06
+   from: sender14@example.com
+   subject: ember declaration 14
+   snippet: Fictional ember update about a declaration. Amount listed as 19.60. Reference ember-14.
+15. message_id: ember-1015
+   date: 2026-08-08
+   from: sender15@example.com
+   subject: ember quota note 15
+   snippet: Fictional ember update about a quota note. Amount listed as 20.60. Reference ember-15. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4. Extra ember detail 4.
+
+QUESTION:
+Which snippet amount and message_id match the Emberfield Alerts lantern wick?

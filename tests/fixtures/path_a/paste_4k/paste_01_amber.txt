@@ -1,0 +1,79 @@
+DATA:
+1. message_id: amber-1001
+   date: 2026-04-03
+   from: sender1@example.com
+   subject: amber crate card 1
+   snippet: Fictional amber update about a crate card. Amount listed as 3.40. Reference amber-01.
+2. message_id: amber-1002
+   date: 2026-04-05
+   from: sender2@example.com
+   subject: amber delay slip 2
+   snippet: Fictional amber update about a delay slip. Amount listed as 4.40. Reference amber-02.
+3. message_id: amber-1003
+   date: 2026-04-07
+   from: sender3@example.com
+   subject: Amberline Goods linen roll
+   snippet: Fictional amber note from Amberline Goods about a linen roll. Amount listed as 12.40. Reference amber-r3.
+4. message_id: amber-1004
+   date: 2026-04-09
+   from: sender4@example.com
+   subject: amber invoice copy 4
+   snippet: Fictional amber update about an invoice copy. Amount listed as 6.40. Reference amber-04.
+5. message_id: amber-1005
+   date: 2026-04-11
+   from: sender5@example.com
+   subject: amber storage chit 5
+   snippet: Fictional amber update about a storage chit. Amount listed as 7.40. Reference amber-05.
+6. message_id: amber-1006
+   date: 2026-04-13
+   from: sender6@example.com
+   subject: amber ticket stub 6
+   snippet: Fictional amber update about a ticket stub. Amount listed as 8.40. Reference amber-06.
+7. message_id: amber-1007
+   date: 2026-04-15
+   from: sender7@example.com
+   subject: amber restock memo 7
+   snippet: Fictional amber update about a restock memo. Amount listed as 9.40. Reference amber-07.
+8. message_id: amber-1008
+   date: 2026-04-17
+   from: sender8@example.com
+   subject: amber quiet alert 8
+   snippet: Fictional amber update about a quiet alert. Amount listed as 10.40. Reference amber-08.
+9. message_id: amber-1009
+   date: 2026-04-19
+   from: sender9@example.com
+   subject: amber delivery card 9
+   snippet: Fictional amber update about a delivery card. Amount listed as 11.40. Reference amber-09.
+10. message_id: amber-1010
+   date: 2026-04-21
+   from: sender10@example.com
+   subject: amber subscription 10
+   snippet: Fictional amber update about a subscription. Amount listed as 12.40. Reference amber-10.
+11. message_id: amber-1011
+   date: 2026-04-23
+   from: sender11@example.com
+   subject: amber hinge note 11
+   snippet: Fictional amber update about a hinge note. Amount listed as 13.40. Reference amber-11.
+12. message_id: amber-1012
+   date: 2026-04-25
+   from: sender12@example.com
+   subject: amber tea receipt 12
+   snippet: Fictional amber update about a tea receipt. Amount listed as 14.40. Reference amber-12.
+13. message_id: amber-1013
+   date: 2026-04-27
+   from: sender13@example.com
+   subject: amber dock bill 13
+   snippet: Fictional amber update about a dock bill. Amount listed as 15.40. Reference amber-13.
+14. message_id: amber-1014
+   date: 2026-04-02
+   from: sender14@example.com
+   subject: amber declaration 14
+   snippet: Fictional amber update about a declaration. Amount listed as 16.40. Reference amber-14.
+15. message_id: amber-1015
+   date: 2026-04-04
+   from: sender15@example.com
+   subject: amber quota note 15
+   snippet: Fictional amber update about a quota note. Amount listed as 17.40. Reference amber-15. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0. Extra amber detail 0.
+
+QUESTION:
+Which message_id, date, and sender listed the Amberline Goods linen roll, and what amount was on the snippet?

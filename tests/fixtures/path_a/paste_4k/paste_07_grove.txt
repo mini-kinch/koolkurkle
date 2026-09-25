@@ -1,0 +1,79 @@
+DATA:
+1. message_id: grove-1001
+   date: 2026-05-09
+   from: sender1@example.com
+   subject: grove crate card 1
+   snippet: Fictional grove update about a crate card. Amount listed as 8.20. Reference grove-01.
+2. message_id: grove-1002
+   date: 2026-05-11
+   from: sender2@example.com
+   subject: grove delay slip 2
+   snippet: Fictional grove update about a delay slip. Amount listed as 9.20. Reference grove-02.
+3. message_id: grove-1003
+   date: 2026-05-13
+   from: sender3@example.com
+   subject: Grovewick Parcel seed box
+   snippet: Fictional grove note from Grovewick Parcel about a seed box. Amount listed as 11.05. Reference grove-r3.
+4. message_id: grove-1004
+   date: 2026-05-15
+   from: sender4@example.com
+   subject: grove invoice copy 4
+   snippet: Fictional grove update about an invoice copy. Amount listed as 11.20. Reference grove-04.
+5. message_id: grove-1005
+   date: 2026-05-17
+   from: sender5@example.com
+   subject: grove storage chit 5
+   snippet: Fictional grove update about a storage chit. Amount listed as 12.20. Reference grove-05.
+6. message_id: grove-1006
+   date: 2026-05-19
+   from: sender6@example.com
+   subject: grove ticket stub 6
+   snippet: Fictional grove update about a ticket stub. Amount listed as 13.20. Reference grove-06.
+7. message_id: grove-1007
+   date: 2026-05-21
+   from: sender7@example.com
+   subject: grove restock memo 7
+   snippet: Fictional grove update about a restock memo. Amount listed as 14.20. Reference grove-07.
+8. message_id: grove-1008
+   date: 2026-05-23
+   from: sender8@example.com
+   subject: grove quiet alert 8
+   snippet: Fictional grove update about a quiet alert. Amount listed as 15.20. Reference grove-08.
+9. message_id: grove-1009
+   date: 2026-05-25
+   from: sender9@example.com
+   subject: grove delivery card 9
+   snippet: Fictional grove update about a delivery card. Amount listed as 16.20. Reference grove-09.
+10. message_id: grove-1010
+   date: 2026-05-27
+   from: sender10@example.com
+   subject: grove subscription 10
+   snippet: Fictional grove update about a subscription. Amount listed as 17.20. Reference grove-10.
+11. message_id: grove-1011
+   date: 2026-05-02
+   from: sender11@example.com
+   subject: grove hinge note 11
+   snippet: Fictional grove update about a hinge note. Amount listed as 18.20. Reference grove-11.
+12. message_id: grove-1012
+   date: 2026-05-04
+   from: sender12@example.com
+   subject: grove tea receipt 12
+   snippet: Fictional grove update about a tea receipt. Amount listed as 19.20. Reference grove-12.
+13. message_id: grove-1013
+   date: 2026-05-06
+   from: sender13@example.com
+   subject: grove dock bill 13
+   snippet: Fictional grove update about a dock bill. Amount listed as 20.20. Reference grove-13.
+14. message_id: grove-1014
+   date: 2026-05-08
+   from: sender14@example.com
+   subject: grove declaration 14
+   snippet: Fictional grove update about a declaration. Amount listed as 21.20. Reference grove-14.
+15. message_id: grove-1015
+   date: 2026-05-10
+   from: sender15@example.com
+   subject: grove quota note 15
+   snippet: Fictional grove update about a quota note. Amount listed as 22.20. Reference grove-15. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6. Extra grove detail 6.
+
+QUESTION:
+What date and amount does the Grovewick Parcel seed box snippet list, and which message_id is it?
