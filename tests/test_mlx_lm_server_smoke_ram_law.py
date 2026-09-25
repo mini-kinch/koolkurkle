@@ -13,7 +13,9 @@ import sys
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import ask_mail  # noqa: E402
+from _py_compat import import_ask_mail  # noqa: E402
+
+ask_mail = import_ask_mail()
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 DOCS = (

@@ -14,7 +14,9 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import ask_mail  # noqa: E402
+from _py_compat import import_ask_mail  # noqa: E402
+
+ask_mail = import_ask_mail()
 import embed_backfill as eb  # noqa: E402
 import imap_tombstone  # noqa: E402
 import mailroom_copy_db as copy_db  # noqa: E402

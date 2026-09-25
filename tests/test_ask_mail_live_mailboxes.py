@@ -13,7 +13,9 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import ask_mail  # noqa: E402
+from _py_compat import import_ask_mail  # noqa: E402
+
+ask_mail = import_ask_mail()
 import semantic_search as ss  # noqa: E402
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")

@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
@@ -68,7 +68,7 @@ class HealthError(RuntimeError):
 
 
 RetrieveFn = Callable[..., list[dict[str, Any]]]
-EmbedProbeFn = Callable[[str], tuple[Any, str | None]]
+EmbedProbeFn = Callable[[str], tuple[Any, Optional[str]]]
 WriterScanFn = Callable[[], list["WriterHit"]]
 
 

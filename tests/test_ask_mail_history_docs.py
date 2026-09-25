@@ -15,7 +15,9 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import ask_mail  # noqa: E402
+from _py_compat import import_ask_mail  # noqa: E402
+
+ask_mail = import_ask_mail()
 
 ASK = ROOT / "docs" / "ask_mail.md"
 OPS = ROOT / "docs" / "ops-terminal.md"
