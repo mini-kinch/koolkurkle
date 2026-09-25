@@ -3,7 +3,9 @@
 Offline stdlib `unittest` for `scripts/ask_mail_paste.sh` and
 `scripts/ask_mail_paste_fmt.py`. No network, no mail database, no model
 server. Synthetic data only (`sender@example.com`). The harness sets
-`HOME` to a temporary directory. The scripts themselves are not modified.
+`HOME` to a temporary directory. `scripts/ask_mail.py` and
+`scripts/ask_mail_paste.sh` are not modified. The formatter now fails
+cleanly on bad stdin (the finding below is fixed).
 
 ## Run
 
@@ -58,7 +60,13 @@ so a parent value cannot leak in.
      lines blank. A non-ASCII subject is kept. A snippet longer than
      220 characters is capped at 220 after scrub. A very long `body`
      is not read and does not appear. Exit 0, no traceback.
-   - Empty stdin and malformed JSON: see expectedFailure below.
+   - Empty or whitespace-only stdin, JSON that fails to parse, and a
+     top-level value that is not an object (a list or a number): exit 2,
+     exactly one stderr line starting with `error:`, empty stdout, no
+     traceback. See the fixed finding below.
+   - Valid objects stay byte-identical to the previous formatter
+     (`test_fmt_valid_stdout_byte_identical`): zero hits, a few normal
+     hits, and hits with a missing subject or date plus non-ASCII.
 
 5. **Default k and flags**
    (`test_default_k_is_20_and_flags_always_passed`, also checked on the
@@ -71,19 +79,29 @@ so a parent value cannot leak in.
    every run that reaches the stub. The query is one argument after
    `--`.
 
-## expectedFailure
+## Fixed: empty and malformed formatter stdin
 
-`ask_mail_paste_fmt.py` does not catch `json.load` errors. These tests
-assert the contract (no traceback; either a DATA + QUESTION block or a
-clear nonzero error on stderr) and are marked `expectedFailure`
-because the script currently crashes. This fixture does not change the
-script. Drop the decorator when the contract holds (unittest will
-report an unexpected success until then).
+This finding is fixed. `ask_mail_paste_fmt.py` used to call `json.load`
+with no handler. Empty stdin, whitespace-only stdin, and malformed JSON
+such as `{"hits":` raised `json.JSONDecodeError`, printed a traceback,
+and exited 1. A top-level JSON value that parsed but was not an object
+(a list or a number) raised `AttributeError` the same way.
 
-- `test_fmt_empty_stdin_no_traceback` — empty stdin raises
-  `json.JSONDecodeError`. Stderr is a traceback. Exit status is 1.
-  Stdout is empty.
-- `test_fmt_malformed_json_no_traceback` — a truncated object
-  (`{"hits":`) does the same.
+Those paths now print exactly one line to stderr, print nothing to
+stdout, and exit 2. There is no traceback. Empty or whitespace-only
+stdin prints `error: ask_mail returned empty output`. JSON that fails
+to parse, and a top-level value that is not an object, print
+`error: ask_mail output is not valid JSON: <short reason>`.
 
-Odd fields, zero hits, and the shell cases are not expected failures.
+The tests are no longer `expectedFailure`:
+
+- `test_fmt_empty_stdin_no_traceback` — empty and whitespace-only stdin.
+- `test_fmt_malformed_json_no_traceback` — a truncated object (`{"hits":`).
+- `test_fmt_non_object_json_exits_2` — a list, a number, a string,
+  `null`, `true`, or `false`.
+
+Valid JSON objects still exit 0 with the same stdout bytes as before
+the fix. `test_fmt_valid_stdout_byte_identical` pins that for zero hits,
+three normal hits, and hits with a missing subject or date plus
+non-ASCII text. Odd fields, zero hits, and the shell cases were already
+passing and still are.
