@@ -215,6 +215,12 @@ class PathAStatusTests(unittest.TestCase):
         self.assertIn(WEDGED, text)
         self.assertIn('"max_tokens": 1', text)
         self.assertIn('"enable_thinking": False', text)
+        self.assertIn("${QWEN_PROBE_TIMEOUT:-60}", text)
+        self.assertNotIn("${QWEN_PROBE_TIMEOUT:-20}", text)
+        doc = (ROOT / "docs" / "path-a" / "status.md").read_text(encoding="utf-8")
+        self.assertIn("default 60s", doc)
+        self.assertIn("A slow first probe after idle is not a wedge.", doc)
+        self.assertNotIn("default 20s", doc)
         self.assertNotIn("/Users/", text)
         for banned in ("mkdir", "rm ", "cp ", "mv ", "tee ", "launchctl", "ask_mail.py "):
             self.assertNotIn(banned, text)

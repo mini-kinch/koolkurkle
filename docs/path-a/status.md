@@ -18,7 +18,7 @@ Exit `0` when no check is `FAIL`. Exit `1` when any check is `FAIL`. `WARN` does
 
 1. **retrieve_health** — `curl` `GET` `$RETRIEVE_URL/health` (default `http://127.0.0.1:8743/health`), 3s.
 2. **mlx_models** — `curl` `GET` `$QWEN_BASE_URL/models` (default `http://127.0.0.1:1234/v1/models`), 3s.
-3. **mlx_probe** — one chat completion with `max_tokens` 1 and `chat_template_kwargs.enable_thinking` false. Timeout is `QWEN_PROBE_TIMEOUT` (default 20s). If `/v1/models` is OK but the probe times out, the line is `FAIL` and includes `generate wedged: qwen-chat-down.sh then qwen-chat-up.sh`. `--no-probe` skips this check (no line).
+3. **mlx_probe** — one chat completion with `max_tokens` 1 and `chat_template_kwargs.enable_thinking` false. Timeout is `QWEN_PROBE_TIMEOUT` (default 60s). A slow first probe after idle is not a wedge. If `/v1/models` is OK but the probe times out, the line is `FAIL` and includes `generate wedged: qwen-chat-down.sh then qwen-chat-up.sh`. `--no-probe` skips this check (no line).
 4. **ollama** — `WARN` when Ollama is up and mlx `:1234` is up (`RAM rule: stop Ollama while Qwen up`). Ollama down is `PASS`. Default probe is `GET` `http://127.0.0.1:11434/api/tags`.
 5. **path_a_files** — these files exist and are executable under `$MAILARCHIVE/scripts`: `ask_mail_wire.sh`, `ask_mail_paste.sh`, `qwen_paste_chat.sh`, `qwen_paste_chat_post.py`, `ask_mail_paste_fmt.py`.
 6. **paste_k** — `ask_mail_paste.sh`, `ask_mail_wire.sh`, and `qwen_paste_chat.sh` default `ASK_MAIL_PASTE_K` to 20. `FAIL` if a file has the `ASK_MAIL_PASTE_K:-8` token (reported before any other k problem). Same token rule as the Mini install helper. A comment that only says old k=8 does not match.
@@ -35,7 +35,7 @@ Exit `0` when no check is `FAIL`. Exit `1` when any check is `FAIL`. `WARN` does
 - `MAILARCHIVE` — default `$HOME/MailArchive`
 - `RETRIEVE_URL` — default `http://127.0.0.1:8743` (`/health` is appended)
 - `QWEN_BASE_URL` — default `http://127.0.0.1:1234/v1` (`/models` and `/chat/completions` are appended)
-- `QWEN_PROBE_TIMEOUT` — probe timeout in seconds, default `20`
+- `QWEN_PROBE_TIMEOUT` — probe timeout in seconds, default `60`
 - `OLLAMA_BASE_URL` — optional, default `http://127.0.0.1:11434` (`/api/tags` is appended)
 
 ## Output
