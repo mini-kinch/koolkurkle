@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DATA+QUESTION paste on stdin → /v1/chat/completions → assistant text on stdout.
 
-v4 2026-09-25 — fail-fast generate probe + main timeout 180s. thinking OFF.
+v4 2026-09-25 — fail-fast generate probe (default 60s) + main timeout 180s. thinking OFF.
 Never dump JSON to stdout. Stdout stays empty on failure.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -37,15 +38,15 @@ def _probe_enabled() -> bool:
 
 
 def _is_timeout(exc: BaseException) -> bool:
-    if isinstance(exc, TimeoutError):
+    # 3.9: socket.timeout is not a TimeoutError. 3.10+: it is an alias.
+    # urllib may raise either directly, or URLError with that type in .reason.
+    timeout_types = (TimeoutError, socket.timeout)
+    if isinstance(exc, timeout_types):
         return True
     if isinstance(exc, urllib.error.HTTPError):
         return False
     if isinstance(exc, urllib.error.URLError):
-        reason = exc.reason
-        if isinstance(reason, TimeoutError):
-            return True
-        return reason is not None and "timed out" in str(reason).lower()
+        return isinstance(getattr(exc, "reason", None), timeout_types)
     return False
 
 
@@ -89,7 +90,7 @@ def _probe(url: str, model: str, timeout: int) -> None:
 def main() -> int:
     default_timeout = _env_int("QWEN_TIMEOUT", 180)
     probe_on = _probe_enabled()
-    probe_timeout = _env_int("QWEN_PROBE_TIMEOUT", 20)
+    probe_timeout = _env_int("QWEN_PROBE_TIMEOUT", 60)
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:1234/v1")

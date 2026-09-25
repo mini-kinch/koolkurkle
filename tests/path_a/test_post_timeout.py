@@ -6,13 +6,16 @@ Happy server → exit 0 + assistant content on stdout.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
 import time
 import unittest
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -155,7 +158,27 @@ def _run(
     return proc, elapsed
 
 
+def _load_post():
+    spec = importlib.util.spec_from_file_location("qwen_paste_chat_post", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load %s" % SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 class PostTimeoutTests(unittest.TestCase):
+    def test_is_timeout_socket_timeout_and_urlerror_reason(self) -> None:
+        mod = _load_post()
+        sock_to = socket.timeout("timed out")
+        builtin_to = TimeoutError("timed out")
+        self.assertTrue(mod._is_timeout(sock_to))
+        self.assertTrue(mod._is_timeout(builtin_to))
+        self.assertTrue(mod._is_timeout(urllib.error.URLError(sock_to)))
+        self.assertTrue(mod._is_timeout(urllib.error.URLError(builtin_to)))
+        self.assertFalse(mod._is_timeout(urllib.error.URLError(OSError("refused"))))
+        self.assertFalse(mod._is_timeout(ConnectionRefusedError(111, "refused")))
+
     def test_slow_server_probe_exits_3_with_hint(self) -> None:
         probe_timeout = 1
         slack = 3
@@ -272,10 +295,11 @@ class PostTimeoutTests(unittest.TestCase):
             base = "http://127.0.0.1:%s/v1" % server.server_address[1]
             proc, _elapsed = _run(
                 base,
-                {"QWEN_PROBE": "0", "QWEN_PROBE_TIMEOUT": "5"},
+                {"QWEN_PROBE": "0"},
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("timeout=180", proc.stderr)
+        self.assertIn("probe_timeout=60", proc.stderr)
         self.assertEqual(proc.stdout, "path-a-ok\n")
 
     def test_cli_timeout_overrides_env(self) -> None:

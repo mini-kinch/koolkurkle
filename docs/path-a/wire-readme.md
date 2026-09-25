@@ -36,7 +36,7 @@ Desk one-liner:
 Pack size default is `ASK_MAIL_PASTE_K=20`. See [fts_caveat.md](fts_caveat.md).
 
 ## Timeouts
-`qwen_paste_chat_post.py` sends a tiny preflight chat (`max_tokens=1`, thinking off) before the real post. `QWEN_PROBE_TIMEOUT` is that probe's timeout (default 20s). `QWEN_PROBE=0` skips the probe. The main post and the reasoning-only retry use `QWEN_TIMEOUT` (default 180s; previous default was 300s). `--timeout` overrides the main timeout.
+`qwen_paste_chat_post.py` sends a tiny preflight chat (`max_tokens=1`, thinking off) before the real post. `QWEN_PROBE_TIMEOUT` is that probe's timeout (default 60s). `QWEN_PROBE=0` skips the probe. The main post and the reasoning-only retry use `QWEN_TIMEOUT` (default 180s; previous default was 300s). `--timeout` overrides the main timeout. The first request after idle can take 20-40s to page the model back in, so a slow first probe is not a wedge.
 
 On a probe failure, or a timeout of the probe, the main post, or the retry, stderr gets one line and the process exits 3 with empty stdout:
 
