@@ -12,6 +12,8 @@ Foreground drills for the live Path A server on the target Mac. They take `127.0
 
 The drill script is `scripts/path_a_drill.sh`. It is bash 3.2 compatible. Run it in the foreground. It does not background itself.
 
+A long operator run (a soak, or a drill wait you leave going) is a transient `launchctl submit` job plus a log file. Poll that job, then `launchctl remove` it. Do not start one with `nohup &`. The drills in this file stay in the foreground terminal; the soak job is the one in [ar9-soak.md](ar9-soak.md).
+
 ## Preconditions
 
 - You are at a terminal on the target Mac, not inside a remote background shell.

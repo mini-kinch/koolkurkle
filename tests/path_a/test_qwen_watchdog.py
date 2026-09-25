@@ -429,6 +429,49 @@ class WatchdogBehaviorTests(unittest.TestCase):
         self.assertEqual(self.hold.read_text().strip(), "pin: model path missing")
         self.assertIn("pin: model path missing", self._log())
 
+    def _replace_pin_with_snapshot_link(self, broken: bool) -> None:
+        snap = _pin(self.home)
+        for child in list(snap.iterdir()):
+            child.unlink()
+        blobs = snap.parent.parent / "blobs"
+        blobs.mkdir(parents=True, exist_ok=True)
+        link = snap / "model-00001-of-00002.safetensors"
+        if broken:
+            link.symlink_to(Path("../../blobs") / "missing-weight")
+            return
+        blob = blobs / "abc123safetensor"
+        blob.write_bytes(b"not-a-real-weight")
+        link.symlink_to(Path("../../blobs") / blob.name)
+
+    def test_symlinked_hf_snapshot_kickstarts(self) -> None:
+        self._replace_pin_with_snapshot_link(False)
+        link = _pin(self.home) / "model-00001-of-00002.safetensors"
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(link.resolve().is_file())
+        self.server.mode = "models_500"
+        first = self._run()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._kickstarts(), [])
+        second = self._run()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(self._kickstarts()), 1)
+        self.assertFalse(self.hold.exists())
+        self.assertIn("restart kickstart", self._log())
+
+    def test_broken_snapshot_symlink_writes_hold_and_does_not_kickstart(self) -> None:
+        self._replace_pin_with_snapshot_link(True)
+        link = _pin(self.home) / "model-00001-of-00002.safetensors"
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(link.exists())
+        self.server.mode = "models_500"
+        self._run()
+        proc = self._run()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._kickstarts(), [])
+        self.assertEqual(self.hold.read_text().strip(), "pin: model path missing")
+        self.assertIn("pin: model path missing", self._log())
+        self.assertNotIn("restart kickstart", self._log())
+
     def test_incomplete_snapshot_writes_hold(self) -> None:
         self._write_pin(incomplete=True)
         self.server.mode = "models_500"

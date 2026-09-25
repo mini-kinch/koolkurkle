@@ -213,6 +213,12 @@ class _Handler(BaseHTTPRequestHandler):
                 _completion("T" * 400, finish="length", reasoning="note", completion_tokens=512),
             )
             return
+        if kind == "probe_cut_then_ok":
+            if len(server.posts) == 1:
+                self._send(200, _completion("P", finish="length", completion_tokens=1))
+            else:
+                self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
+            return
         if kind == "short79":
             self._send(
                 200,
@@ -1250,15 +1256,20 @@ class PathABenchTests(unittest.TestCase):
         )
         self.assertIn("FAIL soak ", proc.stdout)
         self.assertIn(
+            "FAIL soak_truncated truncated=1 idx=1 finish=length "
+            "content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn(
             "FAIL soak_length truncated=1 short=0 idx=1 labels=TRUNCATED "
             "finish=length content_len=400 completion_tokens=512",
             proc.stdout,
         )
         self.assertIn("PASS soak_content short=0", proc.stdout)
-        self.assertIn("FAILS soak soak_length", proc.stdout)
+        self.assertIn("FAILS soak soak_truncated soak_length", proc.stdout)
         self.assertIn("INVALIDS none", proc.stdout)
         self.assertNotIn("SHORT", proc.stdout)
-        self.assertEqual(summary["fails"], ["soak", "soak_length"])
+        self.assertEqual(summary["fails"], ["soak", "soak_truncated", "soak_length"])
         self.assertIn("OVERALL FAIL", proc.stdout)
 
     def test_soak_length_short(self) -> None:
@@ -1273,6 +1284,7 @@ class PathABenchTests(unittest.TestCase):
             r"finish=stop content_len=202 completion_tokens=79 length=SHORT",
         )
         self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
         self.assertIn(
             "FAIL soak_length truncated=0 short=1 idx=1 labels=SHORT "
             "finish=stop content_len=202 completion_tokens=79",
@@ -1302,9 +1314,20 @@ class PathABenchTests(unittest.TestCase):
         )
         self.assertIn("length=TRUNCATED,SHORT", proc.stdout)
         self.assertIn("FAIL soak ", proc.stdout)
-        self.assertIn("PASS soak_content short=0", proc.stdout)
-        self.assertIn("FAILS soak soak_length", proc.stdout)
-        self.assertEqual(summary["fails"], ["soak", "soak_length"])
+        self.assertIn(
+            "FAIL soak_truncated truncated=1 idx=1 finish=length "
+            "content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL soak_content short=1 limit=content_len<=300 idx=1 content_len=80",
+            proc.stdout,
+        )
+        self.assertIn("FAILS soak soak_truncated soak_length soak_content", proc.stdout)
+        self.assertEqual(
+            summary["fails"],
+            ["soak", "soak_truncated", "soak_length", "soak_content"],
+        )
         self.assertIn("OVERALL FAIL", proc.stdout)
 
     def test_soak_length_clean(self) -> None:
@@ -1315,6 +1338,7 @@ class PathABenchTests(unittest.TestCase):
         self.assertGreater(row["content_len"], 300)
         self.assertEqual(row["length"], "ok")
         self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
         self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
         self.assertIn("PASS soak_content short=0", proc.stdout)
         self.assertIn("FAILS none", proc.stdout)
@@ -1337,6 +1361,7 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(row["length"], "ok")
         self.assertIn("completion_tokens=na", proc.stdout)
         self.assertIn("length=ok", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
         self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
         self.assertIn("FAILS none", proc.stdout)
 
@@ -1363,6 +1388,123 @@ class PathABenchTests(unittest.TestCase):
             ["soak_length", "soak_content", "soak_mem_at"],
         )
         self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def _cold_one(self, kind: str, extra: list | None = None):
+        base = self._start(kind)
+        proc = self._run(
+            self._cmd("cold", base, self._ask(), ["--timeout", "5", *(extra or [])]),
+            env={"PATH_A_BENCH_TEST_HOOKS": "1"},
+        )
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        return proc, requests, self._rows()[-1]
+
+    def test_cold_truncated(self) -> None:
+        proc, requests, summary = self._cold_one("truncated")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 512)
+        self.assertEqual(row["content_len"], 400)
+        self.assertEqual(row["length"], "TRUNCATED")
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("limit_s=90.000", proc.stdout)
+        self.assertIn(
+            "FAIL cold_truncated truncated=1 idx=1 finish=length "
+            "content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertIn("FAILS cold_truncated", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertNotIn("FAIL cold_request", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_truncated"])
+        self.assertEqual(summary["invalids"], [])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_short(self) -> None:
+        proc, requests, summary = self._cold_one("short79")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 79)
+        self.assertEqual(row["content_len"], 202)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn(
+            "FAIL cold_content short=1 limit=content_len<=300 idx=1 content_len=202",
+            proc.stdout,
+        )
+        self.assertIn("FAILS cold_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_content"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_truncated_and_short(self) -> None:
+        proc, requests, summary = self._cold_one("both_cut")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["length"], "TRUNCATED,SHORT")
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["completion_tokens"], 80)
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn(
+            "FAIL cold_truncated truncated=1 idx=1 finish=length "
+            "content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL cold_content short=1 limit=content_len<=300 idx=1 content_len=80",
+            proc.stdout,
+        )
+        self.assertIn("FAILS cold_truncated cold_content", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_truncated", "cold_content"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_length_clean(self) -> None:
+        proc, requests, summary = self._cold_one("ok")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS cold_content short=0 limit=content_len<=300", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertEqual(summary["fails"], [])
+        self.assertEqual(summary["invalids"], [])
+        self.assertIn("OVERALL PASS", proc.stdout)
+
+    def test_cold_probe_excluded_from_length_check(self) -> None:
+        proc, requests, summary = self._cold_one("probe_cut_then_ok", extra=["--idle", "0"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(len(requests), 2)
+        probe, generate = requests
+        self.assertEqual(probe["role"], "probe")
+        self.assertEqual(probe["finish_reason"], "length")
+        self.assertEqual(probe["completion_tokens"], 1)
+        self.assertEqual(probe["content_len"], 1)
+        self.assertEqual(probe["length"], "na")
+        self.assertEqual(probe["verdict"], "pass")
+        self.assertEqual(generate["role"], "generate")
+        self.assertEqual(generate["finish_reason"], "stop")
+        self.assertGreater(generate["content_len"], 300)
+        self.assertEqual(generate["length"], "ok")
+        self.assertIn("PASS cold_probe", proc.stdout)
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertNotIn("FAIL cold_truncated", proc.stdout)
+        self.assertNotIn("FAIL cold_content", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertEqual(summary["fails"], [])
+        self.assertIn("OVERALL PASS", proc.stdout)
 
     def test_soak_mem_at_sample_in_summary(self) -> None:
         base = self._start("ok")

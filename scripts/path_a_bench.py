@@ -437,16 +437,60 @@ def timing_ok(row: dict) -> bool:
     return False
 
 
-def soak_content_line(rows: list):
+def soak_content_line(rows: list, name: str = "soak_content"):
     """Own summary line for content_len <= CONTENT_MIN. Returns (line, ok)."""
     limit = "content_len<=%d" % CONTENT_MIN
     if not rows:
-        return "PASS soak_content short=0 limit=%s" % limit, True
+        return "PASS %s short=0 limit=%s" % (name, limit), True
     bits = []
     for row in rows:
         bits.append("idx=%s content_len=%s" % (row.get("idx"), row.get("content_len")))
-    line = "FAIL soak_content short=%d limit=%s %s" % (len(rows), limit, " ".join(bits))
+    line = "FAIL %s short=%d limit=%s %s" % (name, len(rows), limit, " ".join(bits))
     return line, False
+
+
+def measured_short_rows(rows: list) -> list:
+    """Every row whose content_len is at or under CONTENT_MIN.
+
+    This is the short-answer bar itself. It does not require the miss to be
+    the only error, so a cut-off reply that is also short is listed here and
+    on the truncated line.
+    """
+    found = []
+    for row in rows:
+        content_len = row.get("content_len")
+        if isinstance(content_len, bool) or not isinstance(content_len, int):
+            continue
+        if content_len <= CONTENT_MIN:
+            found.append(row)
+    return found
+
+
+def length_report_only(error) -> bool:
+    """True when every error part is a short body or a length cut-off.
+
+    Those two have their own summary lines. A wall, HTTP, or other finish
+    reason is not this case.
+    """
+    if not isinstance(error, str) or not error.strip():
+        return False
+    parts = [part.strip() for part in error.split(";") if part.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        if part == "finish_reason=length":
+            continue
+        if part.startswith("content_len=") and part != "content_len=":
+            continue
+        return False
+    return True
+
+
+def cold_timing_miss(row: dict) -> bool:
+    """Cold paste missed the timing bar, ignoring short and cut-off."""
+    if row.get("verdict") != "fail":
+        return False
+    return not length_report_only(row.get("error"))
 
 
 def length_labels(finish, content_len) -> list:
@@ -478,6 +522,26 @@ def _shown(value) -> str:
     if value is None:
         return "na"
     return str(value)
+
+
+def truncated_line(name: str, rows: list):
+    """Own cut-off line. finish_reason length is TRUNCATED. Returns (line, ok)."""
+    hits = [row for row in rows if row.get("finish_reason") == "length"]
+    if not hits:
+        return "PASS %s truncated=0" % name, True
+    bits = []
+    for row in hits:
+        bits.append(
+            "idx=%s finish=%s content_len=%s completion_tokens=%s"
+            % (
+                row.get("idx"),
+                _shown(row.get("finish_reason")),
+                _shown(row.get("content_len")),
+                _shown(row.get("completion_tokens")),
+            )
+        )
+    line = "FAIL %s truncated=%d %s" % (name, len(hits), " ".join(bits))
+    return line, False
 
 
 def soak_length_line(rows: list):
@@ -669,8 +733,14 @@ def chat_summary(
     ok = True
     length_line = None
     length_ok = True
+    trunc_line = None
+    trunc_ok = True
+    content_line = None
     content_ok = True
+    cold_content_line = None
+    cold_content_ok = True
     req_ok = True
+    p_ok = True
     if mode == "warm":
         req_ok = n > 0 and failures == 0 and hung == 0
         med_ok = n > 0 and med_s is not None and med_s <= limits["warm_median"]
@@ -690,7 +760,7 @@ def chat_summary(
     elif mode == "cold":
         generate = [row for row in rows if row.get("role") != "probe"]
         probes = [row for row in rows if row.get("role") == "probe"]
-        g_fail = sum(1 for row in generate if row.get("verdict") == "fail")
+        g_fail = sum(1 for row in generate if cold_timing_miss(row))
         g_hung = sum(1 for row in generate if row.get("verdict") == "hung")
         g_n = len(generate)
         gmin, gmed, gmax = _wall_bits(generate)
@@ -707,7 +777,14 @@ def chat_summary(
             "%s cold_request %s limit_s=%s"
             % ("PASS" if req_ok else "FAIL", g_numbers, fmt_num(limits["cold_wall"]))
         )
-        ok = req_ok
+        trunc_line, trunc_ok = truncated_line("cold_truncated", generate)
+        lines.append(trunc_line)
+        cold_content_line, cold_content_ok = soak_content_line(
+            measured_short_rows(generate),
+            name="cold_content",
+        )
+        lines.append(cold_content_line)
+        ok = req_ok and trunc_ok and cold_content_ok
         if probes:
             p_ok = len(probes) == 1 and probes[0].get("verdict") == "pass"
             p_verdict = probes[0].get("verdict") or "missing"
@@ -722,16 +799,15 @@ def chat_summary(
         else:
             req_ok = n > 0 and failures == 0 and hung == 0 and not wedged
         lines.append("%s soak %s" % ("PASS" if req_ok else "FAIL", numbers))
+        trunc_line, trunc_ok = truncated_line("soak_truncated", rows)
+        lines.append(trunc_line)
         length_line, length_ok = soak_length_line(rows)
         lines.append(length_line)
         if hang_notes:
             lines.extend(hang_notes)
-        ok = req_ok and length_ok
-        if continue_on_hang:
-            content_line, content_ok = soak_content_line(content_short_rows)
-            lines.append(content_line)
-            if not content_ok:
-                ok = False
+        content_line, content_ok = soak_content_line(measured_short_rows(rows))
+        lines.append(content_line)
+        ok = req_ok and trunc_ok and length_ok and content_ok
         if mem_line:
             lines.append(mem_line)
             if not mem_ok:
@@ -741,17 +817,34 @@ def chat_summary(
     if ask_status != "PASS":
         ok = False
     fails = []
+    rollup = False
     if mode == "soak":
+        rollup = True
         if not req_ok:
             fails.append("soak")
+        if not trunc_ok:
+            fails.append("soak_truncated")
         if not length_ok:
             fails.append("soak_length")
-        if continue_on_hang and not content_ok:
+        if not content_ok:
             fails.append("soak_content")
         if mem_line and not mem_ok:
             fails.append("soak_mem_at")
         if ask_status != "PASS":
             fails.append("ask_mail")
+    elif mode == "cold":
+        rollup = True
+        if not req_ok:
+            fails.append("cold_request")
+        if not trunc_ok:
+            fails.append("cold_truncated")
+        if not cold_content_ok:
+            fails.append("cold_content")
+        if probes and not p_ok:
+            fails.append("cold_probe")
+        if ask_status != "PASS":
+            fails.append("ask_mail")
+    if rollup:
         lines.append("FAILS %s" % (" ".join(fails) if fails else "none"))
         lines.append("INVALIDS none")
     if wedged:
@@ -783,7 +876,14 @@ def chat_summary(
     if mode == "soak" and continue_on_hang:
         summary["content_short"] = len(content_short_rows)
     if mode == "soak":
+        summary["soak_truncated"] = trunc_line
         summary["soak_length"] = length_line
+        summary["soak_content"] = content_line
+        summary["fails"] = fails
+        summary["invalids"] = []
+    if mode == "cold":
+        summary["cold_truncated"] = trunc_line
+        summary["cold_content"] = cold_content_line
         summary["fails"] = fails
         summary["invalids"] = []
     return lines, code, summary
@@ -812,7 +912,11 @@ def request_row(
         "verdict": verdict,
         "error": error,
         "completion_tokens": result.get("completion_tokens"),
-        "length": length_word(result.get("finish_reason"), result.get("content_len")),
+        "length": (
+            "na"
+            if mode == "cold" and role == "probe"
+            else length_word(result.get("finish_reason"), result.get("content_len"))
+        ),
     }
     if role:
         row["role"] = role

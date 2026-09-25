@@ -41,7 +41,7 @@ The watchdog never selects a model with a `models--*Qwen* | head -1` glob and ne
 
 Before any restart the pass preflights:
 
-1. `WD_MODEL_PATH` is a directory that contains at least one `*.safetensors`, and the model repo directory (the `models--…` parent of `snapshots/<rev>`) contains no `*.incomplete`.
+1. `WD_MODEL_PATH` is a directory that contains at least one resolvable `*.safetensors`. Hugging Face snapshot names are symlinks into `blobs/`; the check follows links (`find -L`) and counts a file only when the target exists. A dangling symlink does not count. The model repo directory (the `models--…` parent of `snapshots/<rev>`) must also contain no `*.incomplete`.
 2. The loaded agent's `arguments = { … }` block from `launchctl print` has `--model` immediately followed by exactly `WD_MODEL_PATH`.
 
 If the file check fails, the pass does not kickstart. It writes HOLD with the reason `pin: model path missing` and logs that line. If the loaded `--model` is anything else, it does not kickstart. It writes HOLD with `pin: loaded agent model != pinned path` and logs that line. Kickstart only happens after both checks pass, so the plist that relaunches is the one whose `--model` was just verified equal to the pin.
