@@ -29,9 +29,26 @@ def scrub(s: str) -> str:
     return s.strip()
 
 
+def _fail(msg: str) -> int:
+    # One stderr line, nothing on stdout. msg must not contain a newline.
+    sys.stderr.write("error: %s\n" % msg)
+    return 2
+
+
 def main() -> int:
     query = sys.argv[1] if len(sys.argv) > 1 else ""
-    data = json.load(sys.stdin)
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return _fail("ask_mail returned empty output")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        reason = " ".join(str(exc).split())
+        return _fail("ask_mail output is not valid JSON: %s" % reason)
+    if not isinstance(data, dict):
+        return _fail(
+            "ask_mail output is not valid JSON: top-level value is not an object"
+        )
     hits = data.get("hits") or []
     print("DATA:")
     if not hits:

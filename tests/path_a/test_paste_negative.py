@@ -110,19 +110,18 @@ def _run_fmt(raw, query=QUERY):
     )
 
 
-def _assert_fmt_contract(test, proc):
-    """No traceback. Success is a DATA + QUESTION block; failure explains itself."""
+def _assert_fmt_error(test, proc):
+    """Exit 2, empty stdout, exactly one stderr line starting with error:."""
     err = proc.stderr or ""
     out = proc.stdout or ""
+    test.assertEqual(proc.returncode, 2)
+    test.assertEqual(out, "")
     test.assertNotIn("Traceback", err)
     test.assertNotIn("Traceback", out)
-    if proc.returncode == 0:
-        test.assertIn("DATA:", out)
-        test.assertIn("QUESTION:", out)
-        return
-    test.assertGreater(proc.returncode, 0)
-    test.assertNotEqual(err.strip(), "")
-    test.assertFalse(err.lstrip().startswith("Traceback"))
+    test.assertTrue(err.endswith("\n"), err)
+    lines = err.splitlines()
+    test.assertEqual(len(lines), 1, err)
+    test.assertTrue(lines[0].startswith("error:"), err)
 
 
 class _Layout:
@@ -389,20 +388,122 @@ class PasteFormatterNegativeTests(unittest.TestCase):
         self.assertNotIn("B", proc.stdout)
         self.assertNotIn("Traceback", proc.stderr)
 
-    # Known crash: json.load(sys.stdin) is not caught. Empty stdin raises
-    # JSONDecodeError, prints a traceback, and exits 1. Do not change the
-    # script here; drop the decorator when the contract holds.
-    @unittest.expectedFailure
     def test_fmt_empty_stdin_no_traceback(self):
-        """Empty stdin must not print a traceback."""
-        _assert_fmt_contract(self, _run_fmt(""))
+        """Empty or whitespace-only stdin exits 2 with one error line."""
+        for raw in ("", " ", "\n", "\t\r\n ", "   \n\t  "):
+            with self.subTest(raw=repr(raw)):
+                _assert_fmt_error(self, _run_fmt(raw))
 
-    # Same uncaught json.load crash on truncated JSON. Exit 1, traceback
-    # on stderr, empty stdout. Decorator stays until that is gone.
-    @unittest.expectedFailure
     def test_fmt_malformed_json_no_traceback(self):
-        """Malformed JSON must not print a traceback."""
-        _assert_fmt_contract(self, _run_fmt('{"hits":'))
+        """Malformed JSON exits 2 with one error line and no traceback."""
+        _assert_fmt_error(self, _run_fmt('{"hits":'))
+
+    def test_fmt_non_object_json_exits_2(self):
+        """A parsed list or number is not an object; same clean error."""
+        for raw in ("[]", "[1, 2]", "3", "0", '"hello"', "null", "true", "false"):
+            with self.subTest(raw=raw):
+                _assert_fmt_error(self, _run_fmt(raw))
+
+    def test_fmt_valid_stdout_byte_identical(self):
+        """Valid objects keep the pre-fix stdout bytes. Exit 0, empty stderr.
+
+        Fixtures are the original formatter's stdout on three synthetic
+        inputs: zero hits, three normal hits, and hits with a missing
+        subject or date plus non-ASCII text.
+        """
+        cases = (
+            (
+                "zero_hits",
+                '{"hits":[]}',
+                "DATA:\n(no hits)\n\nQUESTION:\nsynthetic query\n",
+            ),
+            (
+                "normal_hits",
+                json.dumps(
+                    {
+                        "hits": [
+                            {
+                                "date": "2015-01-02",
+                                "from": "sender1@example.com",
+                                "subject": "synthetic alpha",
+                                "snippet": "first synthetic snippet",
+                            },
+                            {
+                                "date": "2016-06-07",
+                                "from": "sender2@example.com",
+                                "subject": "synthetic beta",
+                                "snippet": "second synthetic snippet",
+                            },
+                            {
+                                "date": "2017-08-09",
+                                "from": "sender3@example.com",
+                                "subject": "synthetic gamma",
+                                "snippet": "third synthetic snippet",
+                            },
+                        ]
+                    }
+                ),
+                (
+                    "DATA:\n"
+                    "1. date: 2015-01-02\n"
+                    "   from: sender1@example.com\n"
+                    "   subject: synthetic alpha\n"
+                    "   snippet: first synthetic snippet\n"
+                    "2. date: 2016-06-07\n"
+                    "   from: sender2@example.com\n"
+                    "   subject: synthetic beta\n"
+                    "   snippet: second synthetic snippet\n"
+                    "3. date: 2017-08-09\n"
+                    "   from: sender3@example.com\n"
+                    "   subject: synthetic gamma\n"
+                    "   snippet: third synthetic snippet\n"
+                    "\n"
+                    "QUESTION:\n"
+                    "synthetic query\n"
+                ),
+            ),
+            (
+                "odd_nonascii",
+                json.dumps(
+                    {
+                        "hits": [
+                            {
+                                "from": "sender1@example.com",
+                                "snippet": "missing date and subject",
+                            },
+                            {
+                                "date": "2015-03-04",
+                                "from": "sender2@example.com",
+                                "subject": "caf\u00e9 \u6771\u4eac",
+                                "snippet": "non-ascii synthetic \u00e9",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                (
+                    "DATA:\n"
+                    "1. date: \n"
+                    "   from: sender1@example.com\n"
+                    "   subject: \n"
+                    "   snippet: missing date and subject\n"
+                    "2. date: 2015-03-04\n"
+                    "   from: sender2@example.com\n"
+                    "   subject: caf\u00e9 \u6771\u4eac\n"
+                    "   snippet: non-ascii synthetic \u00e9\n"
+                    "\n"
+                    "QUESTION:\n"
+                    "synthetic query\n"
+                ),
+            ),
+        )
+        for name, raw, expected in cases:
+            with self.subTest(name=name):
+                proc = _run_fmt(raw)
+                self.assertEqual(proc.returncode, 0)
+                self.assertEqual(proc.stderr, "")
+                self.assertNotIn("Traceback", proc.stdout)
+                self.assertEqual(proc.stdout.encode("utf-8"), expected.encode("utf-8"))
 
 
 if __name__ == "__main__":
