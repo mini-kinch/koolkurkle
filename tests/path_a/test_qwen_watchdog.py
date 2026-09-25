@@ -464,6 +464,72 @@ class WatchdogBehaviorTests(unittest.TestCase):
         self.assertEqual(self.server.paths, ["/v1/models"])
         self.assertEqual(self._kickstarts(), [])
 
+    def _server_log(self, age_s: float) -> Path:
+        path = Path(self._tmp.name) / "mlx_lm_server_1234.log"
+        path.write_bytes(b"completed-request\n")
+        when = time.time() - age_s
+        os.utime(path, (when, when))
+        return path
+
+    def _posts(self) -> list[str]:
+        return [path for path in self.server.paths if path.startswith("/v1/chat")]
+
+    def test_recent_log_skips_chat_and_resets_counter(self) -> None:
+        log_path = self._server_log(5)
+        (self.state / "consecutive_fails").write_text("4\n")
+        proc = self._run(WD_SERVER_LOG=str(log_path), WD_QUIET_SECS="900")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._posts(), [])
+        self.assertEqual(self.server.bodies, [])
+        self.assertEqual(self.server.paths, ["/v1/models"])
+        self.assertEqual(self._fails(), "0")
+        self.assertEqual(self._kickstarts(), [])
+        self.assertIn("ok models-only (active ", self._log())
+        self.assertIn("s ago)", self._log())
+        self.assertNotIn("latency=", self._log())
+
+    def test_old_log_runs_chat_probe(self) -> None:
+        log_path = self._server_log(1200)
+        proc = self._run(WD_SERVER_LOG=str(log_path), WD_QUIET_SECS="900")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._posts(), ["/v1/chat/completions"])
+        self.assertEqual(len(self.server.bodies), 1)
+        self.assertIn("latency=", self._log())
+        self.assertNotIn("models-only", self._log())
+        self.assertEqual(self._kickstarts(), [])
+
+    def test_old_log_hanging_chat_two_passes_kickstart(self) -> None:
+        log_path = self._server_log(1200)
+        self.server.mode = "chat_hang"
+        self.server.delay = 8.0
+        extra = {
+            "WD_SERVER_LOG": str(log_path),
+            "WD_QUIET_SECS": "900",
+            "WD_MODELS_TIMEOUT": "2",
+            "WD_PROBE_TIMEOUT": "1",
+        }
+        first = self._run(**extra)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._fails(), "1")
+        self.assertEqual(self._kickstarts(), [])
+        self.assertGreaterEqual(len(self._posts()), 1)
+        self._server_log(1200)
+        second = self._run(**extra)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(self._kickstarts()), 1)
+        self._assert_only_mlx_label()
+
+    def test_models_500_with_recent_log_counts_as_fail(self) -> None:
+        log_path = self._server_log(3)
+        self.server.mode = "models_500"
+        proc = self._run(WD_SERVER_LOG=str(log_path), WD_QUIET_SECS="900")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._fails(), "1")
+        self.assertEqual(self._kickstarts(), [])
+        self.assertEqual(self._posts(), [])
+        self.assertNotIn("models-only", self._log())
+        self.assertIn("fail consecutive=1", self._log())
+
     def test_models_ok_chat_fail(self) -> None:
         self.server.mode = "models_ok_chat_fail"
         proc = self._run()
@@ -610,6 +676,11 @@ class WatchdogStaticTests(unittest.TestCase):
         self.assertIn(":8743", text)
         self.assertIn("does not bounce retrieval", text.lower())
         self.assertIn("loop guard: HOLD written", text)
+        self.assertIn("## Prompt cache interaction", text)
+        self.assertIn("WD_SERVER_LOG", text)
+        self.assertIn("WD_QUIET_SECS", text)
+        self.assertIn("ok models-only (active <N>s ago)", text)
+        self.assertIn("quiet window plus two passes plus the probe timeout", text)
         self.assertIn("qwen-chat-up.sh", text)
         for token in ("bootout", "HOLD", "watchdog state"):
             self.assertIn(token, text)

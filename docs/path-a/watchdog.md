@@ -12,9 +12,10 @@ On each pass, in order:
 2. If the HOLD file exists, log `hold` and exit 0. No probe and no kickstart.
 3. If `launchctl print gui/<uid>/com.mailroom.mlx-lm-server` fails, the agent is not loaded (for example after `qwen-chat-down.sh`). Log `agent not loaded, skip`, reset the consecutive-fail counter, and exit 0. The watchdog never bootstraps or loads an agent.
 4. If this watchdog's own last restart is still inside `WD_POST_RESTART_GRACE` (default 600 seconds), log `grace` and exit 0. The 27B weights need time to page in (about 7–40 seconds when cold; decode is about 7.5 tok/s).
-5. Light probe. Step 1: `GET /v1/models` with `WD_MODELS_TIMEOUT` (default 10 seconds). Step 2, only if step 1 returned HTTP 200: `POST /v1/chat/completions` with a fixed `ping` message, `max_tokens` 1, `temperature` 0, `stream` false, and `WD_PROBE_TIMEOUT` (default 240 seconds). 240 seconds covers a user request already queued ahead of the probe plus a cold page-in. Success is HTTP 200 and a `choices` array. This is never a full generation.
-6. On success: reset the consecutive-fail counter and log `ok` with latency.
-7. On failure: increment the consecutive-fail counter. Restart only when it reaches `WD_FAILS_BEFORE_RESTART` (default 2).
+5. `GET /v1/models` with `WD_MODELS_TIMEOUT` (default 10 seconds). A non-200 counts as a fail, including when the server log is recent.
+6. If `/v1/models` is HTTP 200 and `WD_SERVER_LOG` exists and its mtime is newer than `WD_QUIET_SECS` ago: log `ok models-only (active <N>s ago)`, reset the consecutive-fail counter, and exit 0. No chat probe.
+7. Otherwise (log missing, or older than `WD_QUIET_SECS`): `POST /v1/chat/completions` with a fixed `ping` message, `max_tokens` 1, `temperature` 0, `stream` false, and `WD_PROBE_TIMEOUT` (default 240 seconds). 240 seconds covers a user request already queued ahead of the probe plus a cold page-in. Success is HTTP 200 and a `choices` array. This is never a full generation. On success, reset the consecutive-fail counter and log `ok` with latency.
+8. On failure: increment the consecutive-fail counter. Restart only when it reaches `WD_FAILS_BEFORE_RESTART` (default 2).
 
 A restart is foreground, in that same pass (no background child). The consecutive-fail counter is reset after the kickstart, so the next streak starts only once the grace window has passed. The only restart command is:
 
@@ -66,6 +67,8 @@ Delete the HOLD file to resume. The watchdog does not delete HOLD itself.
 | `WD_HOLD` | `$HOME/qwen-mlx/HOLD` |
 | `WD_STATE_DIR` | `$HOME/qwen-mlx/watchdog` |
 | `WD_LOG` | `$HOME/MailArchive/logs/qwen-watchdog.log` |
+| `WD_SERVER_LOG` | `$HOME/MailArchive/logs/mlx_lm_server_1234.log` |
+| `WD_QUIET_SECS` | `900` |
 | `WD_MODELS_TIMEOUT` | `10` |
 | `WD_PROBE_TIMEOUT` | `240` |
 | `WD_FAILS_BEFORE_RESTART` | `2` |
@@ -81,6 +84,12 @@ Log lines are append-only text: timestamp, then the event.
 ## Prompt cache on the session script
 
 `scripts/qwen-chat-up.sh` passes `--prompt-cache-size` `1` in the `mlx_lm.server` plist it writes (two program arguments, after the existing `--chat-template-args` `{"enable_thinking":false}` pair). The default of 10 distinct KV caches is the wrong size for this 27B 4-bit model. Model selection in that script is unchanged, and the thinking-off pair stays.
+
+## Prompt cache interaction
+
+`--prompt-cache-size 1` keeps one prompt-cache entry. A 1-token chat probe every 5 minutes would replace the user's cached ~4k-token paste prompt, which defeats that setting. The chat probe runs only when the server has been quiet.
+
+The watchdog reads the mtime of `WD_SERVER_LOG` and never reads or parses the log. The server writes a log line per completed request, so a wedged generation stops the log advancing. After `WD_QUIET_SECS` the chat probe fires and detection proceeds. Worst-case detection is about the quiet window plus two passes plus the probe timeout: `WD_QUIET_SECS` (900s) plus two StartInterval passes (300s each) plus `WD_PROBE_TIMEOUT` (240s), about 1740 seconds.
 
 ## Install (separate user approval)
 

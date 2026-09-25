@@ -13,6 +13,8 @@ WD_LABEL="${WD_LABEL:-com.mailroom.mlx-lm-server}"
 WD_HOLD="${WD_HOLD:-$HOME/qwen-mlx/HOLD}"
 WD_STATE_DIR="${WD_STATE_DIR:-$HOME/qwen-mlx/watchdog}"
 WD_LOG="${WD_LOG:-$HOME/MailArchive/logs/qwen-watchdog.log}"
+WD_SERVER_LOG="${WD_SERVER_LOG:-$HOME/MailArchive/logs/mlx_lm_server_1234.log}"
+WD_QUIET_SECS="${WD_QUIET_SECS:-900}"
 WD_MODELS_TIMEOUT="${WD_MODELS_TIMEOUT:-10}"
 WD_PROBE_TIMEOUT="${WD_PROBE_TIMEOUT:-240}"
 WD_FAILS_BEFORE_RESTART="${WD_FAILS_BEFORE_RESTART:-2}"
@@ -30,6 +32,7 @@ lockdir="$WD_STATE_DIR/lock"
 owned=0
 print_out=""
 lat=0
+active_age=0
 
 log() {
   mkdir -p "$(dirname "$WD_LOG")"
@@ -186,16 +189,36 @@ agent_model_matches() {
   return 1
 }
 
-probe() {
-  local body meta http lat_out
+models_ok() {
+  local body meta http
   body=$(mktemp "${TMPDIR:-/tmp}/qwen-wd.XXXXXX")
   meta=$("$WD_CURL" -sS -m "$WD_MODELS_TIMEOUT" -o "$body" -w '%{http_code}' \
     "http://${WD_HOST}:${WD_PORT}/v1/models" 2>/dev/null) || meta="000"
   rm -f "$body"
   http=${meta%% *}
-  if [ "$http" != "200" ]; then
-    return 1
+  [ "$http" = "200" ]
+}
+
+# True when the server log exists and was modified inside WD_QUIET_SECS.
+# mtime only; the log contents are never read.
+server_recent() {
+  local mtime now
+  active_age=0
+  [ -e "$WD_SERVER_LOG" ] || return 1
+  mtime=$(mtime_of "$WD_SERVER_LOG") || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now=$(date +%s)
+  active_age=$((now - mtime))
+  if [ "$active_age" -lt 0 ]; then
+    active_age=0
   fi
+  [ "$active_age" -lt "$WD_QUIET_SECS" ]
+}
+
+chat_ok() {
+  local body meta http lat_out
   body=$(mktemp "${TMPDIR:-/tmp}/qwen-wd.XXXXXX")
   meta=$("$WD_CURL" -sS -m "$WD_PROBE_TIMEOUT" -o "$body" \
     -w '%{http_code} %{time_total}' \
@@ -218,6 +241,37 @@ probe() {
   fi
   rm -f "$body"
   return 0
+}
+
+note_failure() {
+  local n prior rc epoch
+  n=$(read_fails)
+  n=$((n + 1))
+  write_fails "$n"
+  log "fail consecutive=${n}"
+  if [ "$n" -lt "$WD_FAILS_BEFORE_RESTART" ]; then
+    return 0
+  fi
+  prior=$(restarts_in_window)
+  if [ "$prior" -ge "$WD_MAX_RESTARTS" ]; then
+    write_hold "loop guard: HOLD written"
+    return 0
+  fi
+  if ! pin_files_ok; then
+    write_hold "pin: model path missing"
+    return 0
+  fi
+  if ! agent_model_matches "$print_out"; then
+    write_hold "pin: loaded agent model != pinned path"
+    return 0
+  fi
+  "$WD_LAUNCHCTL" kickstart -k "gui/${uid}/${WD_LABEL}"
+  rc=$?
+  epoch=$(date +%s)
+  printf '%s\n' "$epoch" >> "$restarts_file"
+  printf '%s\n' "$epoch" > "$last_restart_file"
+  write_fails 0
+  log "restart kickstart -k gui/${uid}/${WD_LABEL} rc=${rc}"
 }
 
 mkdir -p "$WD_STATE_DIR"
@@ -245,41 +299,22 @@ if in_grace; then
   exit 0
 fi
 
-if probe; then
+if ! models_ok; then
+  note_failure
+  exit 0
+fi
+
+if server_recent; then
+  write_fails 0
+  log "ok models-only (active ${active_age}s ago)"
+  exit 0
+fi
+
+if chat_ok; then
   write_fails 0
   log "ok latency=${lat}s"
   exit 0
 fi
 
-n=$(read_fails)
-n=$((n + 1))
-write_fails "$n"
-log "fail consecutive=${n}"
-if [ "$n" -lt "$WD_FAILS_BEFORE_RESTART" ]; then
-  exit 0
-fi
-
-prior=$(restarts_in_window)
-if [ "$prior" -ge "$WD_MAX_RESTARTS" ]; then
-  write_hold "loop guard: HOLD written"
-  exit 0
-fi
-
-if ! pin_files_ok; then
-  write_hold "pin: model path missing"
-  exit 0
-fi
-
-if ! agent_model_matches "$print_out"; then
-  write_hold "pin: loaded agent model != pinned path"
-  exit 0
-fi
-
-"$WD_LAUNCHCTL" kickstart -k "gui/${uid}/${WD_LABEL}"
-rc=$?
-epoch=$(date +%s)
-printf '%s\n' "$epoch" >> "$restarts_file"
-printf '%s\n' "$epoch" > "$last_restart_file"
-write_fails 0
-log "restart kickstart -k gui/${uid}/${WD_LABEL} rc=${rc}"
+note_failure
 exit 0
