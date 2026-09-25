@@ -6,6 +6,8 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH
 LOG="$HOME/MailArchive/logs/qwen-chat-up.log"
 exec >>"$LOG" 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] qwen-chat-up start"
+rm -f "$HOME/qwen-mlx/HOLD"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] cleared watchdog HOLD"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] stopping Ollama"
 osascript -e 'quit application "Ollama"' >/dev/null 2>&1 || true
@@ -57,6 +59,8 @@ if [ "${INC}" = "0" ] && [ "${SAFE}" -ge 1 ] && [ -n "${SNAP:-}" ]; then
     <string>1234</string>
     <string>--chat-template-args</string>
     <string>{"enable_thinking":false}</string>
+    <string>--prompt-cache-size</string>
+    <string>1</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
