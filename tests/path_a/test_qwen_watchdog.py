@@ -85,6 +85,9 @@ class _Server(ThreadingHTTPServer):
         self.bodies: list[dict] = []
         self.lock = threading.Lock()
         self.stop = threading.Event()
+        # When set, every request appends one access-log line at start
+        # (mlx_lm.server logs the POST when it starts, not during decode).
+        self.access_log = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -101,9 +104,21 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b""
         self._dispatch("POST", raw)
 
+    def _touch_access_log(self) -> None:
+        server: _Server = self.server  # type: ignore[assignment]
+        path = server.access_log
+        if path is None:
+            return
+        with open(path, "ab") as handle:
+            handle.write(b"127.0.0.1 - - request\n")
+        now = time.time()
+        os.utime(path, (now, now))
+
     def _dispatch(self, method: str, raw: bytes) -> None:
         server: _Server = self.server  # type: ignore[assignment]
         path = self.path.split("?", 1)[0]
+        # Access line is written when the request starts, before any hang.
+        self._touch_access_log()
         with server.lock:
             server.paths.append(path)
             if method == "POST":
@@ -530,6 +545,87 @@ class WatchdogBehaviorTests(unittest.TestCase):
         self.assertNotIn("models-only", self._log())
         self.assertIn("fail consecutive=1", self._log())
 
+    def test_own_requests_do_not_refresh_quiet_window(self) -> None:
+        # Consecutive passes whose only log writes are the watchdog's own
+        # GETs stay models-only until last_activity is older than the quiet
+        # window. The next pass then runs the chat probe.
+        log_path = self._server_log(0)
+        self.server.access_log = log_path
+        extra = {"WD_SERVER_LOG": str(log_path), "WD_QUIET_SECS": "900"}
+        first = self._run(**extra)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._posts(), [])
+        activity = (self.state / "last_activity").read_text().strip()
+        self.assertTrue(activity.isdigit())
+        second = self._run(**extra)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self._posts(), [])
+        self.assertEqual((self.state / "last_activity").read_text().strip(), activity)
+        self.assertIn("models-only", self._log())
+        quiet_epoch = int(time.time()) - 1000
+        (self.state / "last_activity").write_text("%s\n" % quiet_epoch)
+        os.utime(
+            self.state / "last_activity",
+            (quiet_epoch, quiet_epoch),
+        )
+        third = self._run(**extra)
+        self.assertEqual(third.returncode, 0, third.stderr)
+        self.assertEqual(self._posts(), ["/v1/chat/completions"])
+        self.assertIn("latency=", self._log())
+        self.assertEqual(self._kickstarts(), [])
+
+    def test_external_write_between_passes_stays_models_only(self) -> None:
+        log_path = self._server_log(0)
+        self.server.access_log = log_path
+        extra = {"WD_SERVER_LOG": str(log_path), "WD_QUIET_SECS": "900"}
+        first = self._run(**extra)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._posts(), [])
+        # Quiet would be true if the only writer were the watchdog.
+        old = int(time.time()) - 2000
+        (self.state / "last_activity").write_text("%s\n" % old)
+        stored = int((self.state / "self_log_mtime").read_text().strip())
+        external = time.time()
+        if int(external) == stored:
+            external = float(stored + 1)
+        os.utime(log_path, (external, external))
+        self.assertNotEqual(int(log_path.stat().st_mtime), stored)
+        second = self._run(**extra)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self._posts(), [])
+        self.assertIn("ok models-only (active ", self._log())
+        self.assertEqual(self._kickstarts(), [])
+
+    def test_self_touches_only_hung_chat_two_passes_kickstart(self) -> None:
+        # Regression: the access log is touched only by the watchdog's own
+        # models GET and chat POST. Two quiet passes still kickstart.
+        log_path = self._server_log(1200)
+        self.server.access_log = log_path
+        self.server.mode = "chat_hang"
+        self.server.delay = 8.0
+        extra = {
+            "WD_SERVER_LOG": str(log_path),
+            "WD_QUIET_SECS": "900",
+            "WD_MODELS_TIMEOUT": "2",
+            "WD_PROBE_TIMEOUT": "1",
+        }
+        first = self._run(**extra)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(self._fails(), "1")
+        self.assertEqual(self._kickstarts(), [])
+        self.assertGreaterEqual(len(self._posts()), 1)
+        now = time.time()
+        self.assertLess(now - log_path.stat().st_mtime, 30)
+        last = int((self.state / "last_activity").read_text().strip())
+        self.assertGreaterEqual(now - last, 900)
+        recorded = int((self.state / "self_log_mtime").read_text().strip())
+        self.assertEqual(recorded, int(log_path.stat().st_mtime))
+        second = self._run(**extra)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertGreaterEqual(len(self._posts()), 2)
+        self.assertEqual(len(self._kickstarts()), 1)
+        self._assert_only_mlx_label()
+
     def test_models_ok_chat_fail(self) -> None:
         self.server.mode = "models_ok_chat_fail"
         proc = self._run()
@@ -680,7 +776,12 @@ class WatchdogStaticTests(unittest.TestCase):
         self.assertIn("WD_SERVER_LOG", text)
         self.assertIn("WD_QUIET_SECS", text)
         self.assertIn("ok models-only (active <N>s ago)", text)
-        self.assertIn("quiet window plus two passes plus the probe timeout", text)
+        self.assertIn("self_log_mtime", text)
+        self.assertIn("last_activity", text)
+        self.assertIn(
+            "quiet window + up to 1 pass + probe timeout + 1 pass + probe timeout",
+            text,
+        )
         self.assertIn("qwen-chat-up.sh", text)
         for token in ("bootout", "HOLD", "watchdog state"):
             self.assertIn(token, text)

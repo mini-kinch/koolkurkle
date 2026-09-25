@@ -28,11 +28,14 @@ WD_MODEL_PATH="${WD_MODEL_PATH:-$HOME/.cache/huggingface/hub/models--mlx-communi
 fails_file="$WD_STATE_DIR/consecutive_fails"
 restarts_file="$WD_STATE_DIR/restarts"
 last_restart_file="$WD_STATE_DIR/last_restart"
+self_mtime_file="$WD_STATE_DIR/self_log_mtime"
+last_activity_file="$WD_STATE_DIR/last_activity"
 lockdir="$WD_STATE_DIR/lock"
 owned=0
 print_out=""
 lat=0
 active_age=0
+log_missing=1
 
 log() {
   mkdir -p "$(dirname "$WD_LOG")"
@@ -199,22 +202,73 @@ models_ok() {
   [ "$http" = "200" ]
 }
 
-# True when the server log exists and was modified inside WD_QUIET_SECS.
-# mtime only; the log contents are never read.
-server_recent() {
-  local mtime now
-  active_age=0
-  [ -e "$WD_SERVER_LOG" ] || return 1
-  mtime=$(mtime_of "$WD_SERVER_LOG") || return 1
-  case "$mtime" in
-    ''|*[!0-9]*) return 1 ;;
+read_epoch_file() {
+  local v
+  v=""
+  if [ -f "$1" ]; then
+    IFS= read -r v < "$1" || v=""
+  fi
+  case "$v" in
+    ''|*[!0-9]*) v="" ;;
   esac
+  printf '%s' "$v"
+}
+
+# mtime of WD_SERVER_LOG right after this watchdog's own last request.
+# Contents are never read.
+note_self_log_mtime() {
+  local m
+  [ -e "$WD_SERVER_LOG" ] || return 0
+  m=$(mtime_of "$WD_SERVER_LOG") || return 0
+  case "$m" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s\n' "$m" > "$self_mtime_file"
+}
+
+# Sample BEFORE any watchdog HTTP call. mlx_lm.server appends an access-log
+# line for every request, including ours, so a post-GET mtime is always fresh.
+# self_log_mtime is the mtime after our previous requests. A different
+# m_before is external activity and becomes last_activity. No prior state is
+# conservative: last_activity starts at m_before. A missing log is quiet.
+sample_external_activity() {
+  local m_before stored
+  log_missing=1
+  [ -e "$WD_SERVER_LOG" ] || return 0
+  m_before=$(mtime_of "$WD_SERVER_LOG") || return 0
+  case "$m_before" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  log_missing=0
+  if [ ! -f "$self_mtime_file" ]; then
+    printf '%s\n' "$m_before" > "$last_activity_file"
+    return 0
+  fi
+  stored=$(read_epoch_file "$self_mtime_file")
+  if [ "$m_before" != "$stored" ]; then
+    printf '%s\n' "$m_before" > "$last_activity_file"
+  fi
+}
+
+# Quiet when the log is missing, when no external activity has been recorded,
+# or when now - last_activity >= WD_QUIET_SECS. Sets active_age for the
+# models-only log line (N = now - last_activity, floored at 0).
+server_quiet() {
+  local prev now
+  active_age=0
+  if [ "$log_missing" = "1" ]; then
+    return 0
+  fi
+  prev=$(read_epoch_file "$last_activity_file")
+  if [ -z "$prev" ]; then
+    return 0
+  fi
   now=$(date +%s)
-  active_age=$((now - mtime))
+  active_age=$((now - prev))
   if [ "$active_age" -lt 0 ]; then
     active_age=0
   fi
-  [ "$active_age" -lt "$WD_QUIET_SECS" ]
+  [ "$active_age" -ge "$WD_QUIET_SECS" ]
 }
 
 chat_ok() {
@@ -299,22 +353,28 @@ if in_grace; then
   exit 0
 fi
 
+sample_external_activity
+
 if ! models_ok; then
+  note_self_log_mtime
   note_failure
   exit 0
 fi
 
-if server_recent; then
+if ! server_quiet; then
+  note_self_log_mtime
   write_fails 0
   log "ok models-only (active ${active_age}s ago)"
   exit 0
 fi
 
 if chat_ok; then
+  note_self_log_mtime
   write_fails 0
   log "ok latency=${lat}s"
   exit 0
 fi
 
+note_self_log_mtime
 note_failure
 exit 0
