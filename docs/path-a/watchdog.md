@@ -37,7 +37,7 @@ A watchdog restart does not bounce retrieval (`:8743`). Only the `com.mailroom.m
 
 `$HOME/.cache/huggingface/hub/models--mlx-community--Qwen3.8-27B-4bit/snapshots/10c35caafbb80f7dc6a7a432cdd11af10a6d4818`
 
-The watchdog never selects a model with a `models--*Qwen* | head -1` glob and never lists the Hugging Face hub directory. Manual start in `qwen-chat-up.sh` still uses that glob; pinning manual starts is out of scope.
+The watchdog never selects a model with a `models--*Qwen* | head -1` glob and never lists the Hugging Face hub directory. Manual start in `qwen-chat-up.sh` pins that same snapshot. See [model-pin.md](model-pin.md).
 
 Before any restart the pass preflights:
 
@@ -87,7 +87,7 @@ Log lines are append-only text: timestamp, then the event.
 
 ## Prompt cache on the session script
 
-`scripts/qwen-chat-up.sh` passes `--prompt-cache-size` `1` in the `mlx_lm.server` plist it writes (two program arguments, after the existing `--chat-template-args` `{"enable_thinking":false}` pair). The default of 10 distinct KV caches is the wrong size for this 27B 4-bit model. Model selection in that script is unchanged, and the thinking-off pair stays.
+`scripts/qwen-chat-up.sh` passes `--prompt-cache-size` `1` in the `mlx_lm.server` plist it writes (two program arguments, after the existing `--chat-template-args` `{"enable_thinking":false}` pair). The default of 10 distinct KV caches is the wrong size for this 27B 4-bit model. Model selection in that script is the pinned snapshot, and the thinking-off pair stays.
 
 ## Prompt cache interaction
 

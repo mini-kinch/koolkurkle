@@ -29,12 +29,15 @@ curl -sS -m 5 http://127.0.0.1:8743/health || echo "ask_mail health FAIL"
 echo
 
 HF_ROOT="$HOME/.cache/huggingface/hub"
-MOD=$(ls -d "$HF_ROOT"/models--*Qwen* 2>/dev/null | head -1 || true)
+PIN="$HF_ROOT/models--mlx-community--Qwen3.8-27B-4bit/snapshots/10c35caafbb80f7dc6a7a432cdd11af10a6d4818"
+MOD=$(dirname "$(dirname "$PIN")")
 INC=1; SAFE=0; SNAP=""
-if [ -n "${MOD:-}" ]; then
+if [ -d "$PIN" ]; then
   INC=$(find "$MOD" -name '*.incomplete' 2>/dev/null | wc -l | tr -d ' ')
-  SAFE=$(find "$MOD" -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
-  SNAP=$(ls -d "$MOD"/snapshots/* 2>/dev/null | head -1 || true)
+  SAFE=$(find "$PIN" -name '*.safetensors' 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${INC}" = "0" ] && [ "${SAFE}" -ge 1 ]; then
+    SNAP="$PIN"
+  fi
 fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] HF incomplete=$INC safetensors=$SAFE snap=${SNAP:-none}"
 
@@ -84,7 +87,15 @@ EOF
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN :1234 not up yet — check mlx_lm_server_1234.log"
   fi
 else
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] model not ready — ask_mail FTS-only serve up; mlx_lm.server deferred (HF watcher will start)"
+  if [ ! -d "$PIN" ]; then
+    REASON="missing dir"
+  elif [ "${INC}" != "0" ]; then
+    REASON="incomplete files"
+  else
+    REASON="no safetensors"
+  fi
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] fail-closed: pinned path $PIN not ready ($REASON); mlx plist not written"
+  exit 3
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] qwen-chat-up done"

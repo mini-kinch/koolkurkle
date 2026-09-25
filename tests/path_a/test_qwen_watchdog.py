@@ -6,7 +6,6 @@ Never calls real launchctl, never binds port 1234, never reads the real home.
 """
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import os
@@ -27,8 +26,7 @@ WATCHDOG = ROOT / "scripts" / "qwen-mlx-watchdog.sh"
 PLIST = ROOT / "launchd" / "com.mailroom.qwen-watchdog.plist.template"
 DOC = ROOT / "docs" / "path-a" / "watchdog.md"
 
-# Verbatim import bytes (live session scripts, before the cache-size / HOLD edit).
-UP_IMPORT_SHA = "5fc7f7c61d4a90293fa0206807929372f711e1ea028719ff9ea42f51fa988c31"
+# qwen-chat-down.sh is unchanged from the live import.
 DOWN_SHA = "a21917f600199e241f92a101935557fba8518ac2fdb719e000db43f7144c8483"
 SNAP = "10c35caafbb80f7dc6a7a432cdd11af10a6d4818"
 LABEL = "com.mailroom.mlx-lm-server"
@@ -680,16 +678,12 @@ class WatchdogStaticTests(unittest.TestCase):
                 "backgrounding: %s" % line,
             )
 
-    def test_up_diff_is_only_cache_and_hold(self) -> None:
+    def test_up_keeps_hold_thinking_and_cache(self) -> None:
         text = UP.read_text()
-        self.assertIn(
-            'MOD=$(ls -d "$HF_ROOT"/models--*Qwen* 2>/dev/null | head -1 || true)',
-            text,
-        )
-        self.assertIn(
-            'SNAP=$(ls -d "$MOD"/snapshots/* 2>/dev/null | head -1 || true)',
-            text,
-        )
+        self.assertNotIn("models--*", text)
+        self.assertNotIn("ls -d", text)
+        self.assertNotIn("snapshots/*", text)
+        self.assertIn(SNAP, text)
         self.assertIn("(CoS 2026-09-24)", text)
         thinking = (
             "    <string>--chat-template-args</string>\n"
@@ -705,25 +699,6 @@ class WatchdogStaticTests(unittest.TestCase):
         self.assertEqual(text.count(hold_rm), 1)
         self.assertEqual(text.count(hold_log), 1)
         self.assertEqual(text.count(cache), 1)
-        stripped = text.replace(hold_rm, "", 1).replace(hold_log, "", 1).replace(cache, "", 1)
-        self.assertEqual(hashlib.sha256(stripped.encode()).hexdigest(), UP_IMPORT_SHA)
-        added = []
-        removed = []
-        for line in difflib.ndiff(stripped.splitlines(), text.splitlines()):
-            if line.startswith("+ "):
-                added.append(line[2:])
-            elif line.startswith("- "):
-                removed.append(line[2:])
-        self.assertEqual(removed, [])
-        self.assertEqual(
-            added,
-            [
-                'rm -f "$HOME/qwen-mlx/HOLD"',
-                "echo \"[$(date '+%Y-%m-%d %H:%M:%S')] cleared watchdog HOLD\"",
-                "    <string>--prompt-cache-size</string>",
-                "    <string>1</string>",
-            ],
-        )
         self.assertEqual(hashlib.sha256(DOWN.read_bytes()).hexdigest(), DOWN_SHA)
         self.assertNotIn("/Users/", text)
         self.assertNotIn("/Users/", WATCHDOG.read_text())
