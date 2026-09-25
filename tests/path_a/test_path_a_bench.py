@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "path_a_bench.py"
+_LOGFMT_PATH = ROOT / "tests" / "path_a" / "watchdog_logfmt.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k_synthetic.txt"
 FIXTURES_DIR = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k"
 FIXED_HEADER = "DATA:\n1. message_id: "
@@ -49,6 +50,18 @@ _HOOKS = (
 )
 
 
+def _load_logfmt():
+    spec = importlib.util.spec_from_file_location("watchdog_logfmt", str(_LOGFMT_PATH))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load watchdog log format")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+LOGFMT = _load_logfmt()
+
+
 def _load_bench():
     spec = importlib.util.spec_from_file_location("path_a_bench", SCRIPT)
     if spec is None or spec.loader is None:
@@ -75,7 +88,13 @@ def _long(fill: str = "E") -> str:
     return (base + pad)[:360]
 
 
-def _completion(content: str, finish: str = "stop", reasoning=None, usage=True) -> bytes:
+def _completion(
+    content: str,
+    finish: str = "stop",
+    reasoning=None,
+    usage=True,
+    completion_tokens: int = 40,
+) -> bytes:
     message = {"role": "assistant", "content": content}
     if reasoning is not None:
         message["reasoning"] = reasoning
@@ -91,7 +110,7 @@ def _completion(content: str, finish: str = "stop", reasoning=None, usage=True) 
     if usage:
         payload["usage"] = {
             "prompt_tokens": 1400,
-            "completion_tokens": 40,
+            "completion_tokens": completion_tokens,
             "total_tokens": 1440,
         }
     return json.dumps(payload).encode("utf-8")
@@ -187,6 +206,33 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if kind == "len202":
             self._send(200, _completion("C" * 202, finish="stop", reasoning="note"))
+            return
+        if kind == "truncated":
+            self._send(
+                200,
+                _completion("T" * 400, finish="length", reasoning="note", completion_tokens=512),
+            )
+            return
+        if kind == "probe_cut_then_ok":
+            if len(server.posts) == 1:
+                self._send(200, _completion("P", finish="length", completion_tokens=1))
+            else:
+                self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
+            return
+        if kind == "short79":
+            self._send(
+                200,
+                _completion("C" * 202, finish="stop", reasoning="note", completion_tokens=79),
+            )
+            return
+        if kind == "both_cut":
+            self._send(
+                200,
+                _completion("B" * 80, finish="length", reasoning="note", completion_tokens=80),
+            )
+            return
+        if kind == "nousage":
+            self._send(200, _completion(_long("N"), finish="stop", reasoning="note", usage=False))
             return
         self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
 
@@ -1000,12 +1046,19 @@ class PathABenchTests(unittest.TestCase):
 
     def test_watchdog_window_is_five_minutes(self) -> None:
         hang = "2026-09-25T03:00:00+00:00"
-        text = "\n".join(
+        restart = "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0"
+        self.assertEqual(LOGFMT.log_printf_format(), "[%s] %s\\n")
+        self.assertIn("date '+%Y-%m-%d %H:%M:%S'", (ROOT / "scripts" / "qwen-mlx-watchdog.sh").read_text(encoding="utf-8"))
+        ok_line = LOGFMT.format_watchdog_line("2026-09-24 23:28:54", "ok latency=1.113314s")
+        self.assertEqual(ok_line, "[2026-09-24 23:28:54] ok latency=1.113314s\n")
+        text = "".join(
             [
-                "noise",
-                "2026-09-25 02:59:59 before",
-                "2026-09-25 03:05:00 exact",
-                "2026-09-25T03:01:00 wrong separator",
+                "noise\n",
+                LOGFMT.format_watchdog_line("2026-09-25 02:59:59", "ok latency=1.113314s"),
+                LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s"),
+                "2026-09-25 02:59:59 " + restart + "\n",
+                LOGFMT.format_watchdog_line("2026-09-25 03:05:00", restart),
+                "2026-09-25T03:01:00 " + restart + "\n",
             ]
         )
         stamps = BENCH.parse_watchdog_stamps(text)
@@ -1015,11 +1068,19 @@ class PathABenchTests(unittest.TestCase):
         )
         hit = BENCH.watchdog_stamp_for_hang(hang, stamps)
         self.assertEqual(hit.strftime("%Y-%m-%d %H:%M:%S"), "2026-09-25 03:05:00")
-        self.assertIsNone(
-            BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps("2026-09-25 02:59:59 only\n"))
-        )
-        late = BENCH.parse_watchdog_stamps("2026-09-25 03:05:01 late\n")
+        only_ok = LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s")
+        self.assertIsNone(BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps(only_ok)))
+        bare = "2026-09-25 03:04:00 " + restart + "\n"
+        bare_hit = BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps(bare))
+        self.assertEqual(bare_hit.strftime("%Y-%m-%d %H:%M:%S"), "2026-09-25 03:04:00")
+        late = BENCH.parse_watchdog_stamps(LOGFMT.format_watchdog_line("2026-09-25 03:05:01", restart))
         self.assertIsNone(BENCH.watchdog_stamp_for_hang(hang, late))
+
+    def _restart_line(self, ts: str) -> str:
+        return LOGFMT.format_watchdog_line(
+            ts,
+            "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0",
+        )
 
     def _watchdog(self, text: str) -> Path:
         path = self.tmp / "watchdog.log"
@@ -1058,7 +1119,7 @@ class PathABenchTests(unittest.TestCase):
         return proc
 
     def test_soak_continue_on_hang_passes_with_watchdog(self) -> None:
-        proc = self._soak_hang_then("hang_once", "2026-09-25 03:01:00 synthetic recovery\n")
+        proc = self._soak_hang_then("hang_once", self._restart_line("2026-09-25 03:01:00"))
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
@@ -1072,10 +1133,23 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(requests[0]["ts"], "2026-09-25T03:00:00+00:00")
 
     def test_soak_continue_on_hang_fails_when_watchdog_outside_window(self) -> None:
-        proc = self._soak_hang_then(
-            "hang_once",
-            "2026-09-25 02:59:00 early\n2026-09-25 03:06:01 late\n",
+        text = "".join(
+            [
+                self._restart_line("2026-09-25 02:59:00"),
+                LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s"),
+                self._restart_line("2026-09-25 03:06:01"),
+            ]
         )
+        proc = self._soak_hang_then("hang_once", text)
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.httpd.posts), 2)
+        self.assertIn("next=pass watchdog=none", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_continue_on_hang_ignores_ok_latency_heartbeat(self) -> None:
+        text = LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s")
+        proc = self._soak_hang_then("hang_once", text)
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
@@ -1083,7 +1157,7 @@ class PathABenchTests(unittest.TestCase):
         self.assertIn("OVERALL FAIL", proc.stdout)
 
     def test_soak_continue_on_hang_fails_when_next_request_fails(self) -> None:
-        proc = self._soak_hang_then("hang_then_short", "2026-09-25 03:01:00 synthetic recovery\n")
+        proc = self._soak_hang_then("hang_then_short", self._restart_line("2026-09-25 03:01:00"))
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
@@ -1120,6 +1194,14 @@ class PathABenchTests(unittest.TestCase):
         )
         self.assertIn("OVERALL FAIL", proc.stdout)
         self.assertNotIn("FAIL soak n=", proc.stdout)
+        self.assertIn(
+            "FAIL soak_length truncated=0 short=1 idx=1 labels=SHORT finish=stop content_len=202 completion_tokens=40",
+            proc.stdout,
+        )
+        self.assertIn("length=SHORT", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertIn("FAILS soak_length soak_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
         row = [item for item in self._rows() if item.get("kind") == "request"][0]
         self.assertEqual(row["verdict"], "fail")
         self.assertEqual(row["http_status"], 200)
@@ -1131,6 +1213,298 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(summary["hung"], 0)
         self.assertEqual(summary["content_short"], 1)
         self.assertEqual(summary["overall"], "FAIL")
+        self.assertEqual(row["length"], "SHORT")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertEqual(summary["fails"], ["soak_length", "soak_content"])
+        self.assertEqual(summary["invalids"], [])
+
+    def _soak_one(self, kind: str, extra: list | None = None, env: dict | None = None):
+        base = self._start(kind)
+        proc = self._run(
+            self._cmd(
+                "soak",
+                base,
+                self._ask(),
+                [
+                    "-n",
+                    "1",
+                    "--interval",
+                    "0",
+                    "--timeout",
+                    "30",
+                    "--continue-on-hang",
+                    *(extra or []),
+                ],
+            ),
+            env={"PATH_A_BENCH_TEST_HOOKS": "1", **(env or {})},
+        )
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual(len(requests), 1)
+        return proc, requests[0], self._rows()[-1]
+
+    def test_soak_length_truncated(self) -> None:
+        proc, row, summary = self._soak_one("truncated")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 512)
+        self.assertEqual(row["content_len"], 400)
+        self.assertEqual(row["length"], "TRUNCATED")
+        self.assertRegex(
+            proc.stdout,
+            r"soak 1/1 fixture=\S+ verdict=fail wall_s=\S+ http=200 "
+            r"finish=length content_len=400 completion_tokens=512 length=TRUNCATED",
+        )
+        self.assertIn("FAIL soak ", proc.stdout)
+        self.assertIn(
+            "FAIL soak_truncated truncated=1 idx=1 finish=length "
+            "content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL soak_length truncated=1 short=0 idx=1 labels=TRUNCATED "
+            "finish=length content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn("PASS soak_content short=0", proc.stdout)
+        self.assertIn("FAILS soak soak_truncated soak_length", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertEqual(summary["fails"], ["soak", "soak_truncated", "soak_length"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_length_short(self) -> None:
+        proc, row, summary = self._soak_one("short79")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 79)
+        self.assertEqual(row["content_len"], 202)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertRegex(
+            proc.stdout,
+            r"finish=stop content_len=202 completion_tokens=79 length=SHORT",
+        )
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
+        self.assertIn(
+            "FAIL soak_length truncated=0 short=1 idx=1 labels=SHORT "
+            "finish=stop content_len=202 completion_tokens=79",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL soak_content short=1 limit=content_len<=300 idx=1 content_len=202",
+            proc.stdout,
+        )
+        self.assertIn("FAILS soak_length soak_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertEqual(summary["fails"], ["soak_length", "soak_content"])
+        self.assertEqual(summary["overall"], "FAIL")
+
+    def test_soak_length_truncated_and_short(self) -> None:
+        proc, row, summary = self._soak_one("both_cut")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 80)
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["length"], "TRUNCATED,SHORT")
+        self.assertIn(
+            "FAIL soak_length truncated=1 short=1 idx=1 labels=TRUNCATED,SHORT "
+            "finish=length content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn("length=TRUNCATED,SHORT", proc.stdout)
+        self.assertIn("FAIL soak ", proc.stdout)
+        self.assertIn(
+            "FAIL soak_truncated truncated=1 idx=1 finish=length "
+            "content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL soak_content short=1 limit=content_len<=300 idx=1 content_len=80",
+            proc.stdout,
+        )
+        self.assertIn("FAILS soak soak_truncated soak_length soak_content", proc.stdout)
+        self.assertEqual(
+            summary["fails"],
+            ["soak", "soak_truncated", "soak_length", "soak_content"],
+        )
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_length_clean(self) -> None:
+        proc, row, summary = self._soak_one("ok")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
+        self.assertIn("PASS soak_content short=0", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertRegex(
+            proc.stdout,
+            r"finish=stop content_len=%d completion_tokens=40 length=ok" % row["content_len"],
+        )
+        self.assertEqual(summary["fails"], [])
+        self.assertEqual(summary["invalids"], [])
+        self.assertEqual(summary["overall"], "PASS")
+
+    def test_soak_length_missing_usage_is_null(self) -> None:
+        proc, row, _summary = self._soak_one("nousage")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIsNone(row["completion_tokens"])
+        self.assertIn("completion_tokens", row)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("completion_tokens=na", proc.stdout)
+        self.assertIn("length=ok", proc.stdout)
+        self.assertIn("PASS soak_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+
+    def test_soak_fails_line_lists_length_content_and_mem(self) -> None:
+        proc, row, summary = self._soak_one(
+            "short79",
+            extra=["--mem-at", "1"],
+            env={
+                "PATH_A_BENCH_INJECT_SWAP_MB": "2000",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+            },
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("FAIL soak_length ", proc.stdout)
+        self.assertIn("FAIL soak_content ", proc.stdout)
+        self.assertIn("FAIL soak_mem_at k=1", proc.stdout)
+        self.assertIn("FAILS soak_length soak_content soak_mem_at", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertEqual(
+            summary["fails"],
+            ["soak_length", "soak_content", "soak_mem_at"],
+        )
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def _cold_one(self, kind: str, extra: list | None = None):
+        base = self._start(kind)
+        proc = self._run(
+            self._cmd("cold", base, self._ask(), ["--timeout", "5", *(extra or [])]),
+            env={"PATH_A_BENCH_TEST_HOOKS": "1"},
+        )
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        return proc, requests, self._rows()[-1]
+
+    def test_cold_truncated(self) -> None:
+        proc, requests, summary = self._cold_one("truncated")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 512)
+        self.assertEqual(row["content_len"], 400)
+        self.assertEqual(row["length"], "TRUNCATED")
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("limit_s=90.000", proc.stdout)
+        self.assertIn(
+            "FAIL cold_truncated truncated=1 idx=1 finish=length "
+            "content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertIn("FAILS cold_truncated", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertNotIn("FAIL cold_request", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_truncated"])
+        self.assertEqual(summary["invalids"], [])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_short(self) -> None:
+        proc, requests, summary = self._cold_one("short79")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 79)
+        self.assertEqual(row["content_len"], 202)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn(
+            "FAIL cold_content short=1 limit=content_len<=300 idx=1 content_len=202",
+            proc.stdout,
+        )
+        self.assertIn("FAILS cold_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_content"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_truncated_and_short(self) -> None:
+        proc, requests, summary = self._cold_one("both_cut")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["length"], "TRUNCATED,SHORT")
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["completion_tokens"], 80)
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn(
+            "FAIL cold_truncated truncated=1 idx=1 finish=length "
+            "content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL cold_content short=1 limit=content_len<=300 idx=1 content_len=80",
+            proc.stdout,
+        )
+        self.assertIn("FAILS cold_truncated cold_content", proc.stdout)
+        self.assertEqual(summary["fails"], ["cold_truncated", "cold_content"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_cold_length_clean(self) -> None:
+        proc, requests, summary = self._cold_one("ok")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        row = requests[0]
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS cold_content short=0 limit=content_len<=300", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertEqual(summary["fails"], [])
+        self.assertEqual(summary["invalids"], [])
+        self.assertIn("OVERALL PASS", proc.stdout)
+
+    def test_cold_probe_excluded_from_length_check(self) -> None:
+        proc, requests, summary = self._cold_one("probe_cut_then_ok", extra=["--idle", "0"])
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(len(requests), 2)
+        probe, generate = requests
+        self.assertEqual(probe["role"], "probe")
+        self.assertEqual(probe["finish_reason"], "length")
+        self.assertEqual(probe["completion_tokens"], 1)
+        self.assertEqual(probe["content_len"], 1)
+        self.assertEqual(probe["length"], "na")
+        self.assertEqual(probe["verdict"], "pass")
+        self.assertEqual(generate["role"], "generate")
+        self.assertEqual(generate["finish_reason"], "stop")
+        self.assertGreater(generate["content_len"], 300)
+        self.assertEqual(generate["length"], "ok")
+        self.assertIn("PASS cold_probe", proc.stdout)
+        self.assertIn("PASS cold_request n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS cold_truncated truncated=0", proc.stdout)
+        self.assertIn("PASS cold_content short=0", proc.stdout)
+        self.assertNotIn("FAIL cold_truncated", proc.stdout)
+        self.assertNotIn("FAIL cold_content", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertEqual(summary["fails"], [])
+        self.assertIn("OVERALL PASS", proc.stdout)
 
     def test_soak_mem_at_sample_in_summary(self) -> None:
         base = self._start("ok")

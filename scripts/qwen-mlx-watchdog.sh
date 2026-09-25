@@ -149,7 +149,8 @@ pin_files_ok() {
   if [ ! -d "$WD_MODEL_PATH" ]; then
     return 1
   fi
-  safe=$(find "$WD_MODEL_PATH" -type f -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')
+  # -L follows Hugging Face snapshot symlinks into blobs/. A dangling link is not a file.
+  safe=$(find -L "$WD_MODEL_PATH" -type f -name '*.safetensors' 2>/dev/null | wc -l | tr -d '[:space:]')
   if [ "${safe:-0}" -lt 1 ]; then
     return 1
   fi

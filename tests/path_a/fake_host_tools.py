@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""PATH stand-in for launchctl, curl, kill, ps, and lsof.
+"""PATH stand-in for launchctl, curl, kill, ps, lsof, and plutil.
 
 Test double only. Exits unless FAKE_HOST_TOOLS=1. Does not bind a port
 and does not open a network connection.
+
+KeepAlive=true (FAKE_ROOT/keepalive) makes a plain kill relaunch the
+listener with a new pid and no watchdog line. kill -STOP does not.
+Watchdog log lines use qwen-mlx-watchdog.sh log()'s printf format.
 """
 from __future__ import print_function
 
@@ -51,19 +55,25 @@ def _append_log(line):
         handle.write(line + "\n")
 
 
+def _format_log(message):
+    folder = os.path.dirname(os.path.realpath(__file__))
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
+    import watchdog_logfmt
+
+    return watchdog_logfmt.format_watchdog_line("2026-09-25 12:00:00", message).rstrip(
+        "\n"
+    )
+
+
 def _append_restart():
     _append_log(
-        "[2026-09-25 12:00:00] restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0"
+        _format_log("restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0")
     )
 
 
 def _append_fail(n):
-    _append_log("[2026-09-25 12:00:00] fail consecutive=%d" % n)
-
-
-def _hold_exists():
-    path = os.environ.get("DRILL_HOLD", "")
-    return bool(path) and os.path.exists(path)
+    _append_log(_format_log("fail consecutive=%d" % n))
 
 
 def _write_hold(text):
@@ -114,17 +124,6 @@ def _curl_port_kill(phase):
     return _emit("000")
 
 
-def _curl_hold(phase):
-    if _hold_exists():
-        return _emit("000")
-    if phase == "down":
-        _append_restart()
-        _write("phase", "up")
-        _bump_pid()
-        return _emit("200")
-    return _emit("200")
-
-
 def _curl_stop(phase):
     if phase != "stopped":
         return _emit("200")
@@ -146,16 +145,27 @@ def _curl_down_only(phase):
     return _emit("000")
 
 
+def _curl_loop3(phase):
+    if phase == "up":
+        return _emit("200")
+    return _emit("000")
+
+
+def _keepalive_on():
+    raw = _read("keepalive", "true").strip().lower()
+    return raw in ("true", "1", "yes")
+
+
 def do_curl(_args):
     scenario = _scenario()
     phase = _read("phase", "up")
     if scenario in ("port-kill", "mutate-ask"):
         return _curl_port_kill(phase)
-    if scenario == "port-kill-hold":
-        return _curl_hold(phase)
-    if scenario == "stop-cont":
+    if scenario in ("stop-cont", "stop-hold", "port-kill-hold"):
         return _curl_stop(phase)
-    if scenario in ("hold-violated", "no-recovery", "loop3"):
+    if scenario == "loop3":
+        return _curl_loop3(phase)
+    if scenario in ("hold-violated", "no-recovery", "stuck-down"):
         return _curl_down_only(phase)
     if phase == "up":
         return _emit("200")
@@ -170,7 +180,12 @@ def _kill_signal(args):
     return sig
 
 
-def _kill_loop3():
+def _stop_loop3():
+    """kill -STOP drives the watchdog. Plain kill does not.
+
+    The first three STOPs each produce one restart kickstart and a new pid.
+    The fourth writes the loop-guard HOLD and leaves the listener stopped.
+    """
     n = int(_read("restarts_done", "0") or "0")
     if n < 3:
         _append_restart()
@@ -179,7 +194,8 @@ def _kill_loop3():
         _bump_pid()
         return 0
     _write_hold("loop guard: HOLD written\n")
-    _write("phase", "down")
+    _write("guard_done", "1")
+    _write("phase", "stopped")
     return 0
 
 
@@ -190,14 +206,22 @@ def do_kill(args):
         return 0
     _maybe_mutate()
     if sig == "-STOP":
+        if scenario == "loop3":
+            return _stop_loop3()
         _write("phase", "stopped")
         _write("stop_curls", "0")
+        if scenario == "hold-violated":
+            _append_restart()
         return 0
-    if scenario == "loop3":
-        return _kill_loop3()
     if scenario == "hold-violated":
         _append_restart()
         _write("phase", "down")
+        return 0
+    # KeepAlive relaunches a killed (not stopped) job with no watchdog line.
+    if _keepalive_on() and scenario in ("port-kill", "mutate-ask", "launchd"):
+        _bump_pid()
+        _write("phase", "up")
+        _write("relaunched", "1")
         return 0
     _write("phase", "down")
     _write("down_curls", "0")
@@ -218,6 +242,24 @@ def do_lsof():
         return 1
     sys.stdout.write("%s\n" % pid)
     return 0
+
+
+def do_plutil(args):
+    # plutil -extract KeepAlive raw PATH
+    if (
+        len(args) >= 4
+        and args[0] == "-extract"
+        and args[1] == "KeepAlive"
+        and args[2] == "raw"
+    ):
+        raw = _read("keepalive", "")
+        if raw == "":
+            sys.stderr.write("KeepAlive: not found\n")
+            return 1
+        sys.stdout.write(raw + "\n")
+        return 0
+    sys.stderr.write("unsupported plutil\n")
+    return 1
 
 
 def do_launchctl(args):
@@ -265,6 +307,8 @@ def main():
         return do_ps()
     if cmd == "lsof":
         return do_lsof()
+    if cmd == "plutil":
+        return do_plutil(args)
     sys.stderr.write("unknown tool\n")
     return 2
 

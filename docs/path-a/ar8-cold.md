@@ -9,7 +9,17 @@ Idle the live 27B server for 30 minutes with the watchdog booted out, then run a
 - Harness: `scripts/path_a_bench.py cold --idle 1800`.
 - Wrapper: `scripts/path_a_cold_ar.sh`.
 
-`cold --idle` sleeps, sends the max-tokens-1 probe with a 60 second timeout, then one paste request. The paste bar is 90 seconds (`finish_reason` `stop`, content length greater than 300). A probe timeout is a wedge (bench exit 4) and the paste is not sent. The harness never calls `launchctl`.
+`cold --idle` sleeps, sends the max-tokens-1 probe with a 60 second timeout, then one paste request. The paste timing bar is 90 seconds. A probe timeout is a wedge (bench exit 4) and the paste is not sent. The harness never calls `launchctl`.
+
+The paste request is three lines, read separately. Thresholds are unchanged (90 seconds, content length greater than 300):
+
+- `PASS cold_request` / `FAIL cold_request` is timing: the paste returned inside 90 seconds. A short body or `finish_reason` `length` does not flip this line.
+- `PASS cold_truncated truncated=0` or `FAIL cold_truncated truncated=<n> idx=<n> finish=length content_len=<len> completion_tokens=<n>`. `finish_reason` `length` is a cut-off. This line scores the paste only.
+- `PASS cold_content short=0 limit=content_len<=300` or `FAIL cold_content short=<n> limit=content_len<=300 idx=<n> content_len=<len>`. Content length 300 or less is a short answer. A `finish=stop` reply with 79 completion tokens and `content_len` 202 is short, not truncated. One reply can fail both lines.
+
+`cold_probe` is not part of the length check. A max-tokens-1 probe can finish `length` with a one-character body and still be `PASS cold_probe`. Its progress `length=` is `na`. The probe row still records `finish_reason`, `content_len`, and `completion_tokens`.
+
+Before `OVERALL`, cold prints `FAILS` and `INVALIDS`. A clean run is `FAILS none` and `INVALIDS none`. A cut-off paste is `FAILS cold_truncated`. A short paste is `FAILS cold_content`. Both is `FAILS cold_truncated cold_content`. A slow paste is `FAILS cold_request` as well.
 
 ## Preconditions
 
@@ -43,7 +53,7 @@ The wrapper:
 
 ## PASS
 
-The bench prints `PASS cold_probe`, `PASS cold_request` with `limit_s=90.000`, `PASS ask_mail`, and `OVERALL PASS`. The probe must not print `WEDGE`. The wrapper then prints:
+The bench prints `PASS cold_probe`, `PASS cold_request` with `limit_s=90.000`, `PASS cold_truncated truncated=0`, `PASS cold_content short=0`, `PASS ask_mail`, `FAILS none`, `INVALIDS none`, and `OVERALL PASS`. The probe must not print `WEDGE`. The wrapper then prints:
 
 ```text
 PASS cold elapsed_s=<seconds> idle=1800

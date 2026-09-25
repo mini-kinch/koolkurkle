@@ -1,9 +1,10 @@
 #!/bin/bash
 # Phase C foreground drills for the Path A mlx_lm.server watchdog.
 # bash 3.2 compatible. One subcommand per run, in the foreground.
-# The EXIT trap sends kill -CONT if this run stopped a pid, removes HOLD
+# The EXIT trap sends kill -CONT for every pid this run stopped, removes HOLD
 # when this run owns it, and kickstarts the server label if /v1/models is not 200.
 # It does not call the chat session up or down scripts, and it does not edit the watchdog.
+# It does not edit the server plist. KeepAlive is only read.
 set -u
 # kill is a shell builtin. Disable it so this script runs the kill on PATH
 # (the real /bin/kill on the Mac, a test double in unit tests).
@@ -15,6 +16,7 @@ DRILL_LABEL="${DRILL_LABEL:-com.mailroom.mlx-lm-server}"
 DRILL_WD_LABEL="${DRILL_WD_LABEL:-com.mailroom.qwen-watchdog}"
 DRILL_HOLD="${DRILL_HOLD:-$HOME/qwen-mlx/HOLD}"
 DRILL_LOG="${DRILL_LOG:-$HOME/MailArchive/logs/qwen-watchdog.log}"
+DRILL_SERVER_PLIST="${DRILL_SERVER_PLIST:-$HOME/Library/LaunchAgents/com.mailroom.mlx-lm-server.plist}"
 DRILL_CURL_MAX="${DRILL_CURL_MAX:-10}"
 
 DRY=0
@@ -29,20 +31,27 @@ BASE_FAILS=0
 SEEN_RESTARTS=0
 STARTED=0
 CLEAR_HOLD=0
-STOPPED_PID=""
+STOPPED_PIDS=""
 START_TS=0
+RECOVERED_BY=""
+RECOVERED_PID=""
 
 usage() {
   cat <<'EOF'
 usage: path_a_drill.sh [--dry-run] [--ask-mail PATH] [--wait SECONDS] [--poll SECONDS] COMMAND
 
 Commands (foreground only):
-  port-kill       kill the listener without HOLD; expect a watchdog restart
-  port-kill-hold  touch HOLD, kill, expect no restart; then remove HOLD and recover
+  port-kill       kill the listener; PASS on HTTP 200 and a new pid
+                  (recovered_by=launchd-keepalive or recovered_by=watchdog)
+  stop-hold       HOLD plus kill -STOP; no restart kickstart while HOLD exists,
+                  then remove HOLD and require fail consecutive= and restart kickstart
+  port-kill-hold  alias of stop-hold
   stop-cont       kill -STOP the listener; expect fail then kickstart; trap sends CONT
-  loop3           three watchdog restarts, then HOLD containing "loop guard"
+  loop3           three kill -STOP watchdog restarts, then HOLD containing "loop guard"
 
 --wait defaults to 900 seconds (1800 for loop3). --poll defaults to 5.
+KeepAlive is read with: plutil -extract KeepAlive raw "$DRILL_SERVER_PLIST"
+(default $HOME/Library/LaunchAgents/com.mailroom.mlx-lm-server.plist).
 Exit 0 is PASS, 1 is FAIL, 2 is usage.
 EOF
 }
@@ -101,6 +110,25 @@ count_in_log() {
   printf '%s' "$n"
 }
 
+keepalive_value() {
+  local raw
+  if [ ! -f "$DRILL_SERVER_PLIST" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  raw=$(plutil -extract KeepAlive raw "$DRILL_SERVER_PLIST" 2>/dev/null || true)
+  raw=$(printf '%s' "$raw" | tr -d '[:space:]')
+  if [ -z "$raw" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  printf '%s' "$raw"
+}
+
+note_stopped() {
+  STOPPED_PIDS="${STOPPED_PIDS} $1"
+}
+
 poll_line() {
   local code count now
   code="$1"
@@ -110,11 +138,11 @@ poll_line() {
 }
 
 restore_now() {
-  local code
-  if [ -n "$STOPPED_PID" ]; then
-    kill -CONT "$STOPPED_PID" >/dev/null 2>&1 || true
-    echo "restore cont pid=$STOPPED_PID"
-  fi
+  local code pid
+  for pid in $STOPPED_PIDS; do
+    kill -CONT "$pid" >/dev/null 2>&1 || true
+    echo "restore cont pid=$pid"
+  done
   if [ "$CLEAR_HOLD" = "1" ]; then
     if [ -e "$DRILL_HOLD" ]; then
       rm -f "$DRILL_HOLD"
@@ -162,7 +190,7 @@ succeed() {
 }
 
 preflight() {
-  local code ps_line
+  local code ps_line keepalive
   if [ -n "$ASK_MAIL" ]; then
     if [ ! -f "$ASK_MAIL" ]; then
       fail "ask_mail missing"
@@ -170,6 +198,8 @@ preflight() {
     ASK_SHA=$(hash_file "$ASK_MAIL")
     echo "preflight ask_mail sha256=$ASK_SHA"
   fi
+  keepalive=$(keepalive_value)
+  echo "preflight keepalive=$keepalive"
   if ! launchctl print "gui/${uid}/${DRILL_LABEL}" >/dev/null 2>&1; then
     fail "label not loaded label=$DRILL_LABEL"
   fi
@@ -207,6 +237,33 @@ wait_for_restart() {
     poll_line "$code" "$count"
     if [ "$count" -gt "$SEEN_RESTARTS" ] && [ "$code" = "200" ]; then
       SEEN_RESTARTS=$count
+      return 0
+    fi
+    if [ $((now - start)) -ge "$WAIT" ]; then
+      return 1
+    fi
+    sleep_poll
+  done
+}
+
+wait_for_port_recovery() {
+  local before start now count code after
+  before="$1"
+  start=$(date +%s)
+  while true; do
+    code=$(models_code)
+    after=$(listener_pid || true)
+    count=$(count_in_log "restart kickstart")
+    now=$(date +%s)
+    poll_line "$code" "$count"
+    if [ -n "$after" ] && [ "$after" != "$before" ] && [ "$code" = "200" ]; then
+      RECOVERED_PID=$after
+      if [ "$count" -gt "$SEEN_RESTARTS" ]; then
+        SEEN_RESTARTS=$count
+        RECOVERED_BY=watchdog
+      else
+        RECOVERED_BY=launchd-keepalive
+      fi
       return 0
     fi
     if [ $((now - start)) -ge "$WAIT" ]; then
@@ -282,27 +339,28 @@ do_port_kill() {
   STARTED=1
   echo "action kill pid=$before"
   kill "$before" || true
-  if ! wait_for_restart; then
-    fail "no watchdog restart"
+  if ! wait_for_port_recovery "$before"; then
+    fail "port did not recover"
   fi
-  after=$(listener_pid || true)
+  after=$RECOVERED_PID
   if [ -z "$after" ] || [ "$after" = "$before" ]; then
     fail "listener pid unchanged"
   fi
-  succeed "pid_before=$before pid_after=$after"
+  succeed "pid_before=$before pid_after=$after recovered_by=$RECOVERED_BY"
 }
 
-do_port_kill_hold() {
+do_stop_hold() {
   local before after hold_start recover_start hold_s recover_s
   preflight
   before=$PID
   STARTED=1
   CLEAR_HOLD=1
+  note_stopped "$before"
   mkdir -p "$(dirname "$DRILL_HOLD")"
   touch "$DRILL_HOLD"
   echo "action touch HOLD"
-  echo "action kill pid=$before"
-  kill "$before" || true
+  echo "action kill -STOP pid=$before"
+  kill -STOP "$before" || true
   hold_start=$(date +%s)
   if ! wait_no_restart; then
     fail "restart while HOLD set"
@@ -312,8 +370,8 @@ do_port_kill_hold() {
   CLEAR_HOLD=0
   echo "action rm HOLD"
   recover_start=$(date +%s)
-  if ! wait_for_restart; then
-    fail "no recovery after HOLD removed"
+  if ! wait_for_stop; then
+    fail "no probe failure then kickstart"
   fi
   recover_s=$(( $(date +%s) - recover_start ))
   after=$(listener_pid || true)
@@ -328,7 +386,7 @@ do_stop_cont() {
   preflight
   before=$PID
   STARTED=1
-  STOPPED_PID=$before
+  note_stopped "$before"
   echo "action kill -STOP pid=$before"
   kill -STOP "$before" || true
   if ! wait_for_stop; then
@@ -349,8 +407,9 @@ do_loop3() {
   cycle=1
   while [ "$cycle" -le 3 ]; do
     before=$PID
-    echo "action kill pid=$before cycle=$cycle"
-    kill "$before" || true
+    note_stopped "$before"
+    echo "action kill -STOP pid=$before cycle=$cycle"
+    kill -STOP "$before" || true
     if ! wait_for_restart; then
       fail "restart $cycle missing"
     fi
@@ -362,8 +421,9 @@ do_loop3() {
     cycle=$((cycle + 1))
   done
   before=$PID
-  echo "action kill pid=$before cycle=guard"
-  kill "$before" || true
+  note_stopped "$before"
+  echo "action kill -STOP pid=$before cycle=guard"
+  kill -STOP "$before" || true
   wait_for_loop_guard
   got=$?
   if [ "$got" -eq 2 ]; then
@@ -379,6 +439,7 @@ dry_run_plan() {
   if [ -n "$ASK_MAIL" ]; then
     echo "dry-run: hash ask_mail"
   fi
+  echo "dry-run: plutil -extract KeepAlive raw ${DRILL_SERVER_PLIST}"
   echo "dry-run: launchctl print gui/${uid}/${DRILL_LABEL}"
   echo "dry-run: launchctl print gui/${uid}/${DRILL_WD_LABEL}"
   echo "dry-run: lsof -nP -iTCP:${DRILL_PORT} -sTCP:LISTEN -t"
@@ -387,14 +448,16 @@ dry_run_plan() {
   case "$CMD" in
     port-kill)
       echo "dry-run: kill <pid>"
-      echo "dry-run: poll /v1/models until 200 and watchdog log contains restart kickstart (wait ${WAIT}s)"
+      echo "dry-run: poll /v1/models until 200 and a new listener pid (wait ${WAIT}s)"
+      echo "dry-run: recovered_by=watchdog if a new restart kickstart line, else recovered_by=launchd-keepalive"
       ;;
-    port-kill-hold)
+    stop-hold)
       echo "dry-run: touch ${DRILL_HOLD}"
-      echo "dry-run: kill <pid>"
+      echo "dry-run: kill -STOP <pid>"
       echo "dry-run: poll ${WAIT}s for no restart kickstart line"
       echo "dry-run: rm -f ${DRILL_HOLD}"
-      echo "dry-run: poll /v1/models until 200 and watchdog log contains restart kickstart (wait ${WAIT}s)"
+      echo "dry-run: poll watchdog log for fail consecutive= then restart kickstart and /v1/models 200 (wait ${WAIT}s)"
+      echo "dry-run: kill -CONT <pid>"
       ;;
     stop-cont)
       echo "dry-run: kill -STOP <pid>"
@@ -402,14 +465,15 @@ dry_run_plan() {
       echo "dry-run: kill -CONT <pid>"
       ;;
     loop3)
-      echo "dry-run: kill <pid>"
+      echo "dry-run: kill -STOP <pid>"
       echo "dry-run: poll restart kickstart and /v1/models 200 (wait ${WAIT}s)"
-      echo "dry-run: kill <pid>"
+      echo "dry-run: kill -STOP <pid>"
       echo "dry-run: poll restart kickstart and /v1/models 200 (wait ${WAIT}s)"
-      echo "dry-run: kill <pid>"
+      echo "dry-run: kill -STOP <pid>"
       echo "dry-run: poll restart kickstart and /v1/models 200 (wait ${WAIT}s)"
-      echo "dry-run: kill <pid>"
+      echo "dry-run: kill -STOP <pid>"
       echo "dry-run: poll HOLD for loop guard and no further restart kickstart (wait ${WAIT}s)"
+      echo "dry-run: kill -CONT every stopped pid"
       echo "dry-run: rm -f ${DRILL_HOLD}"
       ;;
   esac
@@ -471,7 +535,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$CMD" in
-  port-kill|port-kill-hold|stop-cont|loop3) ;;
+  port-kill|port-kill-hold|stop-hold|stop-cont|loop3) ;;
   *)
     usage >&2
     exit 2
@@ -510,6 +574,12 @@ fi
 
 uid=$(id -u)
 START_TS=$(date +%s)
+
+if [ "$CMD" = "port-kill-hold" ]; then
+  echo "port-kill-hold alias of stop-hold: kill -STOP under HOLD (no restart kickstart while HOLD exists), then remove HOLD and require fail consecutive= and restart kickstart"
+  CMD="stop-hold"
+fi
+
 echo "foreground cmd=$CMD wait_s=$WAIT poll_s=$POLL"
 
 if [ "$DRY" = "1" ]; then
@@ -520,7 +590,7 @@ fi
 
 case "$CMD" in
   port-kill) do_port_kill ;;
-  port-kill-hold) do_port_kill_hold ;;
+  stop-hold) do_stop_hold ;;
   stop-cont) do_stop_cont ;;
   loop3) do_loop3 ;;
 esac

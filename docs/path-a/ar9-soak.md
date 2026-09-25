@@ -23,7 +23,7 @@ Default logs:
 - `$HOME/qwen-mlx/HOLD` is absent, or the watchdog will skip every pass and a hang will not be restarted.
 - Ollama is not running. `--mem-at 24` fails the soak if swap is at least 1024 MB or Ollama is up.
 - The `hf-qwen-stage` LaunchAgent stays disabled.
-- You start the job from the target Mac. Do not leave a four hour soak in the foreground of a remote shell. `launchctl submit` is the process that outlives the shell. The wrapper itself returns as soon as the job is submitted.
+- You start the job from the target Mac. Do not leave a four hour soak in the foreground of a remote shell. Long operator runs use a transient `launchctl submit` job and a log file. Poll with `scripts/path_a_soak_ar.sh status` (or `launchctl print`), then stop it with `launchctl remove`. Do not start one with `nohup &`. `launchctl submit` is the process that outlives the shell. The wrapper itself returns as soon as the job is submitted.
 
 ## Commands
 
@@ -74,10 +74,15 @@ That only means the job was submitted. The soak result is in the log when the jo
 
 - `PASS soak` with `failures=0`. `hung` may be greater than 0. This line is timing and hangs only.
 - Every hung request is followed by a timing pass (`next=pass`): the next request returned inside the timeout with HTTP 200 and `finish_reason` `stop`.
-- If a request hung, the watchdog log has a line whose timestamp (`YYYY-MM-DD HH:MM:SS` at the start of the line) falls within 5 minutes after the hang. The summary prints `HUNG soak idx=<n> local_time=<ts> next=pass watchdog=<stamp>`.
-- `PASS soak_content short=0`. A reply can be fast and still fail the content check. `path_a_bench.py` marks `content_len` <= 300 (`CONTENT_MIN`) as FAIL even when the clock, HTTP status, and finish reason pass. Seen live: 34 s, HTTP 200, `finish=stop`, `content_len=202` -> content FAIL. With `--continue-on-hang` that is its own line, `FAIL soak_content short=1 limit=content_len<=300 idx=<n> content_len=202`, and it does not flip `PASS soak` or `next=pass`. `OVERALL` is still FAIL while that line is FAIL.
+- If a request hung, the watchdog log has a `restart kickstart` line whose timestamp falls within 5 minutes after the hang. The timestamp is the watchdog `log()` form `[YYYY-MM-DD HH:MM:SS] message` (a bare `YYYY-MM-DD HH:MM:SS` at column 0 is also accepted). An `ok latency=` line in that window does not count: the watchdog writes one about every 300 seconds, so a heartbeat is not a restart. The summary prints `HUNG soak idx=<n> local_time=<ts> next=pass watchdog=<stamp>` where `<stamp>` is that `restart kickstart` time, `none`, or `missing`.
+- `PASS soak_truncated truncated=0`, printed next to the timing `soak` line. `FAIL soak_truncated truncated=<n> idx=<n> finish=length content_len=<len> completion_tokens=<n>` means `finish_reason` is `length` (the reply was cut off). That cut-off still fails the timing `soak` line, because it is not a short-only miss. The two lines name different bars.
+- `PASS soak_length truncated=0 short=0`, the per-request length rollup beside timing. `TRUNCATED` means `finish_reason` is `length`. `SHORT` means `content_len` <= 300 (`CONTENT_MIN`). They are separate labels. A `finish=stop` reply with `completion_tokens=79` and `content_len=202` is SHORT, not TRUNCATED. One reply can be both (`labels=TRUNCATED,SHORT`). A hang with no body is `length=na`, not SHORT.
+- `PASS soak_content short=0 limit=content_len<=300`. This is the short-answer line. It lists every request with `content_len` <= 300, including one that is also cut off. Seen live: 34 s, HTTP 200, `finish=stop`, `content_len=202` -> `FAIL soak_content` and `length=SHORT` (not TRUNCATED). With `--continue-on-hang` that short-only miss does not flip `PASS soak` or `next=pass`. A reply that is both cut off and short fails `soak_truncated`, `soak_length`, and `soak_content`. `OVERALL` is still FAIL while any of those lines is FAIL.
+- Before `OVERALL`, two rollup lines name every bar that failed and every INVALID. A clean run prints `FAILS none` and `INVALIDS none`. A run that missed content and the mid-soak memory bar prints `FAILS soak_length soak_content soak_mem_at` (only the bars that failed, in that order: `soak`, `soak_truncated`, `soak_length`, `soak_content`, `soak_mem_at`, `ask_mail`). Nothing that failed is visible only as `OVERALL FAIL`.
 - `PASS soak_mem_at k=24` with `swap_used_mb` under 1024 and `ollama=down`.
 - `PASS ask_mail` and `OVERALL PASS`.
+
+Each request progress line and each JSONL request row records `finish` / `finish_reason`, `content_len`, and `completion_tokens`. `completion_tokens` comes from `usage` when that field is present, and is `na` on the progress line and JSON `null` when it is absent. The progress line ends with `length=ok`, `length=TRUNCATED`, `length=SHORT`, `length=TRUNCATED,SHORT`, or `length=na`.
 
 `status` prints `PASS status` when the job is still loaded. `remove` prints `PASS remove label=com.mailroom.path-a-soak`.
 
@@ -87,7 +92,7 @@ The harness window is 5 minutes (`WATCHDOG_WINDOW_S` is 300). It reads the log a
 
 On the installed watchdog, a hang that still answers `/v1/models` is behind the quiet gate. Worst case from that hang to `kickstart -k` is about 1750 seconds, which is outside the 5 minute window. A restart line later than 5 minutes fails this AR (`watchdog=none`) even though the watchdog is behaving as installed. Do not tighten `WD_QUIET_SECS` to make the bar pass.
 
-A failure that makes `/v1/models` non-200 skips the quiet gate and kickstarts after two passes (about 10 minutes). That is also longer than 5 minutes, so the same FAIL applies. The log line the harness accepts is any timestamp in the window, not only a `restart kickstart` line. Read the log yourself for `restart kickstart` when you score the run.
+A failure that makes `/v1/models` non-200 skips the quiet gate and kickstarts after two passes (about 10 minutes). That is also longer than 5 minutes, so the same FAIL applies. The only line the harness accepts inside the window is one containing `restart kickstart`. `ok latency=` and other stamped lines are ignored. `watchdog=none` means no `restart kickstart` stamp fell in the 5 minutes after the hang.
 
 ## Restore
 
