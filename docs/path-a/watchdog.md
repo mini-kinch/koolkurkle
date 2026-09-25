@@ -12,10 +12,14 @@ On each pass, in order:
 2. If the HOLD file exists, log `hold` and exit 0. No probe and no kickstart.
 3. If `launchctl print gui/<uid>/com.mailroom.mlx-lm-server` fails, the agent is not loaded (for example after `qwen-chat-down.sh`). Log `agent not loaded, skip`, reset the consecutive-fail counter, and exit 0. The watchdog never bootstraps or loads an agent.
 4. If this watchdog's own last restart is still inside `WD_POST_RESTART_GRACE` (default 600 seconds), log `grace` and exit 0. The 27B weights need time to page in (about 7–40 seconds when cold; decode is about 7.5 tok/s).
-5. `GET /v1/models` with `WD_MODELS_TIMEOUT` (default 10 seconds). A non-200 counts as a fail, including when the server log is recent.
-6. If `/v1/models` is HTTP 200 and `WD_SERVER_LOG` exists and its mtime is newer than `WD_QUIET_SECS` ago: log `ok models-only (active <N>s ago)`, reset the consecutive-fail counter, and exit 0. No chat probe.
-7. Otherwise (log missing, or older than `WD_QUIET_SECS`): `POST /v1/chat/completions` with a fixed `ping` message, `max_tokens` 1, `temperature` 0, `stream` false, and `WD_PROBE_TIMEOUT` (default 240 seconds). 240 seconds covers a user request already queued ahead of the probe plus a cold page-in. Success is HTTP 200 and a `choices` array. This is never a full generation. On success, reset the consecutive-fail counter and log `ok` with latency.
-8. On failure: increment the consecutive-fail counter. Restart only when it reaches `WD_FAILS_BEFORE_RESTART` (default 2).
+5. Before any watchdog HTTP call, sample the mtime of `WD_SERVER_LOG` (`m_before`). The log contents are never read. Two state files track activity:
+   - `$WD_STATE_DIR/self_log_mtime` is the log mtime immediately after this watchdog's own last request.
+   - `$WD_STATE_DIR/last_activity` is the epoch of the last external activity.
+   If the log exists and `self_log_mtime` does not yet, set `last_activity` to `m_before` (conservative: the first sight of the log counts as activity). If the log exists and `m_before` differs from `self_log_mtime`, someone else wrote after our last request, so set `last_activity` to `m_before`. Our own lines never advance `last_activity`.
+6. `GET /v1/models` with `WD_MODELS_TIMEOUT` (default 10 seconds). A non-200 counts as a fail with no quiet gate, including when the server log is recent. After the GET, including on this failure path, record the current log mtime into `self_log_mtime`.
+7. If `/v1/models` is HTTP 200 and the server is not quiet: log `ok models-only (active <N>s ago)`, reset the consecutive-fail counter, and exit 0. No chat probe. `N` is `now - last_activity`. Quiet means the log is missing, or `now - last_activity >= WD_QUIET_SECS`.
+8. Otherwise: `POST /v1/chat/completions` with a fixed `ping` message, `max_tokens` 1, `temperature` 0, `stream` false, and `WD_PROBE_TIMEOUT` (default 240 seconds). 240 seconds covers a user request already queued ahead of the probe plus a cold page-in. Success is HTTP 200 and a `choices` array. This is never a full generation. On success, reset the consecutive-fail counter and log `ok` with latency. After the chat probe, including on failure, record the current log mtime into `self_log_mtime` again.
+9. On failure: increment the consecutive-fail counter. Restart only when it reaches `WD_FAILS_BEFORE_RESTART` (default 2).
 
 A restart is foreground, in that same pass (no background child). The consecutive-fail counter is reset after the kickstart, so the next streak starts only once the grace window has passed. The only restart command is:
 
@@ -89,7 +93,9 @@ Log lines are append-only text: timestamp, then the event.
 
 `--prompt-cache-size 1` keeps one prompt-cache entry. A 1-token chat probe every 5 minutes would replace the user's cached ~4k-token paste prompt, which defeats that setting. The chat probe runs only when the server has been quiet.
 
-The watchdog reads the mtime of `WD_SERVER_LOG` and never reads or parses the log. The server writes a log line per completed request, so a wedged generation stops the log advancing. After `WD_QUIET_SECS` the chat probe fires and detection proceeds. Worst-case detection is about the quiet window plus two passes plus the probe timeout: `WD_QUIET_SECS` (900s) plus two StartInterval passes (300s each) plus `WD_PROBE_TIMEOUT` (240s), about 1740 seconds.
+The watchdog uses the mtime of `WD_SERVER_LOG` and never reads or parses the log. `mlx_lm.server` appends an access-log line for every request, including this watchdog's own `GET /v1/models` and its own chat POST, and it writes the POST line when the request starts (nothing is written during decode). Sampling mtime after the GET would always look fresh (`active 0s ago`), and because every pass writes a GET line the log would never stay quiet for `WD_QUIET_SECS`, so a chat hang would never be probed. The pass therefore samples `m_before` before its own requests and stores the mtime after them in `self_log_mtime`. Only an mtime that is not our own line updates `last_activity`. A wedged generation does not add an external line, so after `WD_QUIET_SECS` the chat probe fires and detection proceeds.
+
+Worst-case detection is the quiet window + up to 1 pass + probe timeout + 1 pass + probe timeout: `WD_QUIET_SECS` (900s), then up to one StartInterval (300s) until the first probe, plus `WD_PROBE_TIMEOUT` (240s), then up to one more StartInterval (300s) and a second `WD_PROBE_TIMEOUT` (240s), about 1980 seconds.
 
 ## Install (separate user approval)
 
