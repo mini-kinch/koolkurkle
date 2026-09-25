@@ -1,0 +1,79 @@
+DATA:
+1. message_id: flint-1001
+   date: 2026-04-08
+   from: sender1@example.com
+   subject: flint crate card 1
+   snippet: Fictional flint update about a crate card. Amount listed as 7.40. Reference flint-01.
+2. message_id: flint-1002
+   date: 2026-04-10
+   from: sender2@example.com
+   subject: flint delay slip 2
+   snippet: Fictional flint update about a delay slip. Amount listed as 8.40. Reference flint-02.
+3. message_id: flint-1003
+   date: 2026-04-12
+   from: sender3@example.com
+   subject: Flintrow Office ledger book
+   snippet: Fictional flint note from Flintrow Office about a ledger book. Amount listed as 22.00. Reference flint-r3.
+4. message_id: flint-1004
+   date: 2026-04-14
+   from: sender4@example.com
+   subject: flint invoice copy 4
+   snippet: Fictional flint update about an invoice copy. Amount listed as 10.40. Reference flint-04.
+5. message_id: flint-1005
+   date: 2026-04-16
+   from: sender5@example.com
+   subject: flint storage chit 5
+   snippet: Fictional flint update about a storage chit. Amount listed as 11.40. Reference flint-05.
+6. message_id: flint-1006
+   date: 2026-04-18
+   from: sender6@example.com
+   subject: flint ticket stub 6
+   snippet: Fictional flint update about a ticket stub. Amount listed as 12.40. Reference flint-06.
+7. message_id: flint-1007
+   date: 2026-04-20
+   from: sender7@example.com
+   subject: flint restock memo 7
+   snippet: Fictional flint update about a restock memo. Amount listed as 13.40. Reference flint-07.
+8. message_id: flint-1008
+   date: 2026-04-22
+   from: sender8@example.com
+   subject: flint quiet alert 8
+   snippet: Fictional flint update about a quiet alert. Amount listed as 14.40. Reference flint-08.
+9. message_id: flint-1009
+   date: 2026-04-24
+   from: sender9@example.com
+   subject: flint delivery card 9
+   snippet: Fictional flint update about a delivery card. Amount listed as 15.40. Reference flint-09.
+10. message_id: flint-1010
+   date: 2026-04-26
+   from: sender10@example.com
+   subject: flint subscription 10
+   snippet: Fictional flint update about a subscription. Amount listed as 16.40. Reference flint-10.
+11. message_id: flint-1011
+   date: 2026-04-01
+   from: sender11@example.com
+   subject: flint hinge note 11
+   snippet: Fictional flint update about a hinge note. Amount listed as 17.40. Reference flint-11.
+12. message_id: flint-1012
+   date: 2026-04-03
+   from: sender12@example.com
+   subject: flint tea receipt 12
+   snippet: Fictional flint update about a tea receipt. Amount listed as 18.40. Reference flint-12.
+13. message_id: flint-1013
+   date: 2026-04-05
+   from: sender13@example.com
+   subject: flint dock bill 13
+   snippet: Fictional flint update about a dock bill. Amount listed as 19.40. Reference flint-13.
+14. message_id: flint-1014
+   date: 2026-04-07
+   from: sender14@example.com
+   subject: flint declaration 14
+   snippet: Fictional flint update about a declaration. Amount listed as 20.40. Reference flint-14.
+15. message_id: flint-1015
+   date: 2026-04-09
+   from: sender15@example.com
+   subject: flint quota note 15
+   snippet: Fictional flint update about a quota note. Amount listed as 21.40. Reference flint-15. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5. Extra flint detail 5.
+
+QUESTION:
+Which sender and date go with the Flintrow Office ledger book, and what is the message_id?

@@ -1,0 +1,79 @@
+DATA:
+1. message_id: dune-1001
+   date: 2026-07-06
+   from: sender1@example.com
+   subject: dune crate card 1
+   snippet: Fictional dune update about a crate card. Amount listed as 5.80. Reference dune-01.
+2. message_id: dune-1002
+   date: 2026-07-08
+   from: sender2@example.com
+   subject: dune delay slip 2
+   snippet: Fictional dune update about a delay slip. Amount listed as 6.80. Reference dune-02.
+3. message_id: dune-1003
+   date: 2026-07-10
+   from: sender3@example.com
+   subject: Dunewell Receipts canvas tote
+   snippet: Fictional dune note from Dunewell Receipts about a canvas tote. Amount listed as 15.60. Reference dune-r3.
+4. message_id: dune-1004
+   date: 2026-07-12
+   from: sender4@example.com
+   subject: dune invoice copy 4
+   snippet: Fictional dune update about an invoice copy. Amount listed as 8.80. Reference dune-04.
+5. message_id: dune-1005
+   date: 2026-07-14
+   from: sender5@example.com
+   subject: dune storage chit 5
+   snippet: Fictional dune update about a storage chit. Amount listed as 9.80. Reference dune-05.
+6. message_id: dune-1006
+   date: 2026-07-16
+   from: sender6@example.com
+   subject: dune ticket stub 6
+   snippet: Fictional dune update about a ticket stub. Amount listed as 10.80. Reference dune-06.
+7. message_id: dune-1007
+   date: 2026-07-18
+   from: sender7@example.com
+   subject: dune restock memo 7
+   snippet: Fictional dune update about a restock memo. Amount listed as 11.80. Reference dune-07.
+8. message_id: dune-1008
+   date: 2026-07-20
+   from: sender8@example.com
+   subject: dune quiet alert 8
+   snippet: Fictional dune update about a quiet alert. Amount listed as 12.80. Reference dune-08.
+9. message_id: dune-1009
+   date: 2026-07-22
+   from: sender9@example.com
+   subject: dune delivery card 9
+   snippet: Fictional dune update about a delivery card. Amount listed as 13.80. Reference dune-09.
+10. message_id: dune-1010
+   date: 2026-07-24
+   from: sender10@example.com
+   subject: dune subscription 10
+   snippet: Fictional dune update about a subscription. Amount listed as 14.80. Reference dune-10.
+11. message_id: dune-1011
+   date: 2026-07-26
+   from: sender11@example.com
+   subject: dune hinge note 11
+   snippet: Fictional dune update about a hinge note. Amount listed as 15.80. Reference dune-11.
+12. message_id: dune-1012
+   date: 2026-07-01
+   from: sender12@example.com
+   subject: dune tea receipt 12
+   snippet: Fictional dune update about a tea receipt. Amount listed as 16.80. Reference dune-12.
+13. message_id: dune-1013
+   date: 2026-07-03
+   from: sender13@example.com
+   subject: dune dock bill 13
+   snippet: Fictional dune update about a dock bill. Amount listed as 17.80. Reference dune-13.
+14. message_id: dune-1014
+   date: 2026-07-05
+   from: sender14@example.com
+   subject: dune declaration 14
+   snippet: Fictional dune update about a declaration. Amount listed as 18.80. Reference dune-14.
+15. message_id: dune-1015
+   date: 2026-07-07
+   from: sender15@example.com
+   subject: dune quota note 15
+   snippet: Fictional dune update about a quota note. Amount listed as 19.80. Reference dune-15. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3. Extra dune detail 3.
+
+QUESTION:
+Who sent the Dunewell Receipts canvas tote note, on which date, and under what message_id?
