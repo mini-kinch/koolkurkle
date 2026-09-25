@@ -2,28 +2,34 @@
 
 `scripts/path_a_bench.py` scores the reliability-spec section 8 acceptance bars for the Path A local Qwen chat server, before and after fixes. It is an offline-capable client: unit tests run it against a stub, and on a machine it only talks to the chat server you point it at.
 
-The harness sends HTTP requests and reads system stats. It does not restart anything, does not change configuration, and does not edit LaunchAgents, server scripts, or mail scripts. Apart from the HTTP load and the optional JSONL file you pass to `--out`, it is read-only.
+The harness sends HTTP requests and reads system stats. It does not restart anything, does not change configuration, and does not edit LaunchAgents, server scripts, or mail scripts. It never touches launchd. Apart from the HTTP load, the optional JSONL file you pass to `--out`, and an optional `mem` baseline snapshot, it is read-only. `soak --watchdog-log` only reads a log the operator already has.
 
-Soak must run in the foreground on the host. Do not start it as a background job inside a remote shell. A hang ends the run; the harness does not try to recover the server.
+Soak must run in the foreground on the host. A 4 h soak must not run as a background job inside a remote shell. Without `--continue-on-hang`, a hang ends the run. The harness does not try to recover the server.
 
 Python 3.9, standard library only. On macOS, `/usr/bin/python3` is enough.
 
 ## Safety
 
-- No watchdog.
+- No watchdog of its own, and it does not touch launchd. `soak --watchdog-log` is read-only.
 - No server restarts and no reconfiguration.
 - No writes to mail, sqlite, LaunchAgents, or model config.
-- `warm`, `cold`, and `soak` POST `/v1/chat/completions` and GET `/v1/models` once at start.
+- `probe` POSTs one `/v1/chat/completions` with `max_tokens` 1 and GETs `/v1/models` once at start. It does not load a paste.
+- `warm`, plain `cold`, and `soak` POST the paste and GET `/v1/models` once at start.
+- `cold --idle` sleeps, then sends the max-tokens-1 probe, then one paste request.
 - `mem` runs `sysctl vm.swapusage`, `vm_stat`, `pgrep -x ollama`, and a TCP connect to `127.0.0.1:11434`. On non-macOS, swap and `vm_stat` are `UNKNOWN` (the process exits 1; it does not crash). `--baseline-out` writes only the JSON snapshot you asked for.
 - Each run hashes `ask_mail.py` at start and end (`--ask-mail`, default `$HOME/MailArchive/scripts/ask_mail.py`). A missing file is reported as `absent` and is not a failure. If the hash changes during the run, the run fails. The file is only read.
 
-The chat body matches `scripts/qwen_paste_chat_post.py` with thinking left off: the same system prompt, `temperature` 0.2, `chat_template_kwargs.enable_thinking` false, and `/no_think` appended to the paste. If the first reply is reasoning-only, one retry is sent the same way that script retries, and `content_len` is the stripped assistant `content` (reasoning is not substituted for content). Wall time includes that retry. The separate max-tokens-1 probe from that script is not sent, so the clock is the paste completion itself.
+The chat body matches `scripts/qwen_paste_chat_post.py` with thinking left off: the same system prompt, `temperature` 0.2, `chat_template_kwargs.enable_thinking` false, and `/no_think` appended to the paste. If the first reply is reasoning-only, one retry is sent the same way that script retries, and `content_len` is the stripped assistant `content` (reasoning is not substituted for content). Wall time includes that retry. Warm, plain cold, and soak do not send the separate max-tokens-1 probe, so that clock is the paste completion itself. `probe`, and `cold --idle`, send that probe on its own: user message `/no_think`, `max_tokens` 1, `temperature` 0, thinking off, no paste and no retry.
 
 ## Usage
 
 From a clone of this repo:
 
 ```zsh
+/usr/bin/python3 scripts/path_a_bench.py probe \
+  --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
+  --out "$HOME/path-a-probe.jsonl"
+
 /usr/bin/python3 scripts/path_a_bench.py warm \
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-warm.jsonl"
@@ -37,7 +43,19 @@ From a clone of this repo:
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-cold.jsonl"
 
+/usr/bin/python3 scripts/path_a_bench.py cold \
+  --idle 1800 \
+  --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
+  --out "$HOME/path-a-cold.jsonl"
+
 /usr/bin/python3 scripts/path_a_bench.py soak \
+  --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
+  --out "$HOME/path-a-soak.jsonl"
+
+/usr/bin/python3 scripts/path_a_bench.py soak \
+  --continue-on-hang \
+  --mem-at 24 \
+  --watchdog-log "$HOME/path-a-watchdog.log" \
   --ask-mail "$HOME/MailArchive/scripts/ask_mail.py" \
   --out "$HOME/path-a-soak.jsonl"
 
@@ -61,22 +79,46 @@ Common flags:
 | `--fixture` | `tests/fixtures/path_a/paste_4k_synthetic.txt` | One DATA+QUESTION paste. Omit both paste flags to use this default. |
 | `--fixtures-dir` | (none) | Directory of `.txt` pastes for `warm`, `cold`, and `soak`. Sorted by filename. Request `i` (counting from 0) uses file `i mod n`. |
 | `--max-tokens` | `512` | Completion cap (retry uses at least 768, same as the paste client). |
-| `--timeout` | warm 60s, cold 120s, soak 300s | Per-request urllib timeout. |
+| `--timeout` | probe 60s, warm 60s, cold 120s, soak 300s | Per-request urllib timeout. `cold --idle` always probes with a 60s timeout; `--timeout` applies to the paste request. |
 | `--out` | (none) | JSONL path. One object per line. |
 | `--ask-mail` | `$HOME/MailArchive/scripts/ask_mail.py` | File to hash at start and end. |
 | `-n` / `--n` | warm 10, soak 48 | Request count. |
 | `--interval` | soak 300 | Seconds to wait between soak requests. |
+| `--idle` | (omit) | `cold`: seconds to sleep before a probe and one paste request. A countdown line prints every 60 seconds. Omit it and cold stays a single paste request. |
+| `--continue-on-hang` | off | `soak`: record a timeout as `hung` and keep going. Without it, a timeout stops the run (exit 4). |
+| `--watchdog-log` | (none) | `soak`: read-only log. Used only with `--continue-on-hang` when scoring hang recovery. |
+| `--mem-at` | (none) | `soak`: after request K (1-based), sample swap and Ollama. |
 | `--baseline-out` | (none) | `mem`: write a JSON snapshot of the measurement just taken. |
 | `--baseline` | (none) | `mem`: snapshot taken before the model was loaded. |
 | `--settle` | `0` | `mem`: seconds to wait after a clean baseline, then measure. A countdown line prints every 30 seconds. Requires `--baseline`. |
 
 Passing `--fixture` and `--fixtures-dir` together is a config error (exit 2). A missing or unreadable `--baseline` file is also exit 2.
 
-`cold` is always one request. With `--fixtures-dir` it uses the first sorted file. Idle time is the operator's job; the harness prints a note and does not check it.
+Plain `cold` is one request. With `--fixtures-dir` it uses the first sorted file. Idle time is the operator's job; the harness prints a note and does not check it. `cold --idle SECONDS` sleeps first (the operator must boot out any watchdog beforehand; the harness never touches launchd), then probes, then sends one paste request.
 
 A bad fixture, a bad flag, or a chat server that is unreachable at start (request modes) exits 2. `mem` does not contact the chat server.
 
+## Phase mapping
+
+| Phase | Command |
+| --- | --- |
+| Phase A / B warm | `warm` (single fixture is warm cached) |
+| Phase B clock gate | `warm --fixtures-dir tests/fixtures/path_a/paste_4k` |
+| Memory gate | `mem --baseline-out` before load, then `mem --baseline FILE --settle SECONDS` |
+| Phase D | `cold --idle SECONDS` (sleep, probe, then one full request) |
+| Phase E | `soak --continue-on-hang --mem-at 24 --watchdog-log FILE` |
+
+Run the Phase E soak in the foreground on the host. A 4 h soak must not run as a background job inside a remote shell.
+
 ## Modes and bars
+
+### probe
+
+One POST, `max_tokens` 1, timeout default 60 seconds. No paste.
+
+PASS means HTTP 200 and a parseable choice within the timeout. Any `finish_reason` is accepted. Content length is not a bar.
+
+FAIL means an HTTP error, an empty body, or a body that is not a choice. A timeout prints a `WEDGE` line with the local time and exits 4.
 
 ### warm
 
@@ -97,17 +139,23 @@ Overall PASS also requires the median wall time to be at most 35 seconds, and th
 
 ### cold
 
-One paste request. Leave the server idle for 30 minutes first; this command does not do that for you.
+One paste request. Leave the server idle for 30 minutes first; this command does not do that for you unless you pass `--idle`.
 
 PASS means HTTP success, `finish_reason` `stop`, content length greater than 300, and wall time at most 90 seconds, plus an unchanged `ask_mail.py` hash.
 
+`cold --idle SECONDS` sleeps `SECONDS` first (countdown every 60 seconds), then runs a probe with a fixed 60 second timeout, then one full paste request on the cold bar. Overall PASS needs the probe and the paste request. A probe timeout prints `WEDGE` and exits 4 without sending the paste. A probe that returns a bad body still sends the paste, and the run fails. Boot out any watchdog before this command. The harness never touches launchd.
+
 ### soak
 
-N paste requests (default 48), waiting `--interval` seconds after each one except the last (default 300). Run it in the foreground on the host.
+N paste requests (default 48), waiting `--interval` seconds after each one except the last (default 300). Run it in the foreground on the host. A 4 h soak must not run as a background job inside a remote shell.
 
-A request that exceeds `--timeout` (default 300 seconds) is recorded as `hung` with the local time, a `WEDGE` line is printed, and the run stops. Nothing is restarted. Exit code is 4.
+A request that exceeds `--timeout` (default 300 seconds) is recorded as `hung` with the local time. Without `--continue-on-hang`, a `WEDGE` line is printed and the run stops. Nothing is restarted. Exit code is 4.
 
-PASS means zero hung requests and zero failures (same HTTP, finish, and content checks as warm, without the 45 second / median bars). The timeout is the hang line.
+With `--continue-on-hang`, the hung row is kept and the next scheduled request still runs. The harness does not restart anything. Overall PASS means zero failures and either zero hung requests, or every hung request is followed by an immediate next request that passed. If `--watchdog-log FILE` is set, that file must also contain a line whose timestamp is within 5 minutes after the hang. The timestamp is `YYYY-MM-DD HH:MM:SS` at the start of a line. The file is only read, at the end of the run. A missing file or a line outside that window fails the run (exit 1). The summary lists each hang with its local time and the recovery evidence (the next verdict, and the watchdog timestamp, `none`, or `missing`). If the log flag is omitted, recovery is only the next request. If nothing hung, a missing log is not a failure.
+
+`--mem-at K` takes one memory sample after request K finishes (1-based), including when that request was hung. The summary bar is mid-soak idle swap under 1024 MB. Ollama is reported on the same line (`down`, `up`, or `unknown`). Swap of 1024 MB or more, or an unknown swap, fails that bar. If the run never reaches K, the line is `FAIL soak_mem_at missing`. K less than 1 or greater than N is exit 2 before any request. A wedge (exit 4) stays exit 4 even when this bar fails.
+
+PASS without those flags means zero hung requests and zero failures (same HTTP, finish, and content checks as warm, without the 45 second / median bars). The timeout is the hang line.
 
 ### mem
 
@@ -133,7 +181,7 @@ Without `--baseline`, PASS means swap is under 1 GB and Ollama is down, and the 
 | --- | --- |
 | `pass` | The request met the bar for that mode. |
 | `fail` | HTTP error, empty body, malformed JSON, bad response shape, `finish_reason` other than `stop`, content length 300 or less, warm/cold wall over the limit, or a non-timeout transport error. The run continues (except soak, which stops only on `hung`). |
-| `hung` | Soak only. The request exceeded `--timeout`. The run stops. |
+| `hung` | The request exceeded its timeout. Soak without `--continue-on-hang`, `probe`, and the `cold --idle` probe stop the run (exit 4). Soak with `--continue-on-hang` records the row and continues. |
 
 `error` on a JSONL row is null for `pass`. Otherwise it is a short reason such as `timeout`, `empty body`, `malformed json`, `bad response shape`, `HTTP 500`, `finish_reason=length`, or `content_len=300`. Response text is not stored.
 
@@ -145,7 +193,7 @@ Without `--baseline`, PASS means swap is under 1 GB and Ollama is down, and the 
 
 ## JSONL
 
-Request rows (`kind` `request`) include: local ISO timestamp (`ts`), `mode`, `idx`, `fixture` (filename only), `wall_s`, `http_status`, `finish_reason`, `content_len`, `verdict`, `error`. `reasoning_len` is present when the message included a reasoning string. `prompt_tokens` and `completion_tokens` are present when the server returned `usage`.
+Request rows (`kind` `request`) include: local ISO timestamp (`ts`), `mode`, `idx`, `fixture` (filename only), `wall_s`, `http_status`, `finish_reason`, `content_len`, `verdict`, `error`. `reasoning_len` is present when the message included a reasoning string. `prompt_tokens` and `completion_tokens` are present when the server returned `usage`. A `probe` row uses `fixture` `probe`. `cold --idle` writes that probe row and then the paste row (`role` `generate`).
 
 The last line of a chat run is `kind` `summary` (counts, min/median/max wall, both ask-mail hashes, overall). `mem` writes one `kind` `mem` row.
 
@@ -156,7 +204,7 @@ The last line of a chat run is `kind` `summary` (counts, min/median/max wall, bo
 | 0 | Overall PASS |
 | 1 | Overall FAIL (a bar missed, or `mem` could not confirm the bars) |
 | 2 | Usage or config error: bad flags, both paste flags, bad fixture, missing or unreadable baseline, chat server unreachable at start, JSONL or baseline path not writable |
-| 4 | Soak wedge. A request hung. The run stopped. |
+| 4 | Wedge. A soak request hung and `--continue-on-hang` was not set, or a `probe` (including the probe inside `cold --idle`) timed out. The run stopped. |
 | 5 | `mem --baseline` is INVALID: baseline swap was already >= 1024 MB (machine dirty before model load) |
 
 The human summary ends with one line per bar (`PASS` or `FAIL` plus n, min/median/max wall, failures, and hung where those apply) and an `OVERALL` line.

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read-only benchmark for the Path A local Qwen chat server.
 
-Scores warm, cold, soak, and memory bars by sending HTTP chat requests and
-reading system stats. Does not restart services, change configuration, or
-write anything except an optional JSONL log.
+Scores probe, warm, cold, soak, and memory bars by sending HTTP chat requests
+and reading system stats. Does not restart services, change configuration, or
+touch launchd. Writes nothing except an optional JSONL log and an optional
+mem baseline snapshot.
 
 Test hooks (ignored unless PATH_A_BENCH_TEST_HOOKS=1):
   PATH_A_BENCH_TIME_SCALE       multiply measured wall seconds
@@ -11,7 +12,8 @@ Test hooks (ignored unless PATH_A_BENCH_TEST_HOOKS=1):
   PATH_A_BENCH_WARM_WALL_MAX    override the 45s per-request warm bar
   PATH_A_BENCH_WARM_MEDIAN_MAX  override the 35s warm median bar
   PATH_A_BENCH_COLD_WALL_MAX    override the 90s cold bar
-  PATH_A_BENCH_SETTLE_SLEEP=0   skip the real settle sleep (lines still print)
+  PATH_A_BENCH_SETTLE_SLEEP=0   skip real settle/idle sleeps (lines still print)
+  PATH_A_BENCH_NOW              fixed local ISO timestamp for local_iso()
   PATH_A_BENCH_INJECT_SWAP_MB   fake swap MB and parse mem as macOS text
   PATH_A_BENCH_OLLAMA_PROCESS   down, up, or unknown when swap is injected
   PATH_A_BENCH_OLLAMA_PORT      closed, open, or unknown when swap is injected
@@ -42,10 +44,12 @@ SYSTEM_PROMPT = (
 TEMPERATURE = 0.2
 SWAP_LIMIT_MB = 1024.0
 CONTENT_MIN = 300
-DEFAULT_TIMEOUT = {"warm": 60.0, "cold": 120.0, "soak": 300.0}
+DEFAULT_TIMEOUT = {"probe": 60.0, "warm": 60.0, "cold": 120.0, "soak": 300.0}
+PROBE_TIMEOUT = 60.0
 WARM_WALL_MAX = 45.0
 WARM_MEDIAN_MAX = 35.0
 COLD_WALL_MAX = 90.0
+WATCHDOG_WINDOW_S = 300.0
 OLLAMA_HOST = "127.0.0.1"
 OLLAMA_PORT = 11434
 
@@ -53,15 +57,22 @@ COLD_NOTE = (
     "NOTE cold: operator is responsible for a 30-minute idle before this "
     "request; this harness does not enforce or check idle time"
 )
+COLD_WATCHDOG_NOTE = (
+    "NOTE cold: operator is responsible for booting out any watchdog beforehand; "
+    "this harness never touches launchd"
+)
 SOAK_NOTE = (
     "NOTE soak: run in the foreground on the host; "
-    "do not background this inside a remote shell"
+    "do not background this inside a remote shell. "
+    "A 4 h soak must not run as a background job inside a remote shell"
 )
 
 _SWAP_USED = re.compile(
     r"used\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT])",
     re.IGNORECASE,
 )
+_WATCHDOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_ISO_WALL = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
 _TIMEOUT_TYPES = (TimeoutError, socket.timeout)
 
 
@@ -82,6 +93,10 @@ def default_ask_mail() -> Path:
 
 
 def local_iso() -> str:
+    if os.environ.get("PATH_A_BENCH_TEST_HOOKS", "").strip() == "1":
+        fixed = os.environ.get("PATH_A_BENCH_NOW", "").strip()
+        if fixed:
+            return fixed
     now = datetime.datetime.now().astimezone().replace(microsecond=0)
     return now.isoformat()
 
@@ -185,6 +200,17 @@ def v1_root(base_url: str) -> str:
     if root.endswith("/v1"):
         return root
     return root + "/v1"
+
+
+def build_probe_body(model: str) -> dict:
+    """Same tiny body as qwen_paste_chat_post.py's max-tokens-1 probe."""
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": "/no_think"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
 
 
 def build_chat_body(paste: str, model: str, max_tokens: int, retry: bool = False) -> dict:
@@ -336,6 +362,49 @@ def perform_chat(url: str, paste: str, model: str, max_tokens: int, timeout: flo
     return result
 
 
+def perform_probe(url: str, model: str, timeout: float) -> dict:
+    """One max-tokens-1 POST. No paste and no reasoning retry."""
+    started = time.monotonic()
+    status, parsed, err, timed_out = _one_post(url, build_probe_body(model), timeout)
+    elapsed = time.monotonic() - started
+    result = {
+        "http_status": status,
+        "finish_reason": None,
+        "content_len": None,
+        "reasoning_len": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "error": err,
+        "timed_out": timed_out,
+        "elapsed": elapsed,
+    }
+    if parsed is not None and not err and not timed_out:
+        result["finish_reason"] = parsed["finish"]
+        result["content_len"] = len(parsed["content"])
+        result["reasoning_len"] = parsed["reasoning_len"]
+        usage = parsed["usage"]
+        if "prompt_tokens" in usage:
+            result["prompt_tokens"] = usage.get("prompt_tokens")
+        if "completion_tokens" in usage:
+            result["completion_tokens"] = usage.get("completion_tokens")
+    return result
+
+
+def classify_probe(result: dict):
+    """PASS is HTTP 200 plus a parseable choice. Any finish_reason is fine."""
+    if result.get("timed_out"):
+        return "hung", "timeout"
+    if result.get("error"):
+        return "fail", scrub_text(str(result["error"]))
+    if result.get("http_status") != 200:
+        return "fail", "http_status=%s" % result.get("http_status")
+    finish = result.get("finish_reason")
+    content_len = result.get("content_len")
+    if finish is None or not isinstance(content_len, int):
+        return "fail", "bad response shape"
+    return "pass", None
+
+
 def classify_request(mode: str, wall_s: float, result: dict, limits: dict):
     """Return (verdict, error). Soak timeouts are 'hung'; other modes fail."""
     if result.get("timed_out"):
@@ -455,7 +524,19 @@ def _wall_bits(rows: list) -> tuple:
     return min(walls), statistics.median(walls), max(walls)
 
 
-def chat_summary(mode: str, rows: list, limits: dict, ask_start: str, ask_end: str, wedged: bool):
+def chat_summary(
+    mode: str,
+    rows: list,
+    limits: dict,
+    ask_start: str,
+    ask_end: str,
+    wedged: bool,
+    continue_on_hang: bool = False,
+    hang_notes: Optional[list] = None,
+    hangs_recovered: bool = True,
+    mem_line: Optional[str] = None,
+    mem_ok: bool = True,
+):
     failures = sum(1 for row in rows if row.get("verdict") == "fail")
     hung = sum(1 for row in rows if row.get("verdict") == "hung")
     n = len(rows)
@@ -482,17 +563,52 @@ def chat_summary(mode: str, rows: list, limits: dict, ask_start: str, ask_end: s
             % ("PASS" if med_ok else "FAIL", fmt_num(med_s), fmt_num(limits["warm_median"]))
         )
         ok = req_ok and med_ok
-    elif mode == "cold":
+    elif mode == "probe":
         req_ok = n == 1 and failures == 0 and hung == 0
+        lines.append("%s probe %s" % ("PASS" if req_ok else "FAIL", numbers))
+        ok = req_ok
+    elif mode == "cold":
+        generate = [row for row in rows if row.get("role") != "probe"]
+        probes = [row for row in rows if row.get("role") == "probe"]
+        g_fail = sum(1 for row in generate if row.get("verdict") == "fail")
+        g_hung = sum(1 for row in generate if row.get("verdict") == "hung")
+        g_n = len(generate)
+        gmin, gmed, gmax = _wall_bits(generate)
+        g_numbers = "n=%d failures=%d hung=%d min_s=%s median_s=%s max_s=%s" % (
+            g_n,
+            g_fail,
+            g_hung,
+            fmt_num(gmin),
+            fmt_num(gmed),
+            fmt_num(gmax),
+        )
+        req_ok = g_n == 1 and g_fail == 0 and g_hung == 0
         lines.append(
             "%s cold_request %s limit_s=%s"
-            % ("PASS" if req_ok else "FAIL", numbers, fmt_num(limits["cold_wall"]))
+            % ("PASS" if req_ok else "FAIL", g_numbers, fmt_num(limits["cold_wall"]))
         )
         ok = req_ok
+        if probes:
+            p_ok = len(probes) == 1 and probes[0].get("verdict") == "pass"
+            p_verdict = probes[0].get("verdict") or "missing"
+            lines.append(
+                "%s cold_probe verdict=%s" % ("PASS" if p_ok else "FAIL", p_verdict)
+            )
+            if not p_ok:
+                ok = False
     else:
-        req_ok = n > 0 and failures == 0 and hung == 0 and not wedged
+        if continue_on_hang:
+            req_ok = n > 0 and failures == 0 and (hung == 0 or hangs_recovered)
+        else:
+            req_ok = n > 0 and failures == 0 and hung == 0 and not wedged
         lines.append("%s soak %s" % ("PASS" if req_ok else "FAIL", numbers))
+        if hang_notes:
+            lines.extend(hang_notes)
         ok = req_ok
+        if mem_line:
+            lines.append(mem_line)
+            if not mem_ok:
+                ok = False
     ask_status, ask_detail = ask_mail_bar(ask_start, ask_end)
     lines.append("%s %s" % (ask_status, ask_detail))
     if ask_status != "PASS":
@@ -521,6 +637,8 @@ def chat_summary(mode: str, rows: list, limits: dict, ask_start: str, ask_end: s
         "ask_mail_sha256_end": ask_end,
         "overall": overall,
     }
+    if mem_line:
+        summary["soak_mem_at"] = mem_line
     return lines, code, summary
 
 
@@ -532,6 +650,7 @@ def request_row(
     verdict: str,
     error,
     fixture_name: str,
+    role: Optional[str] = None,
 ) -> dict:
     row = {
         "kind": "request",
@@ -546,6 +665,8 @@ def request_row(
         "verdict": verdict,
         "error": error,
     }
+    if role:
+        row["role"] = role
     if result.get("reasoning_len") is not None:
         row["reasoning_len"] = result["reasoning_len"]
     if result.get("prompt_tokens") is not None:
@@ -616,6 +737,51 @@ def resolve_chat_fixtures(args):
     return [(path.name, load_fixture(path))]
 
 
+def _finite_non_negative(value: float) -> bool:
+    return value >= 0 and value == value and value != float("inf")
+
+
+def run_probe(args, limits: Optional[dict] = None) -> int:
+    """One max-tokens-1 POST. Does not load a paste."""
+    limits = load_limits() if limits is None else limits
+    timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT["probe"]
+    if not (timeout > 0):
+        raise ConfigError("bad timeout")
+    ask_path = Path(args.ask_mail)
+    ask_start = hash_ask_mail(ask_path)
+    model = resolve_model(args.base_url, (args.model or "").strip(), timeout)
+    url = v1_root(args.base_url) + "/chat/completions"
+    jsonl = Jsonl(args.out)
+    try:
+        print("model %s" % safe_label(model), flush=True)
+        result = perform_probe(url, model, timeout)
+        wall_s = adjusted_wall(result["elapsed"], limits)
+        verdict, error = classify_probe(result)
+        row = request_row(
+            "probe", 1, wall_s, result, verdict, error, "probe", role="probe"
+        )
+        wedged = verdict == "hung"
+        jsonl.write(row)
+        print(_progress("probe", 1, 1, row), flush=True)
+        if wedged:
+            wedge = "WEDGE probe idx=1 local_time=%s timeout_s=%s" % (
+                row["ts"],
+                fmt_num(timeout),
+            )
+            print(wedge, flush=True)
+            print(wedge, file=sys.stderr, flush=True)
+        ask_end = hash_ask_mail(ask_path)
+        lines, code, summary = chat_summary(
+            "probe", [row], limits, ask_start, ask_end, wedged
+        )
+        jsonl.write(summary)
+        for line in lines:
+            print(line, flush=True)
+        return code
+    finally:
+        jsonl.close()
+
+
 def run_chat(args, limits: Optional[dict] = None) -> int:
     mode = args.mode
     limits = load_limits() if limits is None else limits
@@ -628,10 +794,23 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
     if n < 1:
         raise ConfigError("bad n")
     interval = 0.0
+    idle = None
+    continue_on_hang = False
+    watchdog_log = ""
+    mem_at = None
+    if mode == "cold":
+        idle = getattr(args, "idle", None)
+        if idle is not None and not _finite_non_negative(float(idle)):
+            raise ConfigError("bad idle")
     if mode == "soak":
         interval = args.interval
         if interval < 0:
             raise ConfigError("bad interval")
+        continue_on_hang = bool(getattr(args, "continue_on_hang", False))
+        watchdog_log = (getattr(args, "watchdog_log", "") or "").strip()
+        mem_at = getattr(args, "mem_at", None)
+        if mem_at is not None and (mem_at < 1 or mem_at > n):
+            raise ConfigError("bad mem-at")
     fixtures = resolve_chat_fixtures(args)
     ask_path = Path(args.ask_mail)
     ask_start = hash_ask_mail(ask_path)
@@ -640,7 +819,10 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
     jsonl = Jsonl(args.out)
     try:
         if mode == "cold":
-            print(COLD_NOTE, flush=True)
+            if idle is None:
+                print(COLD_NOTE, flush=True)
+            else:
+                print(COLD_WATCHDOG_NOTE, flush=True)
         elif mode == "soak":
             print(SOAK_NOTE, flush=True)
         if mode == "warm":
@@ -658,32 +840,98 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
         print("model %s" % safe_label(model), flush=True)
         rows = []
         wedged = False
-        for idx in range(1, n + 1):
-            if idx > 1 and interval > 0:
-                time.sleep(interval)
-            fixture_name, paste = fixtures[fixture_index(idx, len(fixtures))]
-            result = perform_chat(url, paste, model, args.max_tokens, timeout)
-            wall_s = adjusted_wall(result["elapsed"], limits)
-            verdict, error = classify_request(mode, wall_s, result, limits)
-            row = request_row(
-                mode, idx, wall_s, result, verdict, error, fixture_name
+        mem_sample = None
+        if mode == "cold" and idle is not None and float(idle) > 0:
+            idle_wait(float(idle))
+        if mode == "cold" and idle is not None:
+            probe_result = perform_probe(url, model, PROBE_TIMEOUT)
+            probe_wall = adjusted_wall(probe_result["elapsed"], limits)
+            probe_verdict, probe_error = classify_probe(probe_result)
+            probe_row = request_row(
+                mode,
+                1,
+                probe_wall,
+                probe_result,
+                probe_verdict,
+                probe_error,
+                "probe",
+                role="probe",
             )
-            rows.append(row)
-            jsonl.write(row)
-            print(_progress(mode, idx, n, row), flush=True)
-            if mode == "soak" and verdict == "hung":
-                wedge = "WEDGE soak idx=%d local_time=%s timeout_s=%s" % (
-                    idx,
-                    row["ts"],
-                    fmt_num(timeout),
+            rows.append(probe_row)
+            jsonl.write(probe_row)
+            print(_progress(mode, 1, 2, probe_row), flush=True)
+            if probe_verdict == "hung":
+                wedge = "WEDGE cold idx=1 local_time=%s timeout_s=%s" % (
+                    probe_row["ts"],
+                    fmt_num(PROBE_TIMEOUT),
                 )
                 print(wedge, flush=True)
                 print(wedge, file=sys.stderr, flush=True)
                 wedged = True
-                break
+        if not wedged:
+            for idx in range(1, n + 1):
+                if idx > 1 and interval > 0:
+                    time.sleep(interval)
+                fixture_name, paste = fixtures[fixture_index(idx, len(fixtures))]
+                result = perform_chat(url, paste, model, args.max_tokens, timeout)
+                wall_s = adjusted_wall(result["elapsed"], limits)
+                verdict, error = classify_request(mode, wall_s, result, limits)
+                row_idx = idx
+                total = n
+                role = None
+                if mode == "cold" and idle is not None:
+                    row_idx = idx + 1
+                    total = 2
+                    role = "generate"
+                row = request_row(
+                    mode, row_idx, wall_s, result, verdict, error, fixture_name, role=role
+                )
+                rows.append(row)
+                jsonl.write(row)
+                print(_progress(mode, row_idx, total, row), flush=True)
+                if mode == "soak" and mem_at is not None and idx == mem_at:
+                    mem_sample = evaluate_mem(*collect_host_mem())
+                if mode == "soak" and verdict == "hung":
+                    if continue_on_hang:
+                        print(
+                            "HUNG soak idx=%d local_time=%s" % (idx, row["ts"]),
+                            flush=True,
+                        )
+                    else:
+                        wedge = "WEDGE soak idx=%d local_time=%s timeout_s=%s" % (
+                            idx,
+                            row["ts"],
+                            fmt_num(timeout),
+                        )
+                        print(wedge, flush=True)
+                        print(wedge, file=sys.stderr, flush=True)
+                        wedged = True
+                        break
         ask_end = hash_ask_mail(ask_path)
+        hang_notes = None
+        hangs_recovered = True
+        if mode == "soak" and continue_on_hang:
+            if watchdog_log:
+                watchdog_status, stamps = read_watchdog_log(watchdog_log)
+            else:
+                watchdog_status, stamps = None, []
+            hangs_recovered, hang_notes = hang_recoveries(rows, watchdog_status, stamps)
+        mem_line = None
+        mem_ok = True
+        if mode == "soak" and mem_at is not None:
+            mem_line, mem_ok = soak_mem_line(mem_at, mem_sample)
         lines, code, summary = chat_summary(
-            mode, rows, limits, ask_start, ask_end, wedged
+            mode,
+            rows,
+            limits,
+            ask_start,
+            ask_end,
+            wedged,
+            continue_on_hang=continue_on_hang,
+            hang_notes=hang_notes,
+            hangs_recovered=hangs_recovered,
+            mem_line=mem_line,
+            mem_ok=mem_ok,
         )
         summary["fixtures"] = [name for name, _text in fixtures]
         jsonl.write(summary)
@@ -728,6 +976,124 @@ def parse_vm_stat_pages(text: str) -> dict:
         "active": _page_count(text, "Pages active"),
         "wired": wired,
     }
+
+
+def ollama_word(process: str, port: str) -> str:
+    if process == "down" and port == "closed":
+        return "down"
+    if process == "up" or port == "open":
+        return "up"
+    return "unknown"
+
+
+def soak_mem_line(k: int, result) -> tuple:
+    """Mid-soak idle swap bar. Pass when used swap is under 1024 MB."""
+    if result is None:
+        return "FAIL soak_mem_at k=%d missing" % k, False
+    used = result.get("swap_used_mb")
+    ok = used is not None and used < SWAP_LIMIT_MB
+    used_s = "unknown" if used is None else "%.2f" % used
+    line = "%s soak_mem_at k=%d swap_used_mb=%s limit_mb=1024 ollama=%s" % (
+        "PASS" if ok else "FAIL",
+        k,
+        used_s,
+        ollama_word(result.get("process"), result.get("port")),
+    )
+    return line, ok
+
+
+def naive_wall(ts: str):
+    """Local wall time from an ISO timestamp, ignoring any timezone suffix."""
+    match = _ISO_WALL.search(ts or "")
+    if not match:
+        return None
+    try:
+        return datetime.datetime.strptime(
+            match.group(1) + " " + match.group(2),
+            "%Y-%m-%d %H:%M:%S",
+        )
+    except ValueError:
+        return None
+
+
+def parse_watchdog_stamps(text: str) -> list:
+    """Timestamps at the start of a line: YYYY-MM-DD HH:MM:SS."""
+    stamps = []
+    for line in (text or "").splitlines():
+        match = _WATCHDOG_TS.match(line)
+        if not match:
+            continue
+        try:
+            stamps.append(
+                datetime.datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+            )
+        except ValueError:
+            continue
+    return stamps
+
+
+def watchdog_stamp_for_hang(hang_ts: str, stamps: list):
+    """First log stamp in [hang, hang + 5 min], or None."""
+    hang_at = naive_wall(hang_ts)
+    if hang_at is None:
+        return None
+    for stamp in stamps:
+        delta = (stamp - hang_at).total_seconds()
+        if 0 <= delta <= WATCHDOG_WINDOW_S:
+            return stamp
+    return None
+
+
+def read_watchdog_log(path: str):
+    """Read-only. Returns ('ok', stamps) or ('missing', [])."""
+    file = Path(path)
+    if not file.is_file():
+        return "missing", []
+    try:
+        text = file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "missing", []
+    return "ok", parse_watchdog_stamps(text)
+
+
+def hang_recoveries(rows: list, watchdog_status, stamps: list):
+    """Each hung row needs an immediate next request that passed.
+
+    watchdog_status is None when no log was requested, 'missing' when the
+    file cannot be read, or 'ok' when stamps were parsed.
+    """
+    notes = []
+    all_ok = True
+    for index, row in enumerate(rows):
+        if row.get("verdict") != "hung":
+            continue
+        nxt = rows[index + 1] if index + 1 < len(rows) else None
+        if nxt is None:
+            next_v = "missing"
+            recovered = False
+        else:
+            next_v = nxt.get("verdict") or "missing"
+            recovered = next_v == "pass"
+        evidence = "next=%s" % next_v
+        if watchdog_status is not None:
+            if watchdog_status == "missing":
+                watch = "missing"
+                recovered = False
+            else:
+                stamp = watchdog_stamp_for_hang(row.get("ts") or "", stamps)
+                if stamp is None:
+                    watch = "none"
+                    recovered = False
+                else:
+                    watch = stamp.strftime("%Y-%m-%d %H:%M:%S")
+            evidence = "%s watchdog=%s" % (evidence, watch)
+        if not recovered:
+            all_ok = False
+        notes.append(
+            "HUNG soak idx=%s local_time=%s %s"
+            % (row.get("idx"), row.get("ts"), evidence)
+        )
+    return all_ok, notes
 
 
 def judge_ollama(process: str, port: str) -> str:
@@ -813,22 +1179,40 @@ def sleep_seconds(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def settle_wait(seconds: float, sleep_fn=None, emit=None) -> None:
-    """Sleep seconds, printing a countdown line every 30 seconds."""
+def countdown_wait(
+    seconds: float,
+    step: float,
+    label: str,
+    sleep_fn=None,
+    emit=None,
+) -> None:
+    """Sleep seconds, printing `label remaining_s=` every `step` seconds."""
     if sleep_fn is None:
         sleep_fn = sleep_seconds
     if emit is None:
         emit = lambda line: print(line, flush=True)
     remaining = float(seconds)
     if remaining < 0 or remaining != remaining or remaining == float("inf"):
-        raise ConfigError("bad settle")
+        raise ConfigError("bad %s" % label)
+    if not (step > 0):
+        raise ConfigError("bad %s" % label)
     while remaining > 0:
-        emit("settle remaining_s=%s" % _fmt_remaining(remaining))
-        chunk = 30.0 if remaining > 30.0 else remaining
+        emit("%s remaining_s=%s" % (label, _fmt_remaining(remaining)))
+        chunk = step if remaining > step else remaining
         sleep_fn(chunk)
         remaining -= chunk
         if remaining < 1e-6:
             remaining = 0.0
+
+
+def settle_wait(seconds: float, sleep_fn=None, emit=None) -> None:
+    """Sleep seconds, printing a countdown line every 30 seconds."""
+    countdown_wait(seconds, 30.0, "settle", sleep_fn=sleep_fn, emit=emit)
+
+
+def idle_wait(seconds: float, sleep_fn=None, emit=None) -> None:
+    """Sleep seconds, printing a countdown line every 60 seconds."""
+    countdown_wait(seconds, 60.0, "idle", sleep_fn=sleep_fn, emit=emit)
 
 
 def baseline_snapshot(result: dict, timestamp: Optional[str] = None) -> dict:
@@ -1070,17 +1454,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
+    sub.add_parser("probe", parents=[common], help="one max_tokens=1 readiness POST")
+
     warm = sub.add_parser("warm", parents=[common], help="N sequential paste requests")
     warm.add_argument("-n", "--n", type=int, default=10)
     warm.add_argument("--fixtures-dir", default="")
 
     cold = sub.add_parser("cold", parents=[common], help="one request after an operator idle")
     cold.add_argument("--fixtures-dir", default="")
+    cold.add_argument("--idle", type=float, default=None)
 
     soak = sub.add_parser("soak", parents=[common], help="N requests on an interval")
     soak.add_argument("-n", "--n", type=int, default=48)
     soak.add_argument("--interval", type=float, default=300.0)
     soak.add_argument("--fixtures-dir", default="")
+    soak.add_argument("--continue-on-hang", action="store_true")
+    soak.add_argument("--watchdog-log", default="")
+    soak.add_argument("--mem-at", type=int, default=None)
 
     mem = sub.add_parser("mem", parents=[common], help="read-only swap, vm_stat, and Ollama checks")
     mem.add_argument("--baseline-out", default="")
@@ -1103,6 +1493,8 @@ def main(argv: Optional[list] = None) -> int:
     try:
         if args.mode == "mem":
             return run_mem(args)
+        if args.mode == "probe":
+            return run_probe(args)
         return run_chat(args)
     except ConfigError as exc:
         print("error: %s" % scrub_text(str(exc)), file=sys.stderr)

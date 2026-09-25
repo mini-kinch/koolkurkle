@@ -39,6 +39,7 @@ _HOOKS = (
     "PATH_A_BENCH_WARM_MEDIAN_MAX",
     "PATH_A_BENCH_COLD_WALL_MAX",
     "PATH_A_BENCH_SETTLE_SLEEP",
+    "PATH_A_BENCH_NOW",
     "PATH_A_BENCH_INJECT_SWAP_MB",
     "PATH_A_BENCH_OLLAMA_PROCESS",
     "PATH_A_BENCH_OLLAMA_PORT",
@@ -155,6 +156,16 @@ class _Handler(BaseHTTPRequestHandler):
         if kind == "hang":
             time.sleep(server.delay)
             self._send(200, _completion(_long()))
+            return
+        if kind == "hang_once" or kind == "hang_then_short":
+            if len(server.posts) == 1:
+                time.sleep(server.delay)
+                self._send(200, _completion(_long()))
+                return
+            if kind == "hang_then_short":
+                self._send(200, _completion("S" * 300, finish="stop", reasoning="note"))
+                return
+            self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
             return
         if kind == "empty":
             self._send(200, b"")
@@ -893,6 +904,217 @@ class PathABenchTests(unittest.TestCase):
         )
         self.assertIs(snap["ollama_down"], True)
         self.assertNotIn(USERS_PREFIX, dest.read_text(encoding="utf-8"))
+
+    def test_probe_pass_any_finish_reason(self) -> None:
+        base = self._start("length")
+        args = self._cmd("probe", base, self._ask(), ["--timeout", "5", "--max-tokens", "99"])
+        fixture_at = args.index("--fixture")
+        args[fixture_at + 1] = str(self.tmp / "missing-fixture.txt")
+        proc = self._run(args)
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(BENCH.DEFAULT_TIMEOUT["probe"], 60.0)
+        self.assertEqual(len(self.httpd.posts), 1)
+        body = json.loads(self.httpd.posts[0].decode("utf-8"))
+        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual(body["temperature"], 0)
+        self.assertEqual(body["messages"], [{"role": "user", "content": "/no_think"}])
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertEqual(row["mode"], "probe")
+        self.assertEqual(row["fixture"], "probe")
+        self.assertEqual(row["verdict"], "pass")
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["http_status"], 200)
+        self.assertIn("PASS probe", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+
+    def test_probe_fail_bad_body(self) -> None:
+        base = self._start("empty")
+        proc = self._run(self._cmd("probe", base, self._ask(), ["--timeout", "5"]))
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertEqual(row["verdict"], "fail")
+        self.assertEqual(row["error"], "empty body")
+        self.assertIn("OVERALL FAIL", proc.stdout)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+
+    def test_probe_wedge_on_timeout(self) -> None:
+        base = self._start("hang")
+        self.httpd.delay = 1.0
+        proc = self._run(
+            self._cmd("probe", base, self._ask(), ["--timeout", "0.3"]),
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 4, msg=proc.stdout + proc.stderr)
+        self.assertIn("WEDGE", proc.stdout)
+        self.assertIn("WEDGE", proc.stderr)
+        self.assertRegex(proc.stdout, r"WEDGE probe idx=1 local_time=\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(len(self.httpd.posts), 1)
+        row = [item for item in self._rows() if item.get("kind") == "request"][0]
+        self.assertEqual(row["verdict"], "hung")
+        self.assertEqual(row["error"], "timeout")
+        self.assertIn("OVERALL WEDGE", proc.stdout)
+
+    def test_probe_rejects_fixtures_dir(self) -> None:
+        proc = self._run(
+            ["probe", "--fixtures-dir", "tests/fixtures/path_a/paste_4k", "--timeout", "5"]
+        )
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("unrecognized arguments", proc.stderr)
+
+    def test_cold_idle_injected_sleep_then_probe_and_request(self) -> None:
+        base = self._start("ok")
+        proc = self._run(
+            self._cmd("cold", base, self._ask(), ["--timeout", "5", "--idle", "120"]),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_SETTLE_SLEEP": "0",
+            },
+            timeout=10,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("idle remaining_s=120", proc.stdout)
+        self.assertIn("idle remaining_s=60", proc.stdout)
+        self.assertIn("watchdog", proc.stdout)
+        self.assertIn("launchd", proc.stdout)
+        self.assertNotIn("launchctl", proc.stdout + proc.stderr)
+        self.assertNotIn("LaunchAgent", proc.stdout + proc.stderr)
+        self.assertNotIn("30-minute", proc.stdout)
+        self.assertIn("PASS cold_probe", proc.stdout)
+        self.assertIn("PASS cold_request", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertEqual(len(self.httpd.posts), 2)
+        probe = json.loads(self.httpd.posts[0].decode("utf-8"))
+        full = json.loads(self.httpd.posts[1].decode("utf-8"))
+        self.assertEqual(probe["max_tokens"], 1)
+        self.assertEqual(probe["messages"], [{"role": "user", "content": "/no_think"}])
+        self.assertFalse(probe["chat_template_kwargs"]["enable_thinking"])
+        self.assertGreater(full["max_tokens"], 1)
+        self.assertTrue(full["messages"][1]["content"].endswith("/no_think"))
+        roles = [row.get("role") for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual(roles, ["probe", "generate"])
+
+    def test_watchdog_window_is_five_minutes(self) -> None:
+        hang = "2026-09-25T03:00:00+00:00"
+        text = "\n".join(
+            [
+                "noise",
+                "2026-09-25 02:59:59 before",
+                "2026-09-25 03:05:00 exact",
+                "2026-09-25T03:01:00 wrong separator",
+            ]
+        )
+        stamps = BENCH.parse_watchdog_stamps(text)
+        self.assertEqual(
+            [stamp.strftime("%Y-%m-%d %H:%M:%S") for stamp in stamps],
+            ["2026-09-25 02:59:59", "2026-09-25 03:05:00"],
+        )
+        hit = BENCH.watchdog_stamp_for_hang(hang, stamps)
+        self.assertEqual(hit.strftime("%Y-%m-%d %H:%M:%S"), "2026-09-25 03:05:00")
+        self.assertIsNone(
+            BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps("2026-09-25 02:59:59 only\n"))
+        )
+        late = BENCH.parse_watchdog_stamps("2026-09-25 03:05:01 late\n")
+        self.assertIsNone(BENCH.watchdog_stamp_for_hang(hang, late))
+
+    def _watchdog(self, text: str) -> Path:
+        path = self.tmp / "watchdog.log"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def _soak_hang_then(self, kind: str, log_text: str, extra: list | None = None):
+        base = self._start(kind)
+        self.httpd.delay = 1.0
+        log = self._watchdog(log_text)
+        args = self._cmd(
+            "soak",
+            base,
+            self._ask(),
+            [
+                "-n",
+                "2",
+                "--interval",
+                "0",
+                "--timeout",
+                "0.3",
+                "--continue-on-hang",
+                "--watchdog-log",
+                str(log),
+                *(extra or []),
+            ],
+        )
+        proc = self._run(
+            args,
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_NOW": "2026-09-25T03:00:00+00:00",
+            },
+            timeout=10,
+        )
+        return proc
+
+    def test_soak_continue_on_hang_passes_with_watchdog(self) -> None:
+        proc = self._soak_hang_then("hang_once", "2026-09-25 03:01:00 synthetic recovery\n")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.httpd.posts), 2)
+        self.assertIn(
+            "HUNG soak idx=1 local_time=2026-09-25T03:00:00+00:00 next=pass watchdog=2026-09-25 03:01:00",
+            proc.stdout,
+        )
+        self.assertIn("OVERALL PASS", proc.stdout)
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual([row["verdict"] for row in requests], ["hung", "pass"])
+        self.assertEqual(requests[0]["ts"], "2026-09-25T03:00:00+00:00")
+
+    def test_soak_continue_on_hang_fails_when_watchdog_outside_window(self) -> None:
+        proc = self._soak_hang_then(
+            "hang_once",
+            "2026-09-25 02:59:00 early\n2026-09-25 03:06:01 late\n",
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.httpd.posts), 2)
+        self.assertIn("next=pass watchdog=none", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_continue_on_hang_fails_when_next_request_fails(self) -> None:
+        proc = self._soak_hang_then("hang_then_short", "2026-09-25 03:01:00 synthetic recovery\n")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.httpd.posts), 2)
+        self.assertIn("next=fail", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual([row["verdict"] for row in requests], ["hung", "fail"])
+
+    def test_soak_mem_at_sample_in_summary(self) -> None:
+        base = self._start("ok")
+        proc = self._run(
+            self._cmd(
+                "soak",
+                base,
+                self._ask(),
+                ["-n", "3", "--interval", "0", "--timeout", "5", "--mem-at", "2"],
+            ),
+            env={
+                "PATH_A_BENCH_TEST_HOOKS": "1",
+                "PATH_A_BENCH_INJECT_SWAP_MB": "100",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn(
+            "PASS soak_mem_at k=2 swap_used_mb=100.00 limit_mb=1024 ollama=down",
+            proc.stdout,
+        )
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertEqual(len(self.httpd.posts), 3)
+        summary = self._rows()[-1]
+        self.assertIn("soak_mem_at", summary)
+        self.assertIn("swap_used_mb=100.00", summary["soak_mem_at"])
 
 
 if __name__ == "__main__":
