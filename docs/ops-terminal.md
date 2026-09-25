@@ -18,6 +18,7 @@ filter; `--lane` / `--after` / `--before` /
 a backfill), including the `--reembed-legacy` ops contract and the
 host-kept foreground embed ops contract:
 [embed-backfill.md](embed-backfill.md).
+Remote Shell vs LaunchAgent lifetime (a job started with `&` or `nohup ... &` inside a remote agent Shell dies when that call returns; a LaunchAgent survives): section below.
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
 MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; No Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0): section below.
@@ -633,6 +634,25 @@ sqlite3 "$HOME/MailArchive/mailroom-copy.sqlite" 'PRAGMA integrity_check;'
 # SoR host — integrity before a new embed_backfill
 sqlite3 "$HOME/MailArchive/mailroom.sqlite" 'PRAGMA integrity_check;'
 ```
+
+## Remote Shell vs LaunchAgent lifetime
+
+Observed on the Macs on 2026-09-24 (the Mini and the MBP).
+
+A job started with `&` (and also `nohup ... &`) inside a remote,
+agent-driven Shell call is killed when that call returns, because the
+session's process group is torn down. Seen twice: a qwen-chat-down/up
+chain cut off mid-way, and embed workers that died right after
+BATCH_START. Rule: run long chains in the **foreground** of the call
+with a long enough timeout, or run them as a LaunchAgent.
+
+A job run by a LaunchAgent (launchd, in the `gui/<uid>` domain, loaded
+with `launchctl bootstrap` and started with `launchctl kickstart`)
+survives Shell teardown. Example: `com.mailroom.bodies-embed-once`
+kept running while the Shell children died. Rule: anything that must
+outlive the call is a LaunchAgent or runs in a user-kept terminal
+(host-kept foreground). One writer per sqlite file still applies
+(never two embed writers on the same file).
 
 ## Keychain create
 

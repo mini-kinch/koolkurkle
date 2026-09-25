@@ -68,6 +68,58 @@ class HostKeptForegroundEmbedOpsTests(unittest.TestCase):
         self.assertIn("not the Mini daily path", " ".join(readme.split()))
         self.assertNotRegex(readme, LIVE_PID)
 
+    def test_remote_shell_vs_launchagent_lifetime(self):
+        ops = OPS.read_text(encoding="utf-8")
+        heading = "## Remote Shell vs LaunchAgent lifetime"
+        self.assertEqual(ops.count(heading), 1)
+        start = ops.index(heading)
+        rest = ops[start + len(heading):]
+        nxt = rest.find("\n## ")
+        section = rest if nxt < 0 else rest[:nxt]
+        flat = " ".join(section.replace("*", "").split())
+
+        self.assertIn("process group is torn down", flat)
+        self.assertIn("nohup ... &", section)
+        self.assertIn("qwen-chat-down/up", section)
+        self.assertIn("BATCH_START", section)
+        self.assertIn(
+            "run long chains in the foreground of the call with a "
+            "long enough timeout, or run them as a LaunchAgent",
+            flat,
+        )
+
+        self.assertIn("gui/<uid>", section)
+        self.assertIn("launchctl bootstrap", section)
+        self.assertIn("launchctl kickstart", section)
+        self.assertIn("com.mailroom.bodies-embed-once", section)
+        self.assertIn("survives Shell teardown", flat)
+        self.assertIn(
+            "anything that must outlive the call is a LaunchAgent or "
+            "runs in a user-kept terminal (host-kept foreground)",
+            flat,
+        )
+        self.assertIn("never two embed writers on the same file", flat)
+
+        hay = section.replace("/Users/<operator>/", "")
+        for needle in PRIVACY_NEEDLES:
+            self.assertNotIn(needle, hay)
+        self.assertNotRegex(section, LIVE_PID)
+
+        embed = EMBED.read_text(encoding="utf-8")
+        marker = "## Host-kept foreground embed ops contract"
+        self.assertIn(marker, embed)
+        chunk = embed[embed.index(marker):]
+        end = chunk.find("\n## ", len(marker))
+        contract = chunk if end < 0 else chunk[:end]
+        xref = [
+            line
+            for line in contract.splitlines()
+            if "Remote Shell vs LaunchAgent lifetime" in line
+        ]
+        self.assertEqual(len(xref), 1)
+        self.assertIn("ops-terminal.md", xref[0])
+        self.assertNotIn("/Users/", contract)
+
 
 if __name__ == "__main__":
     unittest.main()

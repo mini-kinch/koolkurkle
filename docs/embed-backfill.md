@@ -124,6 +124,7 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/embed_backfill.py \
 
 Long MailArchive embeds stay **host-kept foreground** in a host
 Terminal. Do **not** background with `nohup` or `&`.
+Remote Shell vs LaunchAgent lifetime: [ops-terminal.md](ops-terminal.md).
 
 Sole writer is HARD DECK: never two writers on one `.sqlite`. A live
 rem-legacy job on the SoR-named file is that sole writer until EXIT 0.
