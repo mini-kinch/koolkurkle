@@ -6,9 +6,11 @@ temp HOME. Stubs replace launchctl, osascript, killall, curl, lsof, and sleep.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import plistlib
 import re
+import stat
 import subprocess
 import tempfile
 import time
@@ -260,8 +262,8 @@ class QwenChatUpPinBehaviorTests(unittest.TestCase):
         self.home = self.tmp / "home"
         self.stub_bin = self.tmp / "stubbin"
         self.stub_log = self.tmp / "stub-argv.log"
-        self.real_agents = Path.home() / "Library" / "LaunchAgents"
-        self._agents_before = self._agents_snapshot()
+        self._agents_before = self._launchagents_snapshot()
+        self._hold_before = self._hold_snapshot()
         self._write_stubs()
         self.copy = self._write_copy()
         (self.home / "MailArchive" / "logs").mkdir(parents=True)
@@ -269,15 +271,30 @@ class QwenChatUpPinBehaviorTests(unittest.TestCase):
         (self.home / "qwen-mlx").mkdir(parents=True)
 
     def tearDown(self) -> None:
-        self.assertEqual(self._agents_snapshot(), self._agents_before)
-        real_plist = self.real_agents / (MLX_LABEL + ".plist")
-        self.assertFalse(real_plist.exists())
-        self._tmp.cleanup()
+        try:
+            self.assertEqual(self._launchagents_snapshot(), self._agents_before)
+            self.assertEqual(self._hold_snapshot(), self._hold_before)
+        finally:
+            self._tmp.cleanup()
 
-    def _agents_snapshot(self) -> tuple[str, ...]:
-        if not self.real_agents.is_dir():
+    def _launchagents_snapshot(self) -> tuple[tuple[str, str, int], ...]:
+        agents = Path.home() / "Library" / "LaunchAgents"
+        if not agents.is_dir():
             return ()
-        return tuple(sorted(p.name for p in self.real_agents.iterdir()))
+        rows = []
+        for path in agents.iterdir():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            rows.append((path.name, digest, info.st_mtime_ns))
+        return tuple(sorted(rows))
+
+    def _hold_snapshot(self) -> tuple[bool, Optional[int]]:
+        hold = Path.home() / "qwen-mlx" / "HOLD"
+        if not hold.exists():
+            return (False, None)
+        return (True, hold.stat().st_mtime_ns)
 
     def _write_stubs(self) -> None:
         self.stub_bin.mkdir()
