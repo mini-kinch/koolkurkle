@@ -25,6 +25,7 @@ COLD = ROOT / "scripts" / "path_a_cold_ar.sh"
 SOAK = ROOT / "scripts" / "path_a_soak_ar.sh"
 BENCH = ROOT / "scripts" / "path_a_bench.py"
 FAKE = ROOT / "tests" / "path_a" / "fake_host_tools.py"
+_LOGFMT_PATH = ROOT / "tests" / "path_a" / "watchdog_logfmt.py"
 DOC_DRILL = ROOT / "docs" / "path-a" / "ar7-drills.md"
 DOC_COLD = ROOT / "docs" / "path-a" / "ar8-cold.md"
 DOC_SOAK = ROOT / "docs" / "path-a" / "ar9-soak.md"
@@ -35,6 +36,18 @@ USERS_PREFIX = "/" + "Users" + "/"
 HOME_PREFIX = "/" + "home" + "/"
 ICLOUD_MARK = "@" + "icloud"
 ME_MARK = "@" + "me" + ".com"
+
+
+def _load_logfmt():
+    spec = importlib.util.spec_from_file_location("watchdog_logfmt_ars", str(_LOGFMT_PATH))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load watchdog log format")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+LOGFMT = _load_logfmt()
 
 
 def _load_bench():
@@ -163,7 +176,11 @@ class OperatorCase(unittest.TestCase):
         self._write("down_curls", "0")
         self._write("stop_curls", "0")
         self._write("restarts_done", "0")
-        for name in ("launchctl", "curl", "kill", "ps", "lsof"):
+        self._write("keepalive", "true")
+        self.plist = self.home / "Library" / "LaunchAgents" / "com.mailroom.mlx-lm-server.plist"
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_text("KeepAlive true\n")
+        for name in ("launchctl", "curl", "kill", "ps", "lsof", "plutil"):
             os.symlink(str(FAKE), str(self.bin_dir / name))
         self.port = _ephemeral_port()
         self.assertNotIn(self.port, FORBIDDEN_PORTS)
@@ -251,9 +268,16 @@ class DrillTests(OperatorCase):
         self.assertIn("restart kickstart", text)
         self.assertIn("loop guard", text)
         self.assertIn("fail consecutive=", text)
+        self.assertIn("plutil -extract KeepAlive raw", text)
+        self.assertIn("com.mailroom.mlx-lm-server.plist", text)
+        self.assertIn("DRILL_SERVER_PLIST", text)
+        self.assertIn("recovered_by=launchd-keepalive", text)
+        self.assertIn("recovered_by=watchdog", text)
+        self.assertIn("stop-hold", text)
+        self.assertIn("kill -STOP", text)
 
     def test_dry_run_does_not_call_host_tools(self):
-        for cmd in ("port-kill", "port-kill-hold", "stop-cont", "loop3"):
+        for cmd in ("port-kill", "stop-hold", "stop-cont", "loop3"):
             self.trace.write_text("")
             proc = self._run(DRILL, ["--dry-run", "--ask-mail", str(self.ask), cmd])
             self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
@@ -266,16 +290,25 @@ class DrillTests(OperatorCase):
         self.assertIn("dry-run: ps -p <pid>", proc.stdout)
         self.assertIn("curl -sS -m 10", proc.stdout)
         self.assertIn("launchctl print gui/", proc.stdout)
+        self.assertIn("plutil -extract KeepAlive raw ", proc.stdout)
+        self.assertIn("recovered_by=launchd-keepalive", proc.stdout)
+        self.assertIn("recovered_by=watchdog", proc.stdout)
         self.assertNotIn("dry-run: touch", proc.stdout)
         proc = self._run(DRILL, ["--dry-run", "port-kill-hold"])
+        self.assertIn("alias of stop-hold", proc.stdout)
+        self.assertIn("PASS dry-run stop-hold", proc.stdout)
         self.assertIn("dry-run: touch ", proc.stdout)
+        self.assertIn("dry-run: kill -STOP <pid>", proc.stdout)
         self.assertIn("dry-run: rm -f ", proc.stdout)
         self.assertIn("no restart kickstart", proc.stdout)
+        self.assertIn("fail consecutive=", proc.stdout)
+        self.assertEqual(self._trace(), "")
         proc = self._run(DRILL, ["--dry-run", "stop-cont"])
         self.assertIn("dry-run: kill -STOP <pid>", proc.stdout)
         self.assertIn("dry-run: kill -CONT <pid>", proc.stdout)
         proc = self._run(DRILL, ["--dry-run", "loop3"])
-        self.assertEqual(proc.stdout.count("dry-run: kill <pid>"), 4)
+        self.assertEqual(proc.stdout.count("dry-run: kill -STOP <pid>"), 4)
+        self.assertIn("kill -CONT every stopped pid", proc.stdout)
         self.assertIn("loop guard", proc.stdout)
         self.assertIn("wait 1800s", proc.stdout)
         proc = self._run(DRILL, ["--dry-run", "port-kill"])
@@ -294,7 +327,7 @@ class DrillTests(OperatorCase):
         self.assertIn("refusing live port", proc.stderr)
         self.assertEqual(self._trace(), "")
 
-    def test_port_kill_pass(self):
+    def test_port_kill_pass_keepalive_relaunch(self):
         proc = self._run(
             DRILL,
             ["--ask-mail", str(self.ask), "--wait", "5", "--poll", "0", "port-kill"],
@@ -304,11 +337,14 @@ class DrillTests(OperatorCase):
         self.assertIn("PASS port-kill ", proc.stdout)
         self.assertIn("pid_before=4100", proc.stdout)
         self.assertIn("pid_after=4101", proc.stdout)
+        self.assertIn("recovered_by=launchd-keepalive", proc.stdout)
+        self.assertIn("preflight keepalive=true", proc.stdout)
         self.assertIn("preflight ask_mail sha256=", proc.stdout)
         self.assertIn("preflight ps=4100 mlx_lm.server", proc.stdout)
-        self.assertIn("restart kickstart", self.log.read_text())
+        self.assertNotIn("restart kickstart", self.log.read_text())
         self.assertIn("restore models=200", proc.stdout)
         self.assertNotIn("\tkickstart\t", "\n" + self._trace())
+        self.assertIn("plutil\t-extract\tKeepAlive\traw\t", self._trace())
         self.assertFalse(self.hold.exists())
         self.assertIn("kill", self._commands())
         joined = self._trace()
@@ -316,23 +352,115 @@ class DrillTests(OperatorCase):
         self.assertIsNone(re.search(r":1234(?!\d)", joined))
         self.assertIsNone(re.search(r":8743(?!\d)", joined))
 
-    def test_port_kill_hold_pass_then_recovers(self):
+    def test_port_kill_watchdog_when_keepalive_false(self):
+        self._write("keepalive", "false")
         proc = self._run(
             DRILL,
-            ["--wait", "1", "--poll", "1", "port-kill-hold"],
+            ["--wait", "5", "--poll", "0", "port-kill"],
+            scenario="port-kill",
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("preflight keepalive=false", proc.stdout)
+        self.assertIn("recovered_by=watchdog", proc.stdout)
+        self.assertIn("pid_before=4100", proc.stdout)
+        self.assertIn("pid_after=4101", proc.stdout)
+        log = self.log.read_text()
+        self.assertTrue(log.startswith("["), msg=log)
+        self.assertIn("] restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0", log)
+        self.assertIn("restore models=200", proc.stdout)
+        self.assertNotIn("\tkickstart\t", "\n" + self._trace())
+
+    def test_port_kill_old_restart_line_is_not_this_recovery(self):
+        self.log.write_text(
+            LOGFMT.format_watchdog_line(
+                "2026-09-25 11:00:00",
+                "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0",
+            )
+        )
+        proc = self._run(
+            DRILL,
+            ["--wait", "5", "--poll", "0", "port-kill"],
+            scenario="port-kill",
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("recovered_by=launchd-keepalive", proc.stdout)
+        self.assertEqual(self.log.read_text().count("restart kickstart"), 1)
+
+    def test_port_kill_stuck_fails(self):
+        proc = self._run(
+            DRILL,
+            ["--wait", "1", "--poll", "1", "port-kill"],
+            scenario="stuck-down",
+            timeout=15,
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertIn("reason=port did not recover", proc.stdout)
+        self.assertIn("kickstart\t-k\tgui/", self._trace())
+
+    def test_missing_plist_prints_unknown_keepalive(self):
+        self.plist.unlink()
+        proc = self._run(
+            DRILL,
+            ["--wait", "5", "--poll", "0", "port-kill"],
+            scenario="port-kill",
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("preflight keepalive=unknown", proc.stdout)
+        self.assertIn("recovered_by=launchd-keepalive", proc.stdout)
+        self.assertNotIn("plutil", self._commands())
+
+    def test_server_plist_path_override(self):
+        custom = self.tmp / "server.plist"
+        custom.write_text("KeepAlive false\n")
+        self._write("keepalive", "false")
+        proc = self._run(
+            DRILL,
+            ["--dry-run", "port-kill"],
+            extra={"DRILL_SERVER_PLIST": str(custom)},
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("plutil -extract KeepAlive raw %s" % custom, proc.stdout)
+        self.assertEqual(self._trace(), "")
+
+    def test_stop_hold_pass_then_recovers(self):
+        proc = self._run(
+            DRILL,
+            ["--wait", "1", "--poll", "0", "stop-hold"],
+            scenario="stop-hold",
+            timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIn("PASS stop-hold ", proc.stdout)
+        self.assertIn("hold_elapsed_s=", proc.stdout)
+        self.assertIn("recovery_elapsed_s=", proc.stdout)
+        self.assertIn("action touch HOLD", proc.stdout)
+        self.assertIn("action kill -STOP pid=4100", proc.stdout)
+        self.assertIn("action rm HOLD", proc.stdout)
+        self.assertNotIn("restart while HOLD", proc.stdout)
+        self.assertIn("fail consecutive=1", self.log.read_text())
+        self.assertIn("fail consecutive=2", self.log.read_text())
+        self.assertEqual(self.log.read_text().count("restart kickstart"), 1)
+        self.assertIn("pid_after=4101", proc.stdout)
+        self.assertFalse(self.hold.exists())
+        self.assertIn("restore cont pid=4100", proc.stdout)
+        self.assertIn("restore models=200", proc.stdout)
+        self.assertIn("kill\t-STOP\t4100", self._trace())
+        self.assertIn("kill\t-CONT\t4100", self._trace())
+
+    def test_port_kill_hold_alias_prints_stop_hold(self):
+        proc = self._run(
+            DRILL,
+            ["--wait", "1", "--poll", "0", "port-kill-hold"],
             scenario="port-kill-hold",
             timeout=15,
         )
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
-        self.assertIn("PASS port-kill-hold ", proc.stdout)
-        self.assertIn("hold_elapsed_s=", proc.stdout)
-        self.assertIn("recovery_elapsed_s=", proc.stdout)
-        self.assertIn("action touch HOLD", proc.stdout)
-        self.assertIn("action rm HOLD", proc.stdout)
-        self.assertNotIn("restart while HOLD", proc.stdout)
-        self.assertFalse(self.hold.exists())
-        self.assertIn("restore models=200", proc.stdout)
+        self.assertIn("port-kill-hold alias of stop-hold:", proc.stdout)
+        self.assertIn("kill -STOP under HOLD", proc.stdout)
+        self.assertIn("PASS stop-hold ", proc.stdout)
+        self.assertIn("action kill -STOP pid=4100", proc.stdout)
         self.assertEqual(self.log.read_text().count("restart kickstart"), 1)
+        self.assertIn("restore cont pid=4100", proc.stdout)
 
     def test_hold_violation_fails_and_clears_hold(self):
         proc = self._run(
@@ -341,11 +469,13 @@ class DrillTests(OperatorCase):
             scenario="hold-violated",
         )
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
-        self.assertIn("FAIL port-kill-hold ", proc.stdout)
+        self.assertIn("FAIL stop-hold ", proc.stdout)
         self.assertIn("reason=restart while HOLD set", proc.stdout)
         self.assertIn("restore cleared HOLD", proc.stdout)
+        self.assertIn("restore cont pid=4100", proc.stdout)
         self.assertFalse(self.hold.exists())
         self.assertIn("kickstart", self._trace())
+        self.assertIn("kill\t-CONT\t4100", self._trace())
 
     def test_stop_cont_pass_and_trap_cont(self):
         proc = self._run(
@@ -391,12 +521,19 @@ class DrillTests(OperatorCase):
         self.assertIn("PASS loop3 ", proc.stdout)
         self.assertIn("hold=loop-guard", proc.stdout)
         self.assertIn("restarts_seen=3", proc.stdout)
+        self.assertIn("action kill -STOP pid=4100 cycle=1", proc.stdout)
+        self.assertIn("loop3 cycle=1 pid_before=4100 pid_after=4101", proc.stdout)
+        self.assertIn("loop3 cycle=3 pid_before=4102 pid_after=4103", proc.stdout)
+        self.assertIn("action kill -STOP pid=4103 cycle=guard", proc.stdout)
         self.assertEqual(self.log.read_text().count("restart kickstart"), 3)
+        self.assertTrue(self.log.read_text().startswith("["))
         self.assertIn("restore cleared HOLD", proc.stdout)
         self.assertFalse(self.hold.exists())
         self.assertIn("restore kickstart label=com.mailroom.mlx-lm-server", proc.stdout)
-        kills = [line for line in self._trace().splitlines() if line.startswith("kill\t")]
-        self.assertEqual(len(kills), 4)
+        stops = [line for line in self._trace().splitlines() if line.startswith("kill\t-STOP\t")]
+        conts = [line for line in self._trace().splitlines() if line.startswith("kill\t-CONT\t")]
+        self.assertEqual(stops, ["kill\t-STOP\t4100", "kill\t-STOP\t4101", "kill\t-STOP\t4102", "kill\t-STOP\t4103"])
+        self.assertEqual(conts, ["kill\t-CONT\t4100", "kill\t-CONT\t4101", "kill\t-CONT\t4102", "kill\t-CONT\t4103"])
 
     def test_label_not_loaded_does_not_kill(self):
         (self.fake_root / "loaded").unlink()
@@ -487,7 +624,7 @@ class ColdTests(OperatorCase):
     def test_not_loaded_does_not_bootstrap(self):
         (self.fake_root / "loaded").unlink()
         plist = self.home / "Library" / "LaunchAgents" / "com.mailroom.qwen-watchdog.plist"
-        plist.parent.mkdir(parents=True)
+        plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_text("plist\n")
         proc = self._run(COLD, ["--plist", str(plist), "--base-url", "http://127.0.0.1:%d" % self.port])
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
@@ -777,7 +914,13 @@ class BenchFlagTests(unittest.TestCase):
         self.httpd.delay = 0.4
         port = self.httpd.server_address[1]
         log = self.tmp / "watchdog.log"
-        log.write_text("2026-09-25 03:01:00 restart kickstart synthetic\n")
+        log.write_text(
+            LOGFMT.format_watchdog_line("2026-09-25 03:00:30", "ok latency=1.113314s")
+            + LOGFMT.format_watchdog_line(
+                "2026-09-25 03:01:00",
+                "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0",
+            )
+        )
         out = self.tmp / "soak.jsonl"
         env = os.environ.copy()
         env["PATH_A_BENCH_TEST_HOOKS"] = "1"
@@ -841,11 +984,17 @@ class RunbookTests(unittest.TestCase):
             self.assertTrue("minute" in lowered or "hour" in lowered)
         drill = DOC_DRILL.read_text()
         self.assertIn("port-kill-hold", drill)
+        self.assertIn("stop-hold", drill)
         self.assertIn("stop-cont", drill)
         self.assertIn("loop3", drill)
         self.assertIn("loop guard", drill)
         self.assertIn("kill -CONT", drill)
+        self.assertIn("kill -STOP", drill)
         self.assertIn("kickstart -k", drill)
+        self.assertIn("KeepAlive", drill)
+        self.assertIn("recovered_by=launchd-keepalive", drill)
+        self.assertIn("recovered_by=watchdog", drill)
+        self.assertIn("plutil -extract KeepAlive raw", drill)
         cold = DOC_COLD.read_text()
         self.assertIn("--idle 1800", cold)
         self.assertIn("bootout", cold)
@@ -858,6 +1007,9 @@ class RunbookTests(unittest.TestCase):
         self.assertIn("48", soak)
         self.assertIn("300", soak)
         self.assertIn("5 minute", soak.lower())
+        self.assertIn("restart kickstart", soak)
+        self.assertIn("ok latency", soak)
+        self.assertIn("[YYYY-MM-DD HH:MM:SS]", soak)
 
 
 def _shell_quote(text):

@@ -71,7 +71,10 @@ _SWAP_USED = re.compile(
     r"used\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT])",
     re.IGNORECASE,
 )
-_WATCHDOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+# qwen-mlx-watchdog.sh log() writes "[YYYY-MM-DD HH:MM:SS] message"
+# (printf '[%s] %s\n'). A bare timestamp at column 0 is still accepted.
+_WATCHDOG_TS = re.compile(r"^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]?")
+_WATCHDOG_RESTART = "restart kickstart"
 _ISO_WALL = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})")
 _TIMEOUT_TYPES = (TimeoutError, socket.timeout)
 
@@ -1073,9 +1076,16 @@ def naive_wall(ts: str):
 
 
 def parse_watchdog_stamps(text: str) -> list:
-    """Timestamps at the start of a line: YYYY-MM-DD HH:MM:SS."""
+    """Timestamps of lines that contain `restart kickstart`.
+
+    Accepts the watchdog log() form `[YYYY-MM-DD HH:MM:SS] message` and a
+    bare `YYYY-MM-DD HH:MM:SS message` line. Other lines, including the
+    periodic `ok latency=` heartbeat, are ignored.
+    """
     stamps = []
     for line in (text or "").splitlines():
+        if _WATCHDOG_RESTART not in line:
+            continue
         match = _WATCHDOG_TS.match(line)
         if not match:
             continue
@@ -1114,6 +1124,10 @@ def read_watchdog_log(path: str):
 
 def hang_recoveries(rows: list, watchdog_status, stamps: list):
     """Each hung row needs an immediate next request that passed.
+
+    When a watchdog log was requested, the hang also needs a `restart
+    kickstart` stamp in [hang, hang + 5 min]. An `ok latency=` line in
+    that window is not recovery evidence.
 
     watchdog_status is None when no log was requested, 'missing' when the
     file cannot be read, or 'ok' when stamps were parsed.
@@ -1528,7 +1542,16 @@ def build_parser() -> argparse.ArgumentParser:
     soak.add_argument("--interval", type=float, default=300.0)
     soak.add_argument("--fixtures-dir", default="")
     soak.add_argument("--continue-on-hang", action="store_true")
-    soak.add_argument("--watchdog-log", default="")
+    soak.add_argument(
+        "--watchdog-log",
+        default="",
+        help=(
+            "read-only log scored only with --continue-on-hang: "
+            "a hang needs a restart kickstart line within 5 minutes "
+            "(bracketed log() timestamps or a bare timestamp). "
+            "ok latency lines do not count"
+        ),
+    )
     soak.add_argument("--mem-at", type=int, default=None)
 
     mem = sub.add_parser("mem", parents=[common], help="read-only swap, vm_stat, and Ollama checks")

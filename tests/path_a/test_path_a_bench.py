@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "path_a_bench.py"
+_LOGFMT_PATH = ROOT / "tests" / "path_a" / "watchdog_logfmt.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k_synthetic.txt"
 FIXTURES_DIR = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k"
 FIXED_HEADER = "DATA:\n1. message_id: "
@@ -47,6 +48,18 @@ _HOOKS = (
     "PATH_A_BENCH_VM_ACTIVE",
     "PATH_A_BENCH_VM_WIRED",
 )
+
+
+def _load_logfmt():
+    spec = importlib.util.spec_from_file_location("watchdog_logfmt", str(_LOGFMT_PATH))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load watchdog log format")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+LOGFMT = _load_logfmt()
 
 
 def _load_bench():
@@ -1000,12 +1013,19 @@ class PathABenchTests(unittest.TestCase):
 
     def test_watchdog_window_is_five_minutes(self) -> None:
         hang = "2026-09-25T03:00:00+00:00"
-        text = "\n".join(
+        restart = "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0"
+        self.assertEqual(LOGFMT.log_printf_format(), "[%s] %s\\n")
+        self.assertIn("date '+%Y-%m-%d %H:%M:%S'", (ROOT / "scripts" / "qwen-mlx-watchdog.sh").read_text(encoding="utf-8"))
+        ok_line = LOGFMT.format_watchdog_line("2026-09-24 23:28:54", "ok latency=1.113314s")
+        self.assertEqual(ok_line, "[2026-09-24 23:28:54] ok latency=1.113314s\n")
+        text = "".join(
             [
-                "noise",
-                "2026-09-25 02:59:59 before",
-                "2026-09-25 03:05:00 exact",
-                "2026-09-25T03:01:00 wrong separator",
+                "noise\n",
+                LOGFMT.format_watchdog_line("2026-09-25 02:59:59", "ok latency=1.113314s"),
+                LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s"),
+                "2026-09-25 02:59:59 " + restart + "\n",
+                LOGFMT.format_watchdog_line("2026-09-25 03:05:00", restart),
+                "2026-09-25T03:01:00 " + restart + "\n",
             ]
         )
         stamps = BENCH.parse_watchdog_stamps(text)
@@ -1015,11 +1035,19 @@ class PathABenchTests(unittest.TestCase):
         )
         hit = BENCH.watchdog_stamp_for_hang(hang, stamps)
         self.assertEqual(hit.strftime("%Y-%m-%d %H:%M:%S"), "2026-09-25 03:05:00")
-        self.assertIsNone(
-            BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps("2026-09-25 02:59:59 only\n"))
-        )
-        late = BENCH.parse_watchdog_stamps("2026-09-25 03:05:01 late\n")
+        only_ok = LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s")
+        self.assertIsNone(BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps(only_ok)))
+        bare = "2026-09-25 03:04:00 " + restart + "\n"
+        bare_hit = BENCH.watchdog_stamp_for_hang(hang, BENCH.parse_watchdog_stamps(bare))
+        self.assertEqual(bare_hit.strftime("%Y-%m-%d %H:%M:%S"), "2026-09-25 03:04:00")
+        late = BENCH.parse_watchdog_stamps(LOGFMT.format_watchdog_line("2026-09-25 03:05:01", restart))
         self.assertIsNone(BENCH.watchdog_stamp_for_hang(hang, late))
+
+    def _restart_line(self, ts: str) -> str:
+        return LOGFMT.format_watchdog_line(
+            ts,
+            "restart kickstart -k gui/1/com.mailroom.mlx-lm-server rc=0",
+        )
 
     def _watchdog(self, text: str) -> Path:
         path = self.tmp / "watchdog.log"
@@ -1058,7 +1086,7 @@ class PathABenchTests(unittest.TestCase):
         return proc
 
     def test_soak_continue_on_hang_passes_with_watchdog(self) -> None:
-        proc = self._soak_hang_then("hang_once", "2026-09-25 03:01:00 synthetic recovery\n")
+        proc = self._soak_hang_then("hang_once", self._restart_line("2026-09-25 03:01:00"))
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
@@ -1072,10 +1100,23 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(requests[0]["ts"], "2026-09-25T03:00:00+00:00")
 
     def test_soak_continue_on_hang_fails_when_watchdog_outside_window(self) -> None:
-        proc = self._soak_hang_then(
-            "hang_once",
-            "2026-09-25 02:59:00 early\n2026-09-25 03:06:01 late\n",
+        text = "".join(
+            [
+                self._restart_line("2026-09-25 02:59:00"),
+                LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s"),
+                self._restart_line("2026-09-25 03:06:01"),
+            ]
         )
+        proc = self._soak_hang_then("hang_once", text)
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
+        self.assertEqual(len(self.httpd.posts), 2)
+        self.assertIn("next=pass watchdog=none", proc.stdout)
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_continue_on_hang_ignores_ok_latency_heartbeat(self) -> None:
+        text = LOGFMT.format_watchdog_line("2026-09-25 03:01:00", "ok latency=1.113314s")
+        proc = self._soak_hang_then("hang_once", text)
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)
@@ -1083,7 +1124,7 @@ class PathABenchTests(unittest.TestCase):
         self.assertIn("OVERALL FAIL", proc.stdout)
 
     def test_soak_continue_on_hang_fails_when_next_request_fails(self) -> None:
-        proc = self._soak_hang_then("hang_then_short", "2026-09-25 03:01:00 synthetic recovery\n")
+        proc = self._soak_hang_then("hang_then_short", self._restart_line("2026-09-25 03:01:00"))
         self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
         self.assertNotIn("WEDGE", proc.stdout + proc.stderr)
         self.assertEqual(len(self.httpd.posts), 2)

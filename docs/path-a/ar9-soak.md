@@ -74,7 +74,7 @@ That only means the job was submitted. The soak result is in the log when the jo
 
 - `PASS soak` with `failures=0`. `hung` may be greater than 0. This line is timing and hangs only.
 - Every hung request is followed by a timing pass (`next=pass`): the next request returned inside the timeout with HTTP 200 and `finish_reason` `stop`.
-- If a request hung, the watchdog log has a line whose timestamp (`YYYY-MM-DD HH:MM:SS` at the start of the line) falls within 5 minutes after the hang. The summary prints `HUNG soak idx=<n> local_time=<ts> next=pass watchdog=<stamp>`.
+- If a request hung, the watchdog log has a `restart kickstart` line whose timestamp falls within 5 minutes after the hang. The timestamp is the watchdog `log()` form `[YYYY-MM-DD HH:MM:SS] message` (a bare `YYYY-MM-DD HH:MM:SS` at column 0 is also accepted). An `ok latency=` line in that window does not count: the watchdog writes one about every 300 seconds, so a heartbeat is not a restart. The summary prints `HUNG soak idx=<n> local_time=<ts> next=pass watchdog=<stamp>` where `<stamp>` is that `restart kickstart` time, `none`, or `missing`.
 - `PASS soak_content short=0`. A reply can be fast and still fail the content check. `path_a_bench.py` marks `content_len` <= 300 (`CONTENT_MIN`) as FAIL even when the clock, HTTP status, and finish reason pass. Seen live: 34 s, HTTP 200, `finish=stop`, `content_len=202` -> content FAIL. With `--continue-on-hang` that is its own line, `FAIL soak_content short=1 limit=content_len<=300 idx=<n> content_len=202`, and it does not flip `PASS soak` or `next=pass`. `OVERALL` is still FAIL while that line is FAIL.
 - `PASS soak_mem_at k=24` with `swap_used_mb` under 1024 and `ollama=down`.
 - `PASS ask_mail` and `OVERALL PASS`.
@@ -87,7 +87,7 @@ The harness window is 5 minutes (`WATCHDOG_WINDOW_S` is 300). It reads the log a
 
 On the installed watchdog, a hang that still answers `/v1/models` is behind the quiet gate. Worst case from that hang to `kickstart -k` is about 1750 seconds, which is outside the 5 minute window. A restart line later than 5 minutes fails this AR (`watchdog=none`) even though the watchdog is behaving as installed. Do not tighten `WD_QUIET_SECS` to make the bar pass.
 
-A failure that makes `/v1/models` non-200 skips the quiet gate and kickstarts after two passes (about 10 minutes). That is also longer than 5 minutes, so the same FAIL applies. The log line the harness accepts is any timestamp in the window, not only a `restart kickstart` line. Read the log yourself for `restart kickstart` when you score the run.
+A failure that makes `/v1/models` non-200 skips the quiet gate and kickstarts after two passes (about 10 minutes). That is also longer than 5 minutes, so the same FAIL applies. The only line the harness accepts inside the window is one containing `restart kickstart`. `ok latency=` and other stamped lines are ignored. `watchdog=none` means no `restart kickstart` stamp fell in the 5 minutes after the hang.
 
 ## Restore
 
