@@ -1,17 +1,57 @@
 #!/usr/bin/env python3
 """DATA+QUESTION paste on stdin → /v1/chat/completions → assistant text on stdout.
 
-v3 2026-09-24 — thinking OFF (chat_template_kwargs + /no_think). Never dump JSON to stdout.
+v4 2026-09-25 — fail-fast generate probe (default 60s) + main timeout 180s. thinking OFF.
+Never dump JSON to stdout. Stdout stays empty on failure.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 import urllib.error
 import urllib.request
 
-SCRIPT_VER = "qwen_paste_chat_post.py v3 2026-09-24"
+SCRIPT_VER = "qwen_paste_chat_post.py v4 2026-09-25"
+
+RESTART_HINT = (
+    "hint: /v1/models may be up but generate is wedged — run qwen-chat-down.sh "
+    "then qwen-chat-up.sh, confirm a tiny chat probe, then retry "
+    "(see docs/path-a/mini-install.md)"
+)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def _probe_enabled() -> bool:
+    return os.environ.get("QWEN_PROBE", "1").strip() != "0"
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    # 3.9: socket.timeout is not a TimeoutError. 3.10+: it is an alias.
+    # urllib may raise either directly, or URLError with that type in .reason.
+    timeout_types = (TimeoutError, socket.timeout)
+    if isinstance(exc, timeout_types):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(getattr(exc, "reason", None), timeout_types)
+    return False
+
+
+def _hint() -> None:
+    print(RESTART_HINT, file=sys.stderr)
 
 
 def _post(url: str, body: dict, timeout: int) -> dict:
@@ -36,7 +76,22 @@ def _extract(data: dict):
     return content_s, reasoning_s, finish, msg
 
 
+def _probe(url: str, model: str, timeout: int) -> None:
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "/no_think"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    _post(url, body, timeout)
+
+
 def main() -> int:
+    default_timeout = _env_int("QWEN_TIMEOUT", 180)
+    probe_on = _probe_enabled()
+    probe_timeout = _env_int("QWEN_PROBE_TIMEOUT", 60)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:1234/v1")
     ap.add_argument("--model", default="mlx-community/Qwen3.8-27B-4bit")
@@ -47,7 +102,7 @@ def main() -> int:
         action="store_true",
         help="Allow Qwen thinking/reasoning tokens (default: OFF).",
     )
-    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--timeout", type=int, default=default_timeout)
     args = ap.parse_args()
 
     paste = sys.stdin.read()
@@ -78,10 +133,27 @@ def main() -> int:
     }
 
     print(
-        "%s | posting %s | enable_thinking=%s | max_tokens=%s | paste_bytes=%s"
-        % (SCRIPT_VER, url, enable_thinking, args.max_tokens, len(paste.encode())),
+        "%s | posting %s | enable_thinking=%s | max_tokens=%s | paste_bytes=%s | probe=%s | probe_timeout=%s | timeout=%s"
+        % (
+            SCRIPT_VER,
+            url,
+            enable_thinking,
+            args.max_tokens,
+            len(paste.encode()),
+            "on" if probe_on else "off",
+            probe_timeout,
+            args.timeout,
+        ),
         file=sys.stderr,
     )
+
+    if probe_on:
+        try:
+            _probe(url, args.model, probe_timeout)
+        except Exception as e:
+            print("error: probe failed: %s" % e, file=sys.stderr)
+            _hint()
+            return 3
 
     try:
         data = _post(url, body, args.timeout)
@@ -90,6 +162,9 @@ def main() -> int:
         return 2
     except Exception as e:
         print("error: %s" % e, file=sys.stderr)
+        if _is_timeout(e):
+            _hint()
+            return 3
         return 2
 
     try:
@@ -142,6 +217,9 @@ def main() -> int:
             )
         except Exception as e:
             print("error: retry failed: %s" % e, file=sys.stderr)
+            if _is_timeout(e):
+                _hint()
+                return 3
             return 2
 
     if content_s:
