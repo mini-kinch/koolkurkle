@@ -88,7 +88,13 @@ def _long(fill: str = "E") -> str:
     return (base + pad)[:360]
 
 
-def _completion(content: str, finish: str = "stop", reasoning=None, usage=True) -> bytes:
+def _completion(
+    content: str,
+    finish: str = "stop",
+    reasoning=None,
+    usage=True,
+    completion_tokens: int = 40,
+) -> bytes:
     message = {"role": "assistant", "content": content}
     if reasoning is not None:
         message["reasoning"] = reasoning
@@ -104,7 +110,7 @@ def _completion(content: str, finish: str = "stop", reasoning=None, usage=True) 
     if usage:
         payload["usage"] = {
             "prompt_tokens": 1400,
-            "completion_tokens": 40,
+            "completion_tokens": completion_tokens,
             "total_tokens": 1440,
         }
     return json.dumps(payload).encode("utf-8")
@@ -200,6 +206,27 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if kind == "len202":
             self._send(200, _completion("C" * 202, finish="stop", reasoning="note"))
+            return
+        if kind == "truncated":
+            self._send(
+                200,
+                _completion("T" * 400, finish="length", reasoning="note", completion_tokens=512),
+            )
+            return
+        if kind == "short79":
+            self._send(
+                200,
+                _completion("C" * 202, finish="stop", reasoning="note", completion_tokens=79),
+            )
+            return
+        if kind == "both_cut":
+            self._send(
+                200,
+                _completion("B" * 80, finish="length", reasoning="note", completion_tokens=80),
+            )
+            return
+        if kind == "nousage":
+            self._send(200, _completion(_long("N"), finish="stop", reasoning="note", usage=False))
             return
         self._send(200, _completion(_long("E"), finish="stop", reasoning="note"))
 
@@ -1161,6 +1188,14 @@ class PathABenchTests(unittest.TestCase):
         )
         self.assertIn("OVERALL FAIL", proc.stdout)
         self.assertNotIn("FAIL soak n=", proc.stdout)
+        self.assertIn(
+            "FAIL soak_length truncated=0 short=1 idx=1 labels=SHORT finish=stop content_len=202 completion_tokens=40",
+            proc.stdout,
+        )
+        self.assertIn("length=SHORT", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertIn("FAILS soak_length soak_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
         row = [item for item in self._rows() if item.get("kind") == "request"][0]
         self.assertEqual(row["verdict"], "fail")
         self.assertEqual(row["http_status"], 200)
@@ -1172,6 +1207,162 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(summary["hung"], 0)
         self.assertEqual(summary["content_short"], 1)
         self.assertEqual(summary["overall"], "FAIL")
+        self.assertEqual(row["length"], "SHORT")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertEqual(summary["fails"], ["soak_length", "soak_content"])
+        self.assertEqual(summary["invalids"], [])
+
+    def _soak_one(self, kind: str, extra: list | None = None, env: dict | None = None):
+        base = self._start(kind)
+        proc = self._run(
+            self._cmd(
+                "soak",
+                base,
+                self._ask(),
+                [
+                    "-n",
+                    "1",
+                    "--interval",
+                    "0",
+                    "--timeout",
+                    "30",
+                    "--continue-on-hang",
+                    *(extra or []),
+                ],
+            ),
+            env={"PATH_A_BENCH_TEST_HOOKS": "1", **(env or {})},
+        )
+        requests = [row for row in self._rows() if row.get("kind") == "request"]
+        self.assertEqual(len(requests), 1)
+        return proc, requests[0], self._rows()[-1]
+
+    def test_soak_length_truncated(self) -> None:
+        proc, row, summary = self._soak_one("truncated")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 512)
+        self.assertEqual(row["content_len"], 400)
+        self.assertEqual(row["length"], "TRUNCATED")
+        self.assertRegex(
+            proc.stdout,
+            r"soak 1/1 fixture=\S+ verdict=fail wall_s=\S+ http=200 "
+            r"finish=length content_len=400 completion_tokens=512 length=TRUNCATED",
+        )
+        self.assertIn("FAIL soak ", proc.stdout)
+        self.assertIn(
+            "FAIL soak_length truncated=1 short=0 idx=1 labels=TRUNCATED "
+            "finish=length content_len=400 completion_tokens=512",
+            proc.stdout,
+        )
+        self.assertIn("PASS soak_content short=0", proc.stdout)
+        self.assertIn("FAILS soak soak_length", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("SHORT", proc.stdout)
+        self.assertEqual(summary["fails"], ["soak", "soak_length"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_length_short(self) -> None:
+        proc, row, summary = self._soak_one("short79")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 79)
+        self.assertEqual(row["content_len"], 202)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertRegex(
+            proc.stdout,
+            r"finish=stop content_len=202 completion_tokens=79 length=SHORT",
+        )
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn(
+            "FAIL soak_length truncated=0 short=1 idx=1 labels=SHORT "
+            "finish=stop content_len=202 completion_tokens=79",
+            proc.stdout,
+        )
+        self.assertIn(
+            "FAIL soak_content short=1 limit=content_len<=300 idx=1 content_len=202",
+            proc.stdout,
+        )
+        self.assertIn("FAILS soak_length soak_content", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertNotIn("TRUNCATED", proc.stdout)
+        self.assertEqual(summary["fails"], ["soak_length", "soak_content"])
+        self.assertEqual(summary["overall"], "FAIL")
+
+    def test_soak_length_truncated_and_short(self) -> None:
+        proc, row, summary = self._soak_one("both_cut")
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "length")
+        self.assertEqual(row["completion_tokens"], 80)
+        self.assertEqual(row["content_len"], 80)
+        self.assertEqual(row["length"], "TRUNCATED,SHORT")
+        self.assertIn(
+            "FAIL soak_length truncated=1 short=1 idx=1 labels=TRUNCATED,SHORT "
+            "finish=length content_len=80 completion_tokens=80",
+            proc.stdout,
+        )
+        self.assertIn("length=TRUNCATED,SHORT", proc.stdout)
+        self.assertIn("FAIL soak ", proc.stdout)
+        self.assertIn("PASS soak_content short=0", proc.stdout)
+        self.assertIn("FAILS soak soak_length", proc.stdout)
+        self.assertEqual(summary["fails"], ["soak", "soak_length"])
+        self.assertIn("OVERALL FAIL", proc.stdout)
+
+    def test_soak_length_clean(self) -> None:
+        proc, row, summary = self._soak_one("ok")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["finish_reason"], "stop")
+        self.assertEqual(row["completion_tokens"], 40)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
+        self.assertIn("PASS soak_content short=0", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertIn("OVERALL PASS", proc.stdout)
+        self.assertRegex(
+            proc.stdout,
+            r"finish=stop content_len=%d completion_tokens=40 length=ok" % row["content_len"],
+        )
+        self.assertEqual(summary["fails"], [])
+        self.assertEqual(summary["invalids"], [])
+        self.assertEqual(summary["overall"], "PASS")
+
+    def test_soak_length_missing_usage_is_null(self) -> None:
+        proc, row, _summary = self._soak_one("nousage")
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        self.assertIsNone(row["completion_tokens"])
+        self.assertIn("completion_tokens", row)
+        self.assertGreater(row["content_len"], 300)
+        self.assertEqual(row["length"], "ok")
+        self.assertIn("completion_tokens=na", proc.stdout)
+        self.assertIn("length=ok", proc.stdout)
+        self.assertIn("PASS soak_length truncated=0 short=0", proc.stdout)
+        self.assertIn("FAILS none", proc.stdout)
+
+    def test_soak_fails_line_lists_length_content_and_mem(self) -> None:
+        proc, row, summary = self._soak_one(
+            "short79",
+            extra=["--mem-at", "1"],
+            env={
+                "PATH_A_BENCH_INJECT_SWAP_MB": "2000",
+                "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+                "PATH_A_BENCH_OLLAMA_PORT": "closed",
+            },
+        )
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(row["length"], "SHORT")
+        self.assertIn("PASS soak n=1 failures=0 hung=0", proc.stdout)
+        self.assertIn("FAIL soak_length ", proc.stdout)
+        self.assertIn("FAIL soak_content ", proc.stdout)
+        self.assertIn("FAIL soak_mem_at k=1", proc.stdout)
+        self.assertIn("FAILS soak_length soak_content soak_mem_at", proc.stdout)
+        self.assertIn("INVALIDS none", proc.stdout)
+        self.assertEqual(
+            summary["fails"],
+            ["soak_length", "soak_content", "soak_mem_at"],
+        )
+        self.assertIn("OVERALL FAIL", proc.stdout)
 
     def test_soak_mem_at_sample_in_summary(self) -> None:
         base = self._start("ok")

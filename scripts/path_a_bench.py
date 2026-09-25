@@ -449,6 +449,70 @@ def soak_content_line(rows: list):
     return line, False
 
 
+def length_labels(finish, content_len) -> list:
+    """TRUNCATED and SHORT are independent.
+
+    finish_reason length is a cut-off reply (TRUNCATED). content_len at or
+    under CONTENT_MIN is SHORT even when finish_reason is stop. A missing
+    content_len is not SHORT.
+    """
+    labels = []
+    if finish == "length":
+        labels.append("TRUNCATED")
+    if isinstance(content_len, int) and not isinstance(content_len, bool):
+        if content_len <= CONTENT_MIN:
+            labels.append("SHORT")
+    return labels
+
+
+def length_word(finish, content_len) -> str:
+    labels = length_labels(finish, content_len)
+    if labels:
+        return ",".join(labels)
+    if not isinstance(content_len, int) or isinstance(content_len, bool):
+        return "na"
+    return "ok"
+
+
+def _shown(value) -> str:
+    if value is None:
+        return "na"
+    return str(value)
+
+
+def soak_length_line(rows: list):
+    """Summary beside the timing soak line. Returns (line, ok)."""
+    truncated = 0
+    short = 0
+    bits = []
+    for row in rows:
+        labels = length_labels(row.get("finish_reason"), row.get("content_len"))
+        if "TRUNCATED" in labels:
+            truncated += 1
+        if "SHORT" in labels:
+            short += 1
+        if not labels:
+            continue
+        bits.append(
+            "idx=%s labels=%s finish=%s content_len=%s completion_tokens=%s"
+            % (
+                row.get("idx"),
+                ",".join(labels),
+                _shown(row.get("finish_reason")),
+                _shown(row.get("content_len")),
+                _shown(row.get("completion_tokens")),
+            )
+        )
+    if not bits:
+        return "PASS soak_length truncated=0 short=0", True
+    line = "FAIL soak_length truncated=%d short=%d %s" % (
+        truncated,
+        short,
+        " ".join(bits),
+    )
+    return line, False
+
+
 def classify_request(mode: str, wall_s: float, result: dict, limits: dict):
     """Return (verdict, error). Soak timeouts are 'hung'; other modes fail."""
     if result.get("timed_out"):
@@ -603,6 +667,10 @@ def chat_summary(
     )
     lines = []
     ok = True
+    length_line = None
+    length_ok = True
+    content_ok = True
+    req_ok = True
     if mode == "warm":
         req_ok = n > 0 and failures == 0 and hung == 0
         med_ok = n > 0 and med_s is not None and med_s <= limits["warm_median"]
@@ -654,9 +722,11 @@ def chat_summary(
         else:
             req_ok = n > 0 and failures == 0 and hung == 0 and not wedged
         lines.append("%s soak %s" % ("PASS" if req_ok else "FAIL", numbers))
+        length_line, length_ok = soak_length_line(rows)
+        lines.append(length_line)
         if hang_notes:
             lines.extend(hang_notes)
-        ok = req_ok
+        ok = req_ok and length_ok
         if continue_on_hang:
             content_line, content_ok = soak_content_line(content_short_rows)
             lines.append(content_line)
@@ -670,6 +740,20 @@ def chat_summary(
     lines.append("%s %s" % (ask_status, ask_detail))
     if ask_status != "PASS":
         ok = False
+    fails = []
+    if mode == "soak":
+        if not req_ok:
+            fails.append("soak")
+        if not length_ok:
+            fails.append("soak_length")
+        if continue_on_hang and not content_ok:
+            fails.append("soak_content")
+        if mem_line and not mem_ok:
+            fails.append("soak_mem_at")
+        if ask_status != "PASS":
+            fails.append("ask_mail")
+        lines.append("FAILS %s" % (" ".join(fails) if fails else "none"))
+        lines.append("INVALIDS none")
     if wedged:
         overall = "WEDGE"
         code = 4
@@ -698,6 +782,10 @@ def chat_summary(
         summary["soak_mem_at"] = mem_line
     if mode == "soak" and continue_on_hang:
         summary["content_short"] = len(content_short_rows)
+    if mode == "soak":
+        summary["soak_length"] = length_line
+        summary["fails"] = fails
+        summary["invalids"] = []
     return lines, code, summary
 
 
@@ -723,6 +811,8 @@ def request_row(
         "content_len": result.get("content_len"),
         "verdict": verdict,
         "error": error,
+        "completion_tokens": result.get("completion_tokens"),
+        "length": length_word(result.get("finish_reason"), result.get("content_len")),
     }
     if role:
         row["role"] = role
@@ -730,8 +820,6 @@ def request_row(
         row["reasoning_len"] = result["reasoning_len"]
     if result.get("prompt_tokens") is not None:
         row["prompt_tokens"] = result["prompt_tokens"]
-    if result.get("completion_tokens") is not None:
-        row["completion_tokens"] = result["completion_tokens"]
     return row
 
 
@@ -742,7 +830,8 @@ def _progress(mode: str, idx: int, total: int, row: dict) -> str:
     status = row.get("http_status")
     status_s = "na" if status is None else str(status)
     return (
-        "%s %d/%d fixture=%s verdict=%s wall_s=%s http=%s finish=%s content_len=%s"
+        "%s %d/%d fixture=%s verdict=%s wall_s=%s http=%s finish=%s content_len=%s "
+        "completion_tokens=%s length=%s"
         % (
             mode,
             idx,
@@ -753,6 +842,8 @@ def _progress(mode: str, idx: int, total: int, row: dict) -> str:
             status_s,
             finish,
             content_s,
+            _shown(row.get("completion_tokens")),
+            row.get("length") or "na",
         )
     )
 
