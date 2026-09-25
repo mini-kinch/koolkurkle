@@ -18,7 +18,9 @@ for extra in (str(SCRIPTS), str(TESTS)):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
-import ask_mail  # noqa: E402
+from _py_compat import import_ask_mail  # noqa: E402
+
+ask_mail = import_ask_mail()
 import ask_mail_ui as ask_ui  # noqa: E402
 from test_ask_mail import _fake_retrieve, _make_db  # noqa: E402
 

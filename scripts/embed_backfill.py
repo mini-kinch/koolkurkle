@@ -37,7 +37,6 @@ from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict
 from embed_lib import (
     CHAR_CAP,
     DEFAULT_BATCH_SIZE,
-    DEFAULT_DB,
     DEFAULT_DIMS,
     DEFAULT_MODEL,
     DEFAULT_MODEL_ID,
@@ -235,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         default=str(default_db_path()),
-        help=f"Mailroom SQLite path (default: {DEFAULT_DB})",
+        help="Mailroom SQLite path (default: ~/MailArchive/mailroom.sqlite)",
     )
     parser.add_argument(
         "--limit",
