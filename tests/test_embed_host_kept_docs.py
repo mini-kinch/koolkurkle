@@ -76,7 +76,7 @@ class HostKeptForegroundEmbedOpsTests(unittest.TestCase):
         rest = ops[start + len(heading):]
         nxt = rest.find("\n## ")
         section = rest if nxt < 0 else rest[:nxt]
-        flat = " ".join(section.split())
+        flat = " ".join(section.replace("*", "").split())
 
         self.assertIn("process group is torn down", flat)
         self.assertIn("nohup ... &", section)
