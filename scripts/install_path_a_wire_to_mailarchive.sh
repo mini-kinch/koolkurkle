@@ -119,11 +119,11 @@ assert_k20_file() {
   if [ ! -f "$file" ]; then
     die "error: missing $file for ASK_MAIL_PASTE_K assert"
   fi
-  if ! grep -E "$K20_RE" "$file" >/dev/null 2>&1; then
-    die "error: $file missing ASK_MAIL_PASTE_K default 20"
-  fi
   if grep -E "$K8_RE" "$file" >/dev/null 2>&1; then
     die "error: $file defaults ASK_MAIL_PASTE_K to 8"
+  fi
+  if ! grep -E "$K20_RE" "$file" >/dev/null 2>&1; then
+    die "error: $file missing ASK_MAIL_PASTE_K default 20"
   fi
 }
 
@@ -219,14 +219,19 @@ verify_ask_untouched() {
 }
 
 resolve_repo_root() {
-  script_path="$0"
+  # zsh sets $0 to the function name; bash keeps the script path.
+  if [ -n "${ZSH_VERSION-}" ]; then
+    eval 'script_path=${(%):-%x}'
+  else
+    script_path="${BASH_SOURCE[0]}"
+  fi
   case "$script_path" in
     */*) ;;
     *) script_path="./$script_path" ;;
   esac
   scripts_dir="$(cd "$(dirname "$script_path")" && pwd)"
   if [ "$(basename "$scripts_dir")" != "scripts" ]; then
-    die "error: script must live in repo scripts/"
+    die "error: script must live in repo scripts/ (got $scripts_dir)"
   fi
   REPO_ROOT="$(cd "$scripts_dir/.." && pwd)"
 }
