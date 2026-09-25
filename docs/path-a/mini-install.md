@@ -38,3 +38,9 @@ If `/v1/models` is OK but generate is wedged, the v4 preflight probe fails in ab
 
 ## HOLD
 No ATT. No `ask_mail.py` overwrite. No `/ui`.
+
+## LaunchAgent templates
+
+`launchd/com.mailroom.mlx-lm-server.plist.template` and `launchd/com.mailroom.ask-mail-serve.plist.template` are checked-in copies of the live login agents. Paths use the `__HOME__` placeholder (launchd does not expand `$HOME`). The mlx `--model` snapshot is the PIN in `scripts/qwen-chat-up.sh` ([model-pin.md](model-pin.md)).
+
+Installing them is a separate operator step: `sed` `__HOME__` to `$HOME`, copy the result to `~/Library/LaunchAgents`, and `launchctl bootstrap`. This change does not do that.
