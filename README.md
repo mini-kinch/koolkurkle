@@ -15,11 +15,13 @@ Operator HARD DECKs stay **below** this About lede (and in [docs/ops-terminal.md
 LaunchAgent `com.mailroom.daily` on **mac-mini.local** (set your macOS login) runs the
 local IMAP → FTS → classify/bills → incremental embed chain. No Grok Bot at
 runtime. **Copy-only until PR-5:** set `MAILROOM_DB` to
-`mailroom-copy.sqlite` or `mailroom-daily-copy.sqlite`. Unset /
-`mailroom.sqlite` is refused (hard-fail). Daily children get `--db` and
-`$MAILROOM_DB` and honor them through `bind_copy_db()` (`argv=None` means
-`sys.argv[1:]`) so they open that copy, not Mini's empty SoR stub. One
-writer, no SMB/NFS dual-write.
+`mailroom-copy.sqlite`, `mailroom-daily-copy.sqlite`, or an explicit
+`mailroom.sqlite` (SoR basename allowed only when explicitly named;
+rem-legacy must be absent; `db_mode=sor`). Unset / unknown basenames
+are refused (hard-fail). No silent default to `mailroom.sqlite`.
+Daily children get `--db` and `$MAILROOM_DB` and honor them through
+`bind_copy_db()` (`argv=None` means `sys.argv[1:]`) so they open that
+path, not an unnamed empty SoR stub. One writer, no SMB/NFS dual-write.
 
 Install, Keychain **name** (`mailroom.imap.app-password`), launchd Keychain
 proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
@@ -66,7 +68,7 @@ IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refu
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy),
 rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run classic MBP SoR 8pm while rem-legacy is alive),
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
-bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub),
+bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the allowlisted DB; SoR basename allowed only when explicitly named and rem-legacy is absent; refuse SoR stub when rem-legacy or the writer lock is held; unset / unknown refuse),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
 PR-5 prep / post-rem gates (docs/verify only — NON-GO; EXIT ≠ cutover GO; rem EXIT 17223/17223 + #40 gate live + catch-up Done are not enable; separate CoS GO; this change does not enable cutover or RunAtLoad; [docs/pr5-cutover.md](docs/pr5-cutover.md)),
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer),

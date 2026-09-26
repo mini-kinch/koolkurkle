@@ -42,7 +42,7 @@ IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refu
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy): section below.
 Rem-aware SoR writer gate (look-ahead; rem/lock on live mailroom.sqlite → refuse calendar SoR writers same cycle; skip/rem-safe before the clock): section below.
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write): section below.
-bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the copy; refuse SoR stub): section below.
+bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the allowlisted DB; SoR basename allowed only when explicitly named and rem-legacy is absent; refuse SoR stub when rem-legacy or the writer lock is held): section below.
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad): section below.
 PR-5 prep / post-rem gates (docs/verify only — NON-GO; EXIT ≠ cutover GO; #40 gate live + catch-up Done are not enable; this change does not enable cutover or RunAtLoad): section below.
 sor_health_pack read-only / Mini-copy OK (read-only health; Mini on a copy DB is OK and is not a second writer): section below.
@@ -187,14 +187,16 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 ## MBP SoR vs Mini copy-only
 
-Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers against SoR. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
+Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers against SoR while rem-legacy holds the live file. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
 
 - MBP holds the live SoR DB (`$HOME/MailArchive/mailroom.sqlite` as
   a path class).
 - Mini writers use `mailroom-copy.sqlite` or
-  `mailroom-daily-copy.sqlite` only. Unset or `mailroom.sqlite` is a
-  hard refuse (`db_mode=refused`).
-- Do not start a Mini writer against SoR. Do not promote Mini
+  `mailroom-daily-copy.sqlite`, or an explicit `mailroom.sqlite`
+  (`db_mode=sor`) only when that basename is named and rem-legacy is
+  absent. Unset or an unknown basename is a hard refuse
+  (`db_mode=refused`). No silent default to `mailroom.sqlite`.
+- Do not start a Mini writer against SoR while rem-legacy is live. Do not promote Mini
   `mailroom.sqlite` while rem-legacy is live.
 
 This gate is docs/tests only. It does not open MailArchive or live
@@ -489,8 +491,10 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 ## bind_copy_db / daily children honor MAILROOM_DB
 
 Standing bind contract: `bind_copy_db(argv=None)` reads `sys.argv[1:]`.
-Daily children open the copy DB. Refuse the SoR stub
-(`mailroom.sqlite`). Tests only; no live SoR open.
+Daily children open the allowlisted DB (copy basename, or explicit SoR).
+Refuse the SoR stub (`mailroom.sqlite`) unless it is explicitly named
+and rem-legacy is absent (`db_mode=sor`). Unset and unknown basenames
+still refuse. Tests only; no live SoR open.
 
 Fail closed: if `argv` is `None`, honor process `--db` via
 `sys.argv[1:]`. Do not treat `None` like `[]`. Do not open the SoR
@@ -574,16 +578,18 @@ Operator checklist (docs/tests only; no live IMAP):
 
 ## Mini daily (copy-only)
 
-Preferred practice: the Mini daily job writes **only** a copy. Set
-`MAILROOM_DB` to `$HOME/MailArchive/mailroom-copy.sqlite` or
-`mailroom-daily-copy.sqlite`. Unset or `mailroom.sqlite` is a hard refuse
-(`db_mode=refused`) until SoR cutover (PR-5). Why: Mini SoR may be empty
-and rem embed may still hold the copy — a silent default would write the
-wrong file. Daily children must use that same copy (`--db` and
-`$MAILROOM_DB`, via `mailroom_copy_db.py` `bind_copy_db`) so
-IMAP/classify/bills do not open the empty SoR stub. `bind_copy_db()`
-reads `sys.argv[1:]` when `argv` is `None` — otherwise process `--db`
-is ignored.
+Preferred practice: set `MAILROOM_DB` to
+`$HOME/MailArchive/mailroom-copy.sqlite`, `mailroom-daily-copy.sqlite`,
+or an explicit `mailroom.sqlite`. Copy basenames emit `db_mode=copy`.
+The SoR basename is allowed only when explicitly named (`db_mode=sor`),
+and rem-legacy must be absent. Unset or an unknown basename is a hard
+refuse (`db_mode=refused`). No silent default to `mailroom.sqlite`.
+Why: Mini SoR may be empty and rem embed may still hold the copy — a
+silent default would write the wrong file. Daily children must use that
+same copy or the same explicit SoR path (`--db` and `$MAILROOM_DB`, via
+`mailroom_copy_db.py` `bind_copy_db`) so IMAP/classify/bills do not open
+an unnamed empty SoR stub. `bind_copy_db()` reads `sys.argv[1:]` when
+`argv` is `None` — otherwise process `--db` is ignored.
 
 Keychain must unlock from **launchd** (`launchctl start com.mailroom.daily`).
 Terminal-only `security` success is not enough. Substitute `__HOME__`,

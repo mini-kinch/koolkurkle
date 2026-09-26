@@ -2,11 +2,12 @@
 """Mini daily RAG orchestrator: IMAP headers → FTS → classify/bills → embed.
 
 Wires existing MailArchive scripts. Does not reimplement IMAP, FTS, classify,
-or embed. No Python IMAP sockets. No secrets. Copy-only until SoR cutover
-(PR-5): MAILROOM_DB basename must be mailroom-copy.sqlite or
-mailroom-daily-copy.sqlite. Unset / mailroom.sqlite / other names refuse
-before IMAP or embed. The plan passes --db and MAILROOM_DB to every
-child so Mini IMAP/classify/bills cannot open the empty SoR stub.
+or embed. No Python IMAP sockets. No secrets. Allowlist: mailroom-copy.sqlite,
+mailroom-daily-copy.sqlite, or mailroom.sqlite (SoR basename allowed only when
+explicitly named; db_mode=sor; rem-legacy must be absent). Unset / unknown
+names refuse before IMAP or embed. No silent default to mailroom.sqlite.
+The plan passes --db and MAILROOM_DB to every child so Mini IMAP/classify/bills
+cannot open the empty SoR stub.
 
 Catch-up: if last_daily_rag_ok is missing or at least 24h old, run the
 chain (resume first failed phase). last_daily_rag_ok is written when
@@ -40,6 +41,7 @@ from mailroom_copy_db import (
     COPY_DB_BASENAMES,
     CopyDbRefuse,
     allowed_copy_db,
+    db_mode_for,
     emit_db_mode,
     env_db_path,
     resolve_copy_db,
@@ -141,7 +143,10 @@ def default_db_path(archive: Path) -> Path | None:
 
 
 def resolve_driver_db(cli_db: str | None, archive: Path) -> Path:
-    """Hard-fail unless basename is on the copy allowlist. archive unused on purpose."""
+    """Hard-fail unless basename is on the allowlist. archive unused on purpose.
+
+    SoR basename allowed only when explicitly named; rem-legacy must be absent.
+    """
     del archive
     try:
         return resolve_copy_db(cli_db)
@@ -501,12 +506,14 @@ def run_step(item: PlanItem, dry_run: bool, log) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Mini daily RAG (copy-only): headers (Apple curl) → body/FTS → "
+            "Mini daily RAG: headers (Apple curl) → body/FTS → "
             "classify → bills → incremental embed. MAILROOM_DB basename must "
-            "be mailroom-copy.sqlite or mailroom-daily-copy.sqlite. Stamp "
-            "last_daily_rag_ok when imap+bodies succeed and embed is ok or "
-            "skipped (Ollama down, FTS-only). MAILROOM_EMBED_REQUIRED=1 "
-            "aborts instead of skipping."
+            "be mailroom-copy.sqlite, mailroom-daily-copy.sqlite, or "
+            "mailroom.sqlite (SoR basename allowed only when explicitly named; "
+            "rem-legacy must be absent). Unset / unknown refused. No silent "
+            "default to mailroom.sqlite. Stamp last_daily_rag_ok when "
+            "imap+bodies succeed and embed is ok or skipped (Ollama down, "
+            "FTS-only). MAILROOM_EMBED_REQUIRED=1 aborts instead of skipping."
         )
     )
     parser.add_argument(
@@ -529,8 +536,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Driver DB (required: $MAILROOM_DB or --db). Basename allowlist: "
-            "mailroom-copy.sqlite, mailroom-daily-copy.sqlite. Unset / "
-            "mailroom.sqlite refused until SoR cutover."
+            "mailroom-copy.sqlite, mailroom-daily-copy.sqlite, or "
+            "mailroom.sqlite (SoR basename allowed only when explicitly named; "
+            "rem-legacy must be absent). Unset / unknown refused. No silent "
+            "default to mailroom.sqlite."
         ),
     )
     parser.add_argument(
@@ -606,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)
         return 2
-    emit_db_mode("copy")
+    emit_db_mode(db_mode_for(db))
 
     stamp = stamp_path(logs_dir)
     held: HeldDailyLock | None = None

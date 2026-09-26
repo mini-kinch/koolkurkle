@@ -371,9 +371,13 @@ class CopyDbGuardTests(unittest.TestCase):
             "mailroom-daily-copy.sqlite",
         )
 
-    def test_interface_proof_refuses_sor_basename(self):
+    def test_interface_proof_allows_explicit_sor_when_gate_clear(self):
+        """Explicit mailroom.sqlite is db_mode=sor when the writer lock is free."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom.sqlite"
+            env = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}
+            env["MAILROOM_DB"] = str(db)
+            env["MAILROOM_WRITE_LOCK"] = str(Path(tmp) / "absent.write.lock")
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -388,13 +392,11 @@ class CopyDbGuardTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
-                env={**os.environ, "MAILROOM_DB": str(db)},
+                env=env,
             )
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("db_mode=refused", proc.stderr)
-        self.assertIn("mailroom.sqlite", proc.stderr)
-        self.assertIn("allowlist", proc.stderr)
-        self.assertNotIn("imap_newmail", proc.stdout)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("db_mode=sor", proc.stderr)
+        self.assertNotIn("db_mode=refused", proc.stderr)
         self.assertNotIn("db_mode=copy", proc.stderr)
 
     def test_interface_proof_accepts_copy_paths(self):
@@ -447,17 +449,27 @@ class CopyDbGuardTests(unittest.TestCase):
         self.assertIn("unset", proc.stderr)
         self.assertIn("explicit copy path", proc.stderr)
 
-    def test_negative_smoke_fails_if_guard_allows_sor_or_missing_allowlist(self):
-        """FAIL if the guard would allow mailroom.sqlite or has no allowlist."""
+    def test_negative_smoke_fails_if_unknown_passes_or_allowlist_missing(self):
+        """FAIL if unknown basenames pass or the allowlist disappears.
+
+        Explicit mailroom.sqlite is on the allowlist (db_mode=sor). It is
+        not a member of the copy-only basename set.
+        """
         self.assertTrue(hasattr(daily, "COPY_DB_BASENAMES"))
         self.assertIn("mailroom-copy.sqlite", daily.COPY_DB_BASENAMES)
         self.assertIn("mailroom-daily-copy.sqlite", daily.COPY_DB_BASENAMES)
         self.assertNotIn("mailroom.sqlite", daily.COPY_DB_BASENAMES)
-        self.assertFalse(daily.allowed_copy_db(Path("/x/mailroom.sqlite")))
+        self.assertIn("mailroom.sqlite", copy_db.ALLOWED_DB_BASENAMES)
+        self.assertTrue(daily.allowed_copy_db(Path("/x/mailroom.sqlite")))
         self.assertFalse(daily.allowed_copy_db(Path("/x/other.sqlite")))
+        self.assertEqual(
+            daily.resolve_driver_db("/x/mailroom.sqlite", Path("/tmp")).name,
+            "mailroom.sqlite",
+        )
+        self.assertEqual(daily.db_mode_for(Path("/x/mailroom.sqlite")), "sor")
         with self.assertRaises(daily.DailyRefuse) as ctx:
-            daily.resolve_driver_db("mailroom.sqlite", Path("/tmp"))
-        self.assertIn("mailroom.sqlite", str(ctx.exception))
+            daily.resolve_driver_db("other.sqlite", Path("/tmp"))
+        self.assertIn("other.sqlite", str(ctx.exception))
         with patch.dict(os.environ, {"MAILROOM_DB": ""}, clear=False):
             with self.assertRaises(daily.DailyRefuse):
                 daily.resolve_driver_db(None, Path("/tmp"))
@@ -465,6 +477,8 @@ class CopyDbGuardTests(unittest.TestCase):
         self.assertIn("resolve_driver_db", src)
         self.assertIn("DailyRefuse", src)
         self.assertIn("emit_db_mode", src)
+        self.assertIn("refuse_intended_sor_writer", src)
+        self.assertIn("refuse_destructive_cli", src)
         with patch.dict(os.environ, {"MAILROOM_DB": ""}, clear=False):
             self.assertIsNone(daily.default_db_path(Path("/tmp")))
 
@@ -627,18 +641,22 @@ class ChildDbHonorTests(unittest.TestCase):
             self.assertIn("env=%s" % copy, text)
             self.assertNotIn("mailroom.sqlite", text)
 
-    def test_interface_proof_helper_refuses_sor(self):
+    def test_interface_proof_helper_allows_explicit_sor(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom.sqlite"
+            env = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}
+            env["MAILROOM_WRITE_LOCK"] = str(Path(tmp) / "absent.write.lock")
             proc = subprocess.run(
                 [sys.executable, str(SCRIPTS / "mailroom_copy_db.py"), "--db", str(db)],
                 capture_output=True,
                 text=True,
                 check=False,
+                env=env,
             )
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("db_mode=refused", proc.stderr)
-        self.assertIn("mailroom.sqlite", proc.stderr)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("db_mode=sor", proc.stderr)
+        self.assertIn(str(db), proc.stdout)
+        self.assertNotIn("db_mode=refused", proc.stderr)
         self.assertNotIn("db_mode=copy", proc.stderr)
 
     def test_interface_proof_helper_accepts_copy_and_env(self):

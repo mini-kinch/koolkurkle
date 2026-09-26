@@ -150,29 +150,41 @@ class ChildHonorTests(unittest.TestCase):
 
 
 class ChildRefuseTests(unittest.TestCase):
-    """Negative smoke: SoR basename and unset fail closed."""
+    """Unset fails closed. Explicit SoR is db_mode=sor when the lock is free."""
 
-    def test_refuse_sor_basename_via_db_flag(self):
+    def _clear_env(self, tmp: str, db: Path | None = None) -> dict:
+        env = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}
+        env["MAILROOM_WRITE_LOCK"] = str(Path(tmp) / "absent.write.lock")
+        if db is not None:
+            env["MAILROOM_DB"] = str(db)
+        return env
+
+    def test_explicit_sor_basename_via_db_flag_is_sor_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / SOR
+            env = self._clear_env(tmp)
             for name in CHILD_NAMES:
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name), "--db", str(db)],
                     capture_output=True,
                     text=True,
                     check=False,
+                    env=env,
                 )
-                self.assertNotEqual(proc.returncode, 0, name)
-                self.assertEqual(proc.returncode, 2, name)
-                self.assertIn("db_mode=refused", proc.stderr)
-                self.assertIn(SOR, proc.stderr)
+                self.assertEqual(proc.returncode, 0, "%s %s" % (name, proc.stderr))
+                self.assertIn("db_mode=sor", proc.stderr)
+                self.assertNotIn("db_mode=refused", proc.stderr)
                 self.assertNotIn("db_mode=copy", proc.stderr)
-                self.assertNotIn("opened_db=", proc.stdout)
+                self.assertTrue(
+                    ("opened_db=%s" % db) in proc.stdout
+                    or ("opened_db=%s" % SOR) in proc.stdout,
+                    msg=proc.stdout,
+                )
 
-    def test_refuse_sor_basename_via_env(self):
+    def test_explicit_sor_basename_via_env_is_sor_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / SOR
-            env = {**os.environ, "MAILROOM_DB": str(db)}
+            env = self._clear_env(tmp, db)
             for name in CHILD_NAMES:
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name)],
@@ -181,9 +193,15 @@ class ChildRefuseTests(unittest.TestCase):
                     check=False,
                     env=env,
                 )
-                self.assertEqual(proc.returncode, 2, name)
-                self.assertIn("db_mode=refused", proc.stderr)
+                self.assertEqual(proc.returncode, 0, "%s %s" % (name, proc.stderr))
+                self.assertIn("db_mode=sor", proc.stderr)
+                self.assertNotIn("db_mode=refused", proc.stderr)
                 self.assertNotIn("db_mode=copy", proc.stderr)
+                self.assertTrue(
+                    ("opened_db=%s" % db) in proc.stdout
+                    or ("opened_db=%s" % SOR) in proc.stdout,
+                    msg=proc.stdout,
+                )
 
     def test_refuse_unset(self):
         env = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}

@@ -97,8 +97,9 @@ never opens live IMAP.
 4. **Read-only integrity / freshness / embed key** — labels only
    (`PRAGMA integrity_check`, `copy_age`, quote-strip generation
    key). No live SoR write. No live MBP→Mini copy.
-5. **Mini copy-only until promote GO** — unset / SoR stub
-   `mailroom.sqlite` remains `db_mode=refused`.
+5. **Mini copy-only until promote GO** — unset / unknown basename
+   remains `db_mode=refused`. Explicit `mailroom.sqlite` is `db_mode=sor`
+   only when named and rem-legacy is absent.
 6. **ask_mail** default is **history**; live is opt-in. No
    `purge` / `EXPUNGE` in this PR.
 7. **Soft-delete landmines** — never-purge; Deleted-folder ≠
@@ -120,7 +121,8 @@ After rem-legacy EXIT 0:
    plist. The checked-in template is not an enable of cutover.
 3. Do not change rem-legacy LaunchAgents.
 
-Mini stays copy-only until **promote GO**. Refuse the SoR stub.
+Mini stays copy-only until **promote GO**. Refuse the SoR stub unless
+it is explicitly named and rem-legacy is absent.
 Topology: **SoR=MBP until CoS says**; mlx generate localhost; MBP and
 Mini names only.
 
