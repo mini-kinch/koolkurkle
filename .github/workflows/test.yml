@@ -14,7 +14,42 @@ jobs:
           python-version: "3.12"
       - name: Install zsh (macos-slim scripts)
         run: sudo apt-get update && sudo apt-get install -y zsh
-      - name: Unit tests (no network, no IMAP, no Keychain)
+      - name: Unit tests, Ollama down (nothing on 11434)
+        env:
+          PYTHONPATH: tests
         run: python3 -m unittest discover -s tests -v
+      - name: Unit tests, Ollama up (stub on 127.0.0.1:11434)
+        env:
+          PYTHONPATH: tests
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH python3 tests/ollama_stub.py >/tmp/ollama-stub.log 2>&1 &
+          stub_pid=$!
+          cleanup() { kill "$stub_pid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          env -u PYTHONPATH python3 - << 'PY'
+          import socket
+          import sys
+          import time
+          deadline = time.time() + 5
+          while time.time() < deadline:
+              sock = socket.socket()
+              try:
+                  sock.settimeout(0.2)
+                  sock.connect(("127.0.0.1", 11434))
+              except OSError:
+                  time.sleep(0.05)
+              else:
+                  sock.close()
+                  sys.exit(0)
+              finally:
+                  try:
+                      sock.close()
+                  except OSError:
+                      pass
+          sys.stderr.write("ollama stub did not listen on 127.0.0.1:11434\n")
+          sys.exit(1)
+          PY
+          python3 -m unittest discover -s tests -v
       - name: Rerank CRM smoke (shape gate; fail-open-only without weights)
         run: python3 scripts/rerank_smoke.py

@@ -6,6 +6,7 @@ Local stub HTTP only. No real model, no mail, no home-directory paths.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import re
@@ -16,10 +17,19 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
+TESTS = ROOT / "tests"
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
+import ollama_guard  # noqa: E402
+
+ollama_guard.install()
+
 SCRIPT = ROOT / "scripts" / "path_a_bench.py"
 _LOGFMT_PATH = ROOT / "tests" / "path_a" / "watchdog_logfmt.py"
 FIXTURE = ROOT / "tests" / "fixtures" / "path_a" / "paste_4k_synthetic.txt"
@@ -767,29 +777,74 @@ class PathABenchTests(unittest.TestCase):
         self.assertEqual(changed_code, 1)
         self.assertIn("FAIL ask_mail sha256 changed start=aaa end=bbb", "\n".join(changed_lines))
 
+    def _mem_in_process(self, process: str, port: str):
+        """Run mem in-process with Ollama state injected. No TCP to port 11434."""
+        missing = self.tmp / "no-ask.py"
+        out = io.StringIO()
+        err = io.StringIO()
+        args = [
+            "mem",
+            "--ask-mail",
+            str(missing),
+            "--out",
+            str(self.tmp / "out.jsonl"),
+        ]
+        with mock.patch.object(
+            BENCH, "ollama_process_state", return_value=process
+        ) as process_mock, mock.patch.object(
+            BENCH, "ollama_port_state", return_value=port
+        ) as port_mock:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = BENCH.main(args)
+        blob = out.getvalue() + err.getvalue()
+        self.assertNotIn("Traceback", blob)
+        self.assertNotIn(USERS_PREFIX, blob)
+        self.assertNotIn(HOME_PREFIX, blob)
+        self.assertNotIn(ICLOUD_MARK, blob.lower())
+        self.assertNotIn(ME_MARK, blob.lower())
+        self.assertNotIn(SENTINEL, blob)
+        self.assertNotIn("Brindle Mercantile", blob)
+        self.assertNotIn("qwen-chat-down", blob)
+        self.assertNotIn("qwen-chat-up", blob)
+        self.assertTrue(process_mock.called)
+        self.assertTrue(port_mock.called)
+        return code, out.getvalue()
+
     def test_mem_cli_non_macos(self) -> None:
+        """Non-macOS mem sample with Ollama down. Swap stays UNKNOWN."""
         if sys.platform == "darwin":
             self.skipTest("host is macOS")
-        missing = self.tmp / "no-ask.py"
-        proc = self._run(
-            [
-                "mem",
-                "--ask-mail",
-                str(missing),
-                "--out",
-                str(self.tmp / "out.jsonl"),
-            ]
-        )
-        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
-        self.assertIn("UNKNOWN swap", proc.stdout)
-        self.assertIn("INFO vm_stat", proc.stdout)
-        self.assertIn("sha256=absent", proc.stdout)
-        self.assertIn("OVERALL FAIL", proc.stdout)
+        code, stdout = self._mem_in_process("down", "closed")
+        self.assertEqual(code, 1, msg=stdout)
+        self.assertIn("UNKNOWN swap", stdout)
+        self.assertIn("INFO vm_stat", stdout)
+        self.assertIn("sha256=absent", stdout)
+        self.assertIn("PASS ollama process=down port_11434=closed", stdout)
+        self.assertIn("OVERALL FAIL", stdout)
         row = self._rows()[0]
         self.assertEqual(row["kind"], "mem")
         self.assertEqual(row["swap_status"], "UNKNOWN")
+        self.assertEqual(row["ollama_process"], "down")
+        self.assertEqual(row["ollama_port"], "closed")
+        self.assertEqual(row["ollama_status"], "PASS")
         self.assertEqual(row["ask_mail_sha256_start"], "absent")
         self.assertEqual(row["ask_mail_sha256_end"], "absent")
+
+    def test_mem_cli_non_macos_ollama_up(self) -> None:
+        """Same non-macOS sample with Ollama up. Overall still fails on swap."""
+        if sys.platform == "darwin":
+            self.skipTest("host is macOS")
+        code, stdout = self._mem_in_process("up", "open")
+        self.assertEqual(code, 1, msg=stdout)
+        self.assertIn("UNKNOWN swap", stdout)
+        self.assertIn("INFO vm_stat", stdout)
+        self.assertIn("FAIL ollama process=up port_11434=open", stdout)
+        self.assertIn("OVERALL FAIL", stdout)
+        row = self._rows()[0]
+        self.assertEqual(row["swap_status"], "UNKNOWN")
+        self.assertEqual(row["ollama_process"], "up")
+        self.assertEqual(row["ollama_port"], "open")
+        self.assertEqual(row["ollama_status"], "FAIL")
 
     def _sorted_fixtures(self) -> list:
         return sorted(path.name for path in FIXTURES_DIR.glob("*.txt"))
