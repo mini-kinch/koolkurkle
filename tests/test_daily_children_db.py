@@ -44,6 +44,13 @@ COPY_B = "mailroom-daily-copy.sqlite"
 SOR = "mailroom.sqlite"
 
 
+def _opened_db_line(name, db):
+    """classify.py logs the basename; other children log the full path."""
+    if name == "classify.py":
+        return "opened_db=%s" % Path(db).name
+    return "opened_db=%s" % db
+
+
 class ArgvNoneHypothesisTests(unittest.TestCase):
     """bind_copy_db / parse_db_cli must see sys.argv[1:] when argv is None."""
 
@@ -118,7 +125,9 @@ class ChildHonorTests(unittest.TestCase):
                     )
                     self.assertEqual(proc.returncode, 0, proc.stderr)
                     self.assertIn("db_mode=copy", proc.stderr)
-                    self.assertIn("opened_db=%s" % db, proc.stdout)
+                    self.assertIn(_opened_db_line(name, db), proc.stdout)
+                    if name == "classify.py":
+                        self.assertNotIn(str(db), proc.stdout)
                     self.assertNotIn("db_mode=refused", proc.stderr)
 
     def test_cli_interface_proof_mailroom_db_env(self):
@@ -135,7 +144,9 @@ class ChildHonorTests(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("db_mode=copy", proc.stderr)
-                self.assertIn("opened_db=%s" % db, proc.stdout)
+                self.assertIn(_opened_db_line(name, db), proc.stdout)
+                if name == "classify.py":
+                    self.assertNotIn(str(db), proc.stdout)
 
 
 class ChildRefuseTests(unittest.TestCase):
