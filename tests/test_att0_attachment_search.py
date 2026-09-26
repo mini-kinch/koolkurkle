@@ -251,6 +251,88 @@ class SchemaMigrationTests(unittest.TestCase):
             mig.migrate_database(db, cmdlines=[], lock_held=False)
             self.assertEqual(_master(db), master_after)
 
+    def test_rerun_adds_uidvalidity_table_without_rewriting_rows(self):
+        """An older database is missing attachment_folder_uidvalidity.
+
+        Migrating again adds only that table. Existing attachment and scan
+        rows stay byte-for-byte the same, and a third run reports exists.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            first = mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertEqual(
+                first["tables"]["attachment_folder_uidvalidity"], "created"
+            )
+            conn = sqlite3.connect(str(db))
+            try:
+                conn.execute("DROP TABLE attachment_folder_uidvalidity")
+                conn.execute(
+                    "INSERT INTO attachments "
+                    "(message_id, part_id, filename, mime, size, sha256, status) "
+                    "VALUES ('msg-keep', '1', NULL, 'text/plain', 4, 'abc', 'meta')"
+                )
+                conn.execute(
+                    "INSERT INTO attachment_meta_scans "
+                    "(message_id, source, part_count, has_attachments, scanned_at) "
+                    "VALUES ('msg-keep', 'jsonl', 1, 0, '2026-01-01T00:00:00Z')"
+                )
+                conn.commit()
+                before_att = conn.execute(
+                    "SELECT * FROM attachments ORDER BY attachment_id"
+                ).fetchall()
+                before_scan = conn.execute(
+                    "SELECT * FROM attachment_meta_scans ORDER BY message_id"
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(len(before_att), 1)
+            second = mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertEqual(
+                second["tables"]["attachment_folder_uidvalidity"], "created"
+            )
+            self.assertEqual(second["tables"]["attachments"], "exists")
+            conn = sqlite3.connect(str(db))
+            try:
+                self.assertEqual(
+                    _cols(conn, "attachment_folder_uidvalidity"),
+                    ["folder", "uidvalidity"],
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM attachment_folder_uidvalidity"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT * FROM attachments ORDER BY attachment_id"
+                    ).fetchall(),
+                    before_att,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT * FROM attachment_meta_scans ORDER BY message_id"
+                    ).fetchall(),
+                    before_scan,
+                )
+            finally:
+                conn.close()
+            third = mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertEqual(
+                third["tables"]["attachment_folder_uidvalidity"], "exists"
+            )
+            self.assertEqual(third["tables"]["attachments"], "exists")
+            conn = sqlite3.connect(str(db))
+            try:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT * FROM attachments ORDER BY attachment_id"
+                    ).fetchall(),
+                    before_att,
+                )
+            finally:
+                conn.close()
+
     def test_refuses_mailroom_sqlite_without_flag_and_does_not_open_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "mailroom.sqlite"

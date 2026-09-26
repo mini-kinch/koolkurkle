@@ -12,11 +12,13 @@ import io
 import json
 import os
 import shutil
+import socket
 import sqlite3
 import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import tracemalloc
 import unittest
 from pathlib import Path
@@ -278,11 +280,16 @@ class _StubImap:
         return "OK", [b"1"]
 
     def response(self, code):
-        if str(code).upper() != "UIDVALIDITY":
-            return "OK", [None]
-        if self.uidvalidity is None:
-            return "OK", [None]
-        return "OK", [str(self.uidvalidity).encode("ascii")]
+        """Same shape as imaplib.IMAP4.response, which pops the untagged value.
+
+        Real imaplib returns ``('UIDVALIDITY', [b'42'])``, or
+        ``('UIDVALIDITY', [None])`` when the server did not send one.
+        The type is the response code, not ``OK``.
+        """
+        name = str(code).upper()
+        if name == "UIDVALIDITY" and self.uidvalidity is not None:
+            return "UIDVALIDITY", [str(int(self.uidvalidity)).encode("ascii")]
+        return name, [None]
 
     def fetch_bodystructure(self, uid):
         self.uids.append(uid)
@@ -293,6 +300,80 @@ class _StubImap:
         if str(uid) in self.structures:
             return self.structures[str(uid)]
         raise ValueError("unknown uid")
+
+
+def _imap_speak(conn, uidvalidity):
+    """One IMAP session. UIDVALIDITY is an untagged OK response code, or omitted."""
+    try:
+        conn.sendall(b"* OK ready\r\n")
+        buf = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return
+            buf += chunk
+            while b"\r\n" in buf:
+                line, buf = buf.split(b"\r\n", 1)
+                if not line:
+                    continue
+                tag, _, rest = line.partition(b" ")
+                cmd = rest.split(b" ", 1)[0].upper()
+                if cmd == b"CAPABILITY":
+                    conn.sendall(b"* CAPABILITY IMAP4rev1\r\n")
+                    conn.sendall(tag + b" OK CAPABILITY completed\r\n")
+                elif cmd == b"LOGIN":
+                    conn.sendall(tag + b" OK LOGIN completed\r\n")
+                elif cmd in (b"EXAMINE", b"SELECT"):
+                    conn.sendall(b"* 1 EXISTS\r\n")
+                    conn.sendall(b"* 0 RECENT\r\n")
+                    if uidvalidity is not None:
+                        token = str(int(uidvalidity)).encode("ascii")
+                        conn.sendall(b"* OK [UIDVALIDITY " + token + b"] UIDs valid\r\n")
+                    conn.sendall(tag + b" OK [READ-ONLY] EXAMINE completed\r\n")
+                elif cmd == b"LOGOUT":
+                    conn.sendall(b"* BYE logging out\r\n")
+                    conn.sendall(tag + b" OK LOGOUT completed\r\n")
+                    return
+                else:
+                    conn.sendall(tag + b" BAD unknown\r\n")
+    except Exception:
+        return
+
+
+def _serve_imap(uidvalidity):
+    """Local IMAP4 server on 127.0.0.1. Returns ``(port, stop, thread)``."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    listener.settimeout(0.5)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                conn, _addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            conn.settimeout(5)
+            try:
+                _imap_speak(conn, uidvalidity)
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+        try:
+            listener.close()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return port, stop, thread
 
 
 class ParserTests(unittest.TestCase):
@@ -881,7 +962,9 @@ class FillTests(unittest.TestCase):
                 return "OK", [b"1"]
 
             def response(self, code):
-                return "OK", [b"15"]
+                if str(code).upper() != "UIDVALIDITY":
+                    return str(code).upper(), [None]
+                return "UIDVALIDITY", [b"15"]
 
             def uid(self, command, uid, item):
                 seen["uid"] = (command, uid, item)
@@ -1446,7 +1529,9 @@ class FillTests(unittest.TestCase):
                 return "OK", [b"1"]
 
             def response(self, code):
-                return "OK", [b"7"]
+                if str(code).upper() != "UIDVALIDITY":
+                    return str(code).upper(), [None]
+                return "UIDVALIDITY", [b"7"]
 
         client = meta.ImapBodystructureClient(
             "imap.example.com",
@@ -1466,6 +1551,173 @@ class FillTests(unittest.TestCase):
             ],
         )
         self.assertEqual(client.uidvalidity, 7)
+
+    def test_uidvalidity_comes_from_real_imaplib(self):
+        """UIDVALIDITY is parsed from imaplib, not from a hand-written tuple.
+
+        A stub that returns ``('OK', [b'42'])`` used to pass. Real
+        ``IMAP4.response('UIDVALIDITY')`` returns ``('UIDVALIDITY', [b'42'])``
+        and ``('UIDVALIDITY', [None])`` after the value is popped or absent.
+        The old ``typ == 'OK'`` check raises ``imap uidvalidity missing`` here.
+        """
+        import imaplib
+
+        port, stop, thread = _serve_imap(42)
+
+        def factory(host, port_arg, timeout=None, ssl_context=None):
+            self.assertEqual(port_arg, 993)
+            return imaplib.IMAP4("127.0.0.1", port, timeout=5)
+
+        try:
+            probe = imaplib.IMAP4("127.0.0.1", port, timeout=5)
+            probe.login("user@example.com", "example-secret")
+            typ, _data = probe.select('"INBOX"', readonly=True)
+            self.assertEqual(typ, "OK")
+            got_typ, got_data = probe.response("UIDVALIDITY")
+            self.assertEqual(got_typ, "UIDVALIDITY")
+            self.assertEqual(got_data, [b"42"])
+            again_typ, again_data = probe.response("UIDVALIDITY")
+            self.assertEqual((again_typ, again_data), ("UIDVALIDITY", [None]))
+            probe.logout()
+
+            client = meta.ImapBodystructureClient(
+                "imap.example.com",
+                "user@example.com",
+                timeout=5,
+                imap_factory=factory,
+                password_fn=lambda: "example-secret",
+            )
+            with client:
+                client.select("INBOX")
+            self.assertEqual(client.uidvalidity, 42)
+        finally:
+            stop.set()
+            thread.join(timeout=3)
+
+        missing_port, missing_stop, missing_thread = _serve_imap(None)
+        try:
+            client = meta.ImapBodystructureClient(
+                "imap.example.com",
+                "user@example.com",
+                timeout=5,
+                imap_factory=lambda host, port_arg, timeout=None, ssl_context=None: (
+                    imaplib.IMAP4("127.0.0.1", missing_port, timeout=5)
+                ),
+                password_fn=lambda: "example-secret",
+            )
+            with client:
+                with self.assertRaises(RuntimeError) as ctx:
+                    client.select("INBOX")
+            self.assertIn("uidvalidity", str(ctx.exception))
+        finally:
+            missing_stop.set()
+            missing_thread.join(timeout=3)
+
+    def test_default_context_rejects_a_self_signed_certificate(self):
+        """meta_fill's create_default_context must reject a local self-signed cert."""
+        import imaplib
+
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            key = str(Path(tmp) / "key.pem")
+            cert = str(Path(tmp) / "cert.pem")
+            proc = subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    key,
+                    "-out",
+                    cert,
+                    "-days",
+                    "1",
+                    "-nodes",
+                    "-subj",
+                    "/CN=127.0.0.1",
+                    "-addext",
+                    "subjectAltName=IP:127.0.0.1",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0 or not Path(cert).is_file():
+                self.skipTest("could not generate a throwaway certificate")
+
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(5)
+            local_port = listener.getsockname()[1]
+            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_ctx.load_cert_chain(cert, key)
+
+            def serve():
+                try:
+                    conn, _addr = listener.accept()
+                except OSError:
+                    return
+                try:
+                    wrapped = server_ctx.wrap_socket(conn, server_side=True)
+                    wrapped.close()
+                except ssl.SSLError:
+                    pass
+                finally:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            seen = {}
+
+            def factory(host, port_arg, timeout=None, ssl_context=None):
+                seen["call"] = (host, port_arg, timeout, ssl_context)
+                return imaplib.IMAP4_SSL(
+                    "127.0.0.1",
+                    local_port,
+                    timeout=5,
+                    ssl_context=ssl_context,
+                )
+
+            created = []
+            real_context = ssl.create_default_context
+
+            def spy_context():
+                ctx = real_context()
+                created.append(ctx)
+                return ctx
+
+            try:
+                with mock.patch(
+                    "attachments.meta_fill.ssl.create_default_context", spy_context
+                ):
+                    client = meta.ImapBodystructureClient(
+                        "imap.example.com",
+                        "user@example.com",
+                        timeout=5,
+                        imap_factory=factory,
+                        password_fn=lambda: "example-secret",
+                    )
+                    with self.assertRaises(ssl.SSLCertVerificationError) as ctx:
+                        with client:
+                            pass
+                self.assertIn("CERTIFICATE_VERIFY_FAILED", str(ctx.exception))
+                self.assertEqual(seen["call"][:3], ("imap.example.com", 993, 5))
+                self.assertIs(seen["call"][3], created[0])
+                self.assertEqual(created[0].verify_mode, ssl.CERT_REQUIRED)
+                self.assertTrue(created[0].check_hostname)
+            finally:
+                thread.join(timeout=5)
+                try:
+                    listener.close()
+                except OSError:
+                    pass
 
     def test_max_parts_zero_is_not_a_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1502,12 +1754,22 @@ class FillTests(unittest.TestCase):
                         "Deleted Messages",
                     ),
                     ("ex-inbox", "imap-live", "7", None, None, "synthetic-inbox", "INBOX"),
+                    (
+                        "ex-inbox-2",
+                        "imap-live",
+                        "8",
+                        None,
+                        None,
+                        "synthetic-inbox-2",
+                        "INBOX",
+                    ),
                 ],
             )
             stub = _StubImap(
                 {
                     ("Deleted Messages", "7"): PLAIN_BS,
                     ("INBOX", "7"): PLAIN_BS,
+                    ("INBOX", "8"): PLAIN_BS,
                 }
             )
             stub.uidvalidity_by_folder = {"Deleted Messages": "10", "INBOX": "20"}
@@ -1518,9 +1780,12 @@ class FillTests(unittest.TestCase):
                 imap_client=stub,
                 cmdlines=[],
                 lock_held=False,
+                max_messages=0,
+                timeout_s=0,
             )
-            self.assertEqual(first["messages"], 2)
+            self.assertEqual(first["messages"], 3)
             self.assertEqual(first["uidvalidity_mismatch"], 0)
+            self.assertFalse(first["partial"])
             self.assertEqual(stub.events[0], ("select", "Deleted Messages", True))
             conn = sqlite3.connect(str(db))
             try:
@@ -1547,10 +1812,22 @@ class FillTests(unittest.TestCase):
                 imap_client=stub,
                 cmdlines=[],
                 lock_held=False,
+                max_messages=0,
+                timeout_s=0,
             )
-            self.assertEqual(second["uidvalidity_mismatch"], 1)
+            self.assertEqual(second["uidvalidity_mismatch"], 2)
             self.assertEqual(second["messages"], 1)
-            self.assertIn("uidvalidity_mismatch=1", meta.format_report(second))
+            self.assertEqual(second["eligible"], 3)
+            self.assertTrue(second["partial"])
+            self.assertEqual(
+                second["partial_banner"],
+                "PARTIAL: scanned 1 of 3 (uidvalidity_mismatch=2)",
+            )
+            text = meta.format_report(second)
+            self.assertTrue(
+                text.startswith("PARTIAL: scanned 1 of 3 (uidvalidity_mismatch=2)\n")
+            )
+            self.assertIn("uidvalidity_mismatch=2", text)
             conn = sqlite3.connect(str(db))
             try:
                 done = {
@@ -1569,6 +1846,7 @@ class FillTests(unittest.TestCase):
             self.assertEqual(done, {"ex-deleted"})
             self.assertEqual(kept["INBOX"], 20)
             self.assertNotIn("ex-inbox", done)
+            self.assertNotIn("ex-inbox-2", done)
 
     def test_keychain_env_cannot_redirect_the_password_fetch(self):
         calls = []
@@ -1773,7 +2051,9 @@ class CliTests(unittest.TestCase):
                     return "OK", [b"1"]
 
                 def response(self, code):
-                    return "OK", [b"8"]
+                    if str(code).upper() != "UIDVALIDITY":
+                        return str(code).upper(), [None]
+                    return "UIDVALIDITY", [b"8"]
 
                 def uid(self, command, uid, item):
                     logical = self.mailbox
@@ -1912,6 +2192,13 @@ class DesignAndBoundaryTests(unittest.TestCase):
         self.assertIn("Sent 34", text)
         self.assertIn("PYTHONPATH=scripts:scripts/attachments", text)
         self.assertIn("`raw`", text)
+        self.assertIn("does not create or alter", text)
+        self.assertIn("not at ingest", text)
+        self.assertIn("must be migrated again", text)
+        self.assertIn("uidvalidity_mismatch=N", text)
+        self.assertIn("67108864", text)
+        self.assertIn("128MB", text)
+        self.assertNotIn("raise --max-record-bytes to 64MB", text)
         for name in ("meta_fill.py", "bodystructure.py", "mime_meta.py"):
             source = (PKG / name).read_text(encoding="utf-8")
             self.assertNotIn("BODY[]", source, name)

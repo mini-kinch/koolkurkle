@@ -7,9 +7,11 @@ folder is selected read-only before its UID FETCH of ``(BODYSTRUCTURE)``.
 The connection is ``imaplib.IMAP4_SSL`` on port 993 with
 ``ssl.create_default_context()`` (``CERT_REQUIRED``, ``check_hostname``).
 Folder names are quoted before EXAMINE, including spaces, quotes, and
-backslashes. UIDVALIDITY from that response is stored per folder; a
-mismatch is flagged in ``uidvalidity_mismatch`` and those rows are not
-written. The password is read from macOS Keychain
+backslashes. UIDVALIDITY from that response is stored per folder on
+the first ``--apply`` fill, not at ingest. A mismatch is counted in
+``uidvalidity_mismatch`` (one per row, not per folder) and those rows
+are not written. The ``PARTIAL:`` banner includes
+``uidvalidity_mismatch=N``. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
 ``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
 with one legacy fallback. There is no password option and no password
@@ -25,8 +27,9 @@ filename column stays NULL. Refuses basename ``mailroom.sqlite`` unless
 ``--max-messages`` (default 200) and ``--timeout`` (default 30 seconds)
 can stop early. The summary then starts with a ``PARTIAL:`` banner and
 sets ``partial`` in the JSON summary. A full pass is
-``--max-messages 0 --timeout 0`` (0 means no cap) plus
-``--max-record-bytes 64MB`` when a record is larger than the default.
+``--max-messages 0 --timeout 0`` (0 means no cap).
+``--max-record-bytes`` defaults to 64 MiB (67108864). Pass a larger
+value, such as ``128MB``, to raise that cap.
 ``--max-parts 0`` means no part cap and is not ``capped``. A truncated
 tree increments ``parts_truncated``; ``has_attachments`` still reflects
 the full tree. ``--max-record-bytes`` accepts plain bytes or a human
@@ -203,16 +206,25 @@ def quote_imap_mailbox(name: str) -> str:
 
 
 def _uidvalidity_from_conn(conn: Any) -> int:
+    """Read UIDVALIDITY after EXAMINE or SELECT has returned.
+
+    ``IMAP4.response`` pops the untagged value collected during that
+    command. Real imaplib returns ``('UIDVALIDITY', [b'42'])``, or
+    ``('UIDVALIDITY', [None])`` when the server did not send one.
+    Call this once, immediately after ``select``, before anything else
+    calls ``response('UIDVALIDITY')``.
+    """
     responder = getattr(conn, "response", None)
     if responder is None:
         raise RuntimeError("imap uidvalidity missing")
     typ, data = responder("UIDVALIDITY")
-    if typ != "OK" or not data or data[0] in (None, b"", ""):
+    if typ != "UIDVALIDITY" or not data or data[0] in (None, b"", ""):
         raise RuntimeError("imap uidvalidity missing")
     raw = data[0]
     if isinstance(raw, bytes):
-        raw = raw.decode("ascii", "replace")
-    text = str(raw).strip()
+        text = raw.decode("ascii", "replace").strip()
+    else:
+        text = str(raw).strip()
     if not text.isdigit():
         raise RuntimeError("imap uidvalidity missing")
     return int(text)
@@ -716,6 +728,27 @@ def _note_partial(report: dict[str, Any], limit_text: str) -> None:
     else:
         report["partial"] = False
         report["partial_banner"] = ""
+    _attach_uidvalidity_banner(report)
+
+
+def _attach_uidvalidity_banner(report: dict[str, Any]) -> None:
+    """Put mismatched row counts on the PARTIAL banner."""
+    count = int(report.get("uidvalidity_mismatch") or 0)
+    if count <= 0:
+        return
+    tag = "uidvalidity_mismatch=%s" % count
+    banner = str(report.get("partial_banner") or "")
+    if banner:
+        if tag not in banner:
+            report["partial_banner"] = "%s %s" % (banner, tag)
+        report["partial"] = True
+        return
+    report["partial"] = True
+    report["partial_banner"] = "PARTIAL: scanned %s of %s (%s)" % (
+        _visited(report),
+        int(report.get("eligible") or 0),
+        tag,
+    )
 
 
 def _stop_for_limits(report, *, start, tick, timeout_s, max_messages) -> bool:
@@ -964,7 +997,7 @@ def fill_metadata(
                     if _note_uidvalidity(
                         conn, folder_name, int(client.uidvalidity), apply
                     ):
-                        report["uidvalidity_mismatch"] += 1
+                        report["uidvalidity_mismatch"] += len(group)
                         continue
                 except FillRefuse:
                     raise
@@ -1038,6 +1071,7 @@ def fill_metadata(
         conn.close()
     report["skipped"] = skipped_other
     report["bytes_stored"] = 0
+    _attach_uidvalidity_banner(report)
     return report
 
 
@@ -1079,7 +1113,9 @@ def build_parser() -> argparse.ArgumentParser:
             "ATT-0 metadata-only attachment fill. Default is dry-run counts. "
             "Refuses basename mailroom.sqlite unless --allow-mailroom-sqlite. "
             "Does not store part bytes. "
-            "A full pass is --max-messages 0 --timeout 0 --max-record-bytes 64MB. "
+            "A full pass is --max-messages 0 --timeout 0. "
+            "--max-record-bytes defaults to 64MB; pass a larger value "
+            "such as 128MB to raise it. "
             "The summary prints capped: N separate from scanned and skipped. "
             "Defaults still print a PARTIAL banner when rows remain."
         )
