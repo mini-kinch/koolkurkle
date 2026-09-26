@@ -281,11 +281,11 @@ class RuleOrderTests(unittest.TestCase):
                 ("unknown", 0, 0, "p90_unknown"),
             ),
             (
-                "pcn_prefix_is_case_sensitive",
+                "pcn_prefix_is_case_insensitive",
                 "Person <a@example.com>",
                 "PCN - examplekeyword",
                 "INBOX",
-                ("unknown", 0, 0, "p90_unknown"),
+                ("people", 0, 0, "pcn_examplekeyword"),
             ),
             (
                 "folder_junk",
@@ -309,6 +309,21 @@ class RuleOrderTests(unittest.TestCase):
                 self.assertEqual(got, expected)
                 seen.add(got[3])
         self.assertTrue(REQUIRED_RULES <= seen)
+
+    def test_pcn_prefix_matches_any_case(self):
+        r, count = classify.parse_rules({"pcn_keywords": ["death"]})
+        self.assertEqual(count, 1)
+        expected = ("people", 0, 0, "pcn_death")
+        for subject in ("PCN - Death notice", "pcn - death notice", "Pcn- death"):
+            with self.subTest(subject=subject):
+                self.assertEqual(
+                    classify.classify("a@example.com", subject, "INBOX", rules=r),
+                    expected,
+                )
+        self.assertEqual(
+            classify.classify("a@example.com", "PCN - Birthday", "INBOX", rules=r),
+            ("unknown", 0, 0, "p90_unknown"),
+        )
 
 
 class SqliteFixtureTests(unittest.TestCase):
