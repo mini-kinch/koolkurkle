@@ -8,6 +8,7 @@ argv=None → sys.argv[1:]; children open copy DB; refuse SoR stub.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -81,7 +82,7 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
             db = Path(tmp) / COPY_B
             for mod in CHILD_MODULES:
                 with self.subTest(mod=mod.__name__):
-                    rc = mod.main(["--db", str(db)])
+                    rc = _invoke_child(mod, ["--db", str(db)])
                     self.assertEqual(rc, 0)
                     self.assertEqual(os.environ.get("MAILROOM_DB"), str(db))
                     self.assertEqual(Path(os.environ["MAILROOM_DB"]).name, COPY_B)
@@ -90,6 +91,8 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / COPY_A
             for name in CHILD_NAMES:
+                if name == "notify_bills.py":
+                    _seed_notify_bills_db(db)
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name), "--db", str(db)],
                     capture_output=True,
@@ -98,7 +101,10 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("db_mode=copy", proc.stderr)
-                self.assertIn(_opened_db_line(name, db), proc.stdout)
+                opened = _opened_db_line(name, db)
+                if name == "notify_bills.py":
+                    opened = "opened_db=%s" % Path(db).name
+                self.assertIn(opened, proc.stdout)
                 if name == "classify.py":
                     self.assertNotIn(str(db), proc.stdout)
                 self.assertNotIn("db_mode=refused", proc.stderr)
@@ -111,6 +117,8 @@ class ExplicitSorBasenameTests(unittest.TestCase):
             env_base = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}
             env_base["MAILROOM_WRITE_LOCK"] = str(Path(tmp) / "absent.write.lock")
             for name in CHILD_NAMES:
+                if name == "notify_bills.py":
+                    _seed_notify_bills_db(stub)
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name), "--db", str(stub)],
                     capture_output=True,
@@ -150,6 +158,34 @@ class BindCopyDbOpsPointerTests(unittest.TestCase):
         ops = OPS.read_text(encoding="utf-8")
         self.assertIn("Refuse the SoR stub", ops)
         self.assertIn("Tests only; no live SoR open", ops)
+
+
+def _seed_notify_bills_db(path):
+    """Empty bills table so the digest exits quiet. No Keychain, no Messages."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bills ("
+            "vendor TEXT, due_date TEXT, account_hint TEXT, "
+            "amount_cents INTEGER, status TEXT)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _invoke_child(mod, argv):
+    """notify_bills.main reads sys.argv and needs a bills table to stay quiet."""
+    if mod.__name__ != "notify_bills":
+        return mod.main(argv)
+    if "--db" in argv:
+        db_arg = argv[argv.index("--db") + 1]
+    else:
+        db_arg = os.environ.get("MAILROOM_DB")
+    if db_arg:
+        _seed_notify_bills_db(Path(db_arg))
+    with patch.object(sys, "argv", ["notify_bills.py"] + list(argv)):
+        return notify_bills.main()
 
 
 if __name__ == "__main__":
