@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS attachment_meta_scans (
   scanned_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS attachment_folder_uidvalidity (
+  folder TEXT PRIMARY KEY,
+  uidvalidity INTEGER NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS attachment_chunks_fts USING fts5(
   text,
   content='attachment_chunks',
