@@ -3,9 +3,24 @@
 
 Refuses a database named mailroom.sqlite unless --allow-mailroom-sqlite
 is passed, then still calls sor_writer_gate.refuse_if_sor_writer_conflict
-and refuse_destructive.refuse_destructive_cli. Does not ALTER or DROP
-pre-existing tables. Does not touch message_embeddings. Does not apply
-itself to a system of record.
+and refuse_destructive.refuse_destructive_cli. Does not touch
+message_embeddings. Does not apply itself to a system of record.
+
+attachments
+  An existing attachments table whose columns already match ATT-0 is
+  left in place. A mismatched attachments table with zero rows is
+  renamed to attachments_pr1_empty (the old definition is kept; there
+  are no rows to drop) and the ATT-0 table is created. The known empty
+  PR-1 sketch is columns id, message_id, filename, mime_type,
+  size_bytes, content_hash, path, created_at. Any other empty mismatch
+  is renamed the same way. A mismatched attachments table with one or
+  more rows is a loud refuse: nothing is renamed, altered, or dropped,
+  and attachment_meta_scans is not created. Data is never dropped.
+  If attachments_pr1_empty already exists, an empty mismatch is also
+  a refuse.
+
+  A successful run, including the empty-rename path, creates
+  attachment_meta_scans with the rest of the schema.
 
   python3 scripts/attachments/migrate_att0_schema.py --db /tmp/mailroom-copy.sqlite
   python3 scripts/attachments/migrate_att0_schema.py --db /tmp/mailroom.sqlite
@@ -71,6 +86,20 @@ EXPECTED_COLUMNS = {
         "scanned_at",
     ],
 }
+
+# Known empty PR-1 sketch. Any empty column mismatch is renamed, not only this list.
+LEGACY_ATTACHMENTS_COLUMNS = [
+    "id",
+    "message_id",
+    "filename",
+    "mime_type",
+    "size_bytes",
+    "content_hash",
+    "path",
+    "created_at",
+]
+RENAMED_ATTACHMENTS = "attachments_pr1_empty"
+_RENAME_ATTACHMENTS_SQL = 'ALTER TABLE "attachments" RENAME TO "attachments_pr1_empty"'
 
 OWNED_EXACT = {
     "attachments",
@@ -173,6 +202,38 @@ def _user_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
+def _rename_empty_mismatched_attachments(conn: sqlite3.Connection) -> str:
+    """Rename an empty mismatched attachments table, or refuse if it has rows.
+
+    Returns ``renamed_empty`` or ``unchanged``. Never drops rows.
+    """
+    if not _table_exists(conn, "attachments"):
+        return "unchanged"
+    kind = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='attachments' LIMIT 1"
+    ).fetchone()
+    if kind is None or str(kind[0]) != "table":
+        raise MigrateRefuse(
+            "refuse: attachments exists and is not a table; will not drop data"
+        )
+    found = _columns(conn, "attachments")
+    if found == EXPECTED_COLUMNS["attachments"]:
+        return "unchanged"
+    count = int(conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0])
+    if count != 0:
+        raise MigrateRefuse(
+            "refuse: attachments already exists with a different column list "
+            "and %d row(s); will not alter or drop data" % count
+        )
+    if _table_exists(conn, RENAMED_ATTACHMENTS):
+        raise MigrateRefuse(
+            "refuse: empty mismatched attachments cannot be renamed; "
+            "attachments_pr1_empty already exists; will not drop data"
+        )
+    conn.execute(_RENAME_ATTACHMENTS_SQL)
+    return "renamed_empty"
+
+
 def _refuse_shape(conn: sqlite3.Connection) -> None:
     for table, expected in EXPECTED_COLUMNS.items():
         if not _table_exists(conn, table):
@@ -211,6 +272,7 @@ def _ensure_triggers(conn: sqlite3.Connection) -> None:
 def _apply_schema(conn: sqlite3.Connection) -> dict[str, Any]:
     if not SCHEMA_SQL.is_file():
         raise MigrateRefuse("schema sql is missing")
+    legacy = _rename_empty_mismatched_attachments(conn)
     _refuse_shape(conn)
     before_master = _protected_snapshot(conn)
     before_embed = _embeddings_fingerprint(conn)
@@ -240,6 +302,7 @@ def _apply_schema(conn: sqlite3.Connection) -> dict[str, Any]:
         "fts": "ensured",
         "message_embeddings": "untouched" if before_embed[0] == "present" else "absent",
         "user_version": before_uv,
+        "legacy_attachments": legacy,
     }
     return report
 
@@ -290,6 +353,7 @@ def format_report(report: dict[str, Any]) -> str:
         "message_embeddings=%s" % report.get("message_embeddings"),
         "user_version=%s" % report.get("user_version"),
         "fts=%s" % report.get("fts"),
+        "legacy_attachments=%s" % report.get("legacy_attachments"),
     ]
     tables = report.get("tables") or {}
     for name in EXPECTED_COLUMNS:

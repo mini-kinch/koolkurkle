@@ -380,11 +380,109 @@ class SchemaMigrationTests(unittest.TestCase):
                     for item in conn.execute("SELECT name FROM sqlite_master")
                 }
                 self.assertNotIn("attachment_extracts", names)
+                self.assertNotIn("attachment_meta_scans", names)
+                self.assertNotIn("attachments_pr1_empty", names)
                 self.assertEqual(
                     conn.execute(
                         "SELECT embedding FROM message_embeddings"
                     ).fetchone()[0],
                     b"\xde\xad\xbe\xef",
+                )
+            finally:
+                conn.close()
+
+    def test_empty_legacy_attachments_is_renamed_and_meta_scans_created(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            conn = sqlite3.connect(str(db))
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE attachments (
+                      id TEXT PRIMARY KEY,
+                      message_id TEXT NOT NULL,
+                      filename TEXT,
+                      mime_type TEXT,
+                      size_bytes INTEGER,
+                      content_hash TEXT,
+                      path TEXT,
+                      created_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE TABLE message_embeddings (message_id TEXT PRIMARY KEY, embedding BLOB)"
+                )
+                conn.execute(
+                    "INSERT INTO message_embeddings (message_id, embedding) "
+                    "VALUES ('keep', X'deadbeef')"
+                )
+                conn.execute("PRAGMA user_version=7")
+                conn.commit()
+            finally:
+                conn.close()
+            self.assertEqual(
+                mig.LEGACY_ATTACHMENTS_COLUMNS,
+                [
+                    "id",
+                    "message_id",
+                    "filename",
+                    "mime_type",
+                    "size_bytes",
+                    "content_hash",
+                    "path",
+                    "created_at",
+                ],
+            )
+            report = mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertEqual(report["legacy_attachments"], "renamed_empty")
+            self.assertEqual(report["tables"]["attachments"], "created")
+            self.assertEqual(report["tables"]["attachment_meta_scans"], "created")
+            self.assertEqual(report["user_version"], 7)
+            self.assertEqual(report["message_embeddings"], "untouched")
+            conn = sqlite3.connect(str(db))
+            try:
+                self.assertEqual(
+                    _cols(conn, "attachments"), mig.EXPECTED_COLUMNS["attachments"]
+                )
+                self.assertEqual(
+                    _cols(conn, "attachments_pr1_empty"),
+                    mig.LEGACY_ATTACHMENTS_COLUMNS,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM attachments_pr1_empty"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    _cols(conn, "attachment_meta_scans"),
+                    mig.EXPECTED_COLUMNS["attachment_meta_scans"],
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT embedding FROM message_embeddings"
+                    ).fetchone()[0],
+                    b"\xde\xad\xbe\xef",
+                )
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
+            finally:
+                conn.close()
+            again = mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertEqual(again["legacy_attachments"], "unchanged")
+            self.assertEqual(again["tables"]["attachments"], "exists")
+            self.assertEqual(again["tables"]["attachment_meta_scans"], "exists")
+            conn = sqlite3.connect(str(db))
+            try:
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM attachments_pr1_empty"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    _cols(conn, "attachments_pr1_empty"),
+                    mig.LEGACY_ATTACHMENTS_COLUMNS,
                 )
             finally:
                 conn.close()
@@ -979,7 +1077,19 @@ class HermeticBoundaryTests(unittest.TestCase):
             self.assertNotIn("embed_lib", text, path.name)
             self.assertNotIn("11434", text, path.name)
             self.assertNotIn("DROP TABLE", text.upper(), path.name)
-            self.assertNotIn("ALTER TABLE", text.upper(), path.name)
+            if path.name == "migrate_att0_schema.py":
+                alters = [
+                    line.strip()
+                    for line in text.splitlines()
+                    if "ALTER TABLE" in line.upper()
+                ]
+                self.assertEqual(len(alters), 1, alters)
+                self.assertIn(
+                    'ALTER TABLE "attachments" RENAME TO "attachments_pr1_empty"',
+                    alters[0],
+                )
+            else:
+                self.assertNotIn("ALTER TABLE", text.upper(), path.name)
             self.assertNotIn("ask_mail", text, path.name)
         ask = ASK.read_text(encoding="utf-8")
         self.assertIn("def ", ask)

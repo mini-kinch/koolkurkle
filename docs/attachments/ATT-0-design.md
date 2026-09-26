@@ -70,7 +70,15 @@ The script loads that SQL. It is idempotent (`IF NOT EXISTS`, triggers created o
 
 `timings` is a JSON text blob (`elapsed_ms`, and `bytes` when known).
 
-If `attachments`, `attachment_extracts`, or `attachment_chunks` already exists with a different column list, the script raises and does not `ALTER` or `DROP`. The PR-1 sketch of `attachments` (`id`, `mime_type`, `size_bytes`, `content_hash`, `path`, …) is a different table of the same name. ATT-0 will not reshape it. Apply ATT-0 only to a database that does not already have that table. This packet does not apply it at all.
+If `attachment_extracts` or `attachment_chunks` already exists with a different column list, the script raises and does not change that table.
+
+`attachments` may already exist as the PR-1 sketch: columns `id`, `message_id`, `filename`, `mime_type`, `size_bytes`, `content_hash`, `path`, `created_at`, in that order. Behavior:
+
+- **Empty mismatch.** If `attachments` exists, its columns are not the ATT-0 list, and it has **zero rows**, the script renames it to `attachments_pr1_empty` and then creates the ATT-0 `attachments` table. The old definition is kept under the new name. There is nothing to drop. Any other empty column mismatch is renamed the same way, not only the PR-1 sketch. The rest of the schema, including `attachment_meta_scans`, is created in that same run.
+- **Non-empty mismatch.** If the mismatched table has one or more rows, the script refuses loudly and leaves every object untouched. It does not rename, alter, or drop. The rows stay. `attachment_meta_scans` is not created on that failure.
+- **Rename target already present.** If `attachments_pr1_empty` already exists, an empty mismatch is also a refuse. `attachments` is left as it is.
+
+Data is never dropped. A later run, after a successful rename, sees the ATT-0 column list and does not rename again. This packet still does not apply the migration to a live database.
 
 After DDL, the script compares `sqlite_master` for every object it does not own, and it compares the `message_embeddings` SQL (and row count when the table can be counted). A change there is a hard refuse.
 
@@ -161,7 +169,9 @@ Script: `scripts/attachments/meta_fill.py`. It does not create schema and it doe
 
 ### Option 1 — IMAP rows (`source='imap-live'`)
 
-`--source imap`. For each unscanned row, UID FETCH the item `(BODYSTRUCTURE)` and parse the MIME tree. No body section is requested. Host, user, and password come from `--host`, `--user`, `--password` or from `MAILROOM_IMAP_HOST`, `MAILROOM_IMAP_USER`, `MAILROOM_IMAP_PASSWORD`. Optional port is `MAILROOM_IMAP_PORT` (default 143). Mailbox is `--mailbox` or `MAILROOM_IMAP_MAILBOX` (default `INBOX`). There is no default host. The password is not written to the report, the database, or the repository. Tests pass a stub client. Nothing in this packet connects to a real mailbox.
+`--source imap`. UIDs are unique only inside one folder. The filler groups unscanned `source='imap-live'` rows by `messages.folder` and issues `SELECT` (readonly) for that folder before UID FETCH of `(BODYSTRUCTURE)` for its rows. The same UID in two folders is two rows. `--mailbox` (or `MAILROOM_IMAP_MAILBOX`) limits the run to one folder. Omit it to select every folder that still has unscanned rows. A row with no folder is an error and is not marked scanned.
+
+The connection is `imaplib.IMAP4_SSL` on port 993. Plain IMAP is not constructed. Host and user come from `--host` / `--user` or `MAILROOM_IMAP_HOST` / `MAILROOM_IMAP_USER`. There is no password option and no password environment variable. The password is read from macOS Keychain the same way `scripts/run_mailroom_daily.sh` loads it for the IMAP scripts: `security find-generic-password -s mailroom.imap.app-password -w`, with one fallback to `mailroom.icloud.app-password` when the default item misses. The helper is `scripts/imap_keychain.py`. The password is not written to the report, the database, or the repository. Tests mock `imaplib.IMAP4_SSL` and the Keychain call. Nothing in this packet connects to a real mailbox.
 
 ### Option 2 — archive rows (JSONL dump)
 
@@ -188,7 +198,9 @@ A body-only message still gets an `attachment_meta_scans` row (`has_attachments`
 
 `attachment_meta_scans.message_id` is the resume key. A later run skips that message, so turning the flag on later does **not** backfill names. The same is true of `max_parts`: a truncated tree is marked scanned. Choose both before the first apply.
 
-A record longer than `--max-record-bytes` (default 2,000,000) is not parsed from a short slice, is counted as capped, and is **not** marked scanned, so a later higher cap can retry. A parse error, a missing UID, or a bad offset is an error and is not marked scanned. `--max-messages` (default 200) and `--timeout` (default 30 seconds) stop before the next message. Rows already committed stay. The report's `stopped` value is `max_messages` or `timeout`, and the process exit code is 0. `scanned` in the report is how many matching rows were already in `attachment_meta_scans` and were skipped.
+A record longer than `--max-record-bytes` (default 64 MiB, 67108864 bytes) is not parsed from a short slice, is counted in `skipped`, and is **not** marked scanned, so a later higher cap can retry. The dump is not loaded. Each row seeks to `jsonl_offset` and reads at most one record. Peak memory is that record plus the decoded RFC822 text while both are alive, about twice the record size, so about 128 MiB when a record sits at the 64 MiB cap. Both buffers are released before the next row.
+
+A parse error, a missing UID, or a bad offset is an error and is not marked scanned. `--max-messages` (default 200) and `--timeout` (default 30 seconds) stop before the next message. Those defaults do not cover the whole mailbox. When the run stops early and rows remain, the text summary starts with a loud banner `PARTIAL: scanned X of Y (limit max_messages=…)` or `PARTIAL: scanned X of Y (limit timeout=…)`, and the JSON summary sets `partial` to true. X is how many eligible rows this run handled. Y is the eligible rows at the start of the run (after a mailbox filter). Rows already committed stay. The process exit code is still 0. `scanned` in the report is how many matching rows were already in `attachment_meta_scans` and were skipped. `skipped` is the oversize-record count.
 
 ### Writer rules
 
@@ -198,7 +210,7 @@ Both options are writers, including dry-run:
 - Basename `mailroom.sqlite` is refused unless `--allow-mailroom-sqlite`, **before** a connection, including dry-run. The writer gate still runs after that flag.
 - The database file must already exist. A missing path exits 2 and does not create a file.
 - Default is dry-run (counts only). `--apply` writes. Passing both exits 2.
-- Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `stopped`.
+- Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `eligible`, `stopped`, `capped`, `skipped`, `errors`, `partial`. When `partial` is true the first line is the `PARTIAL:` banner. The same object is printed as one JSON object on the `summary_json=` line.
 - Each apply commits one message: part rows, `has_attachments`, and the scan row, together. A second apply does not insert those parts again.
 
 ### Live run needs a separate approval

@@ -25,6 +25,7 @@ import attachments.bodystructure as bodystructure  # noqa: E402
 import attachments.meta_fill as meta  # noqa: E402
 import attachments.migrate_att0_schema as mig  # noqa: E402
 import attachments.mime_meta as mime_meta  # noqa: E402
+import imap_keychain  # noqa: E402
 from refuse_destructive import DestructiveRefuse  # noqa: E402
 from sor_writer_gate import SorWriterRefuse  # noqa: E402
 
@@ -146,6 +147,7 @@ def _seed(db: Path, rows: list[tuple]) -> None:
             CREATE TABLE messages (
               id TEXT PRIMARY KEY,
               source TEXT NOT NULL,
+              folder TEXT,
               uid TEXT,
               jsonl_offset INTEGER,
               jsonl_len INTEGER,
@@ -168,10 +170,12 @@ def _seed(db: Path, rows: list[tuple]) -> None:
             "VALUES ('keep', X'deadbeef', 'live')"
         )
         for row in rows:
+            if len(row) == 6:
+                row = tuple(row) + (None,)
             conn.execute(
                 "INSERT INTO messages "
-                "(id, source, uid, jsonl_offset, jsonl_len, subject) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, source, uid, jsonl_offset, jsonl_len, subject, folder) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 row,
             )
         conn.commit()
@@ -251,12 +255,23 @@ class _StubImap:
     def __init__(self, structures):
         self.structures = structures
         self.uids = []
+        self.events = []
+        self.mailbox = None
+
+    def select(self, mailbox, readonly=True):
+        self.mailbox = mailbox
+        self.events.append(("select", mailbox, readonly))
+        return "OK", [b"1"]
 
     def fetch_bodystructure(self, uid):
         self.uids.append(uid)
-        if uid not in self.structures:
-            raise ValueError("unknown uid")
-        return self.structures[uid]
+        self.events.append(("fetch", self.mailbox, str(uid)))
+        key = (self.mailbox, str(uid))
+        if key in self.structures:
+            return self.structures[key]
+        if str(uid) in self.structures:
+            return self.structures[str(uid)]
+        raise ValueError("unknown uid")
 
 
 class ParserTests(unittest.TestCase):
@@ -353,8 +368,8 @@ class FillTests(unittest.TestCase):
         _seed(
             db,
             [
-                ("ex-mixed", "jsonl-import", None, first[0], first[1], "synthetic-mixed"),
-                ("ex-plain", "jsonl-import", None, second[0], second[1], "synthetic-plain"),
+                ("ex-mixed", "jsonl-import", None, first[0], first[1], "synthetic-mixed", None),
+                ("ex-plain", "jsonl-import", None, second[0], second[1], "synthetic-plain", None),
             ],
         )
         return db, dump
@@ -364,8 +379,8 @@ class FillTests(unittest.TestCase):
         _seed(
             db,
             [
-                ("ex-mixed", "imap-live", "1001", None, None, "synthetic-mixed"),
-                ("ex-plain", "imap-live", "1002", None, None, "synthetic-plain"),
+                ("ex-mixed", "imap-live", "1001", None, None, "synthetic-mixed", "INBOX"),
+                ("ex-plain", "imap-live", "1002", None, None, "synthetic-plain", "INBOX"),
             ],
         )
         stub = _StubImap({"1001": MIXED_BS, "1002": PLAIN_BS})
@@ -390,7 +405,6 @@ class FillTests(unittest.TestCase):
                     apply=False,
                     cmdlines=[],
                     lock_held=True,
-                    password=SECRET,
                 )
             self.assertEqual(_counts(db), before)
             self.assertEqual(_embed(db), embeds)
@@ -424,7 +438,6 @@ class FillTests(unittest.TestCase):
                     cmdlines=[],
                     lock_held=False,
                     now=lambda: "2026-01-01T00:00:00Z",
-                    password=SECRET,
                 )
                 mid = _counts(db)
                 second = meta.fill_metadata(
@@ -512,9 +525,16 @@ class FillTests(unittest.TestCase):
                     store_filenames=False,
                     cmdlines=[],
                     lock_held=False,
-                    password=SECRET,
                 )
             self.assertEqual(stub.uids, ["1001", "1002"])
+            self.assertEqual(
+                stub.events,
+                [
+                    ("select", "INBOX", True),
+                    ("fetch", "INBOX", "1001"),
+                    ("fetch", "INBOX", "1002"),
+                ],
+            )
             self.assertEqual(report["has_attachments"], 1)
             self.assertEqual(report["filenames"], 0)
             self.assertEqual(report["bytes_stored"], 0)
@@ -615,8 +635,10 @@ class FillTests(unittest.TestCase):
                 cmdlines=[],
                 lock_held=False,
             )
-            self.assertEqual(capped["capped"], 2)
+            self.assertEqual(capped["capped"], 0)
+            self.assertEqual(capped["skipped"], 2)
             self.assertEqual(capped["messages"], 0)
+            self.assertIn("skipped=2", meta.format_report(capped))
             conn = sqlite3.connect(str(db))
             try:
                 scans = conn.execute(
@@ -812,10 +834,16 @@ class FillTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(stored, 0)
 
-    def test_client_fetches_structure_only(self):
+    def test_client_fetches_structure_only_over_ssl(self):
         seen = {}
+        plain_calls = []
 
-        class FakeIMAP:
+        class PlainIMAP:
+            def __init__(self, *args, **kwargs):
+                plain_calls.append((args, kwargs))
+                raise AssertionError("plain IMAP4")
+
+        class FakeSSL:
             def __init__(self, host, port, timeout=None):
                 seen["init"] = (host, port, timeout)
 
@@ -840,28 +868,279 @@ class FillTests(unittest.TestCase):
         def boom(*_args, **_kwargs):
             raise AssertionError("network is forbidden")
 
-        with mock.patch("socket.create_connection", boom):
+        with mock.patch("socket.create_connection", boom), mock.patch(
+            "attachments.meta_fill.imaplib.IMAP4", PlainIMAP
+        ), mock.patch("attachments.meta_fill.imaplib.IMAP4_SSL", FakeSSL), mock.patch(
+            "attachments.meta_fill.read_imap_app_password", return_value=SECRET
+        ):
             client = meta.ImapBodystructureClient(
                 "imap.example.com",
                 "user@example.com",
-                SECRET,
-                port=143,
-                mailbox="INBOX",
                 timeout=5,
-                imap_factory=FakeIMAP,
             )
             with client:
+                client.select("INBOX", readonly=True)
                 text = client.fetch_bodystructure("9")
+        self.assertEqual(plain_calls, [])
+        self.assertEqual(seen["init"], ("imap.example.com", 993, 5))
         self.assertEqual(seen["uid"], ("FETCH", "9", "(BODYSTRUCTURE)"))
         self.assertEqual(seen["select"], ("INBOX", True))
         self.assertEqual(seen["login"][1], SECRET)
         self.assertNotIn(SECRET, text)
         self.assertTrue(seen["logout"])
         source = (PKG / "meta_fill.py").read_text(encoding="utf-8")
-        self.assertIn("imaplib.IMAP4", source)
-        self.assertNotIn("IMAP4_SSL", source)
+        self.assertIn("IMAP4_SSL", source)
         self.assertNotIn("BODY[]", source)
         self.assertNotIn("BODY.PEEK", source)
+        self.assertNotIn("MAILROOM_IMAP_PASSWORD", source)
+        self.assertNotIn('"--password"', source)
+        self.assertNotIn("'--password'", source)
+        dests = {action.dest for action in meta.build_parser()._actions}
+        self.assertNotIn("password", dests)
+        self.assertNotIn("port", dests)
+
+    def test_same_uid_in_two_folders_selects_each(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [
+                    ("ex-archive", "imap-live", "42", None, None, "synthetic-archive", "Archive"),
+                    ("ex-inbox", "imap-live", "42", None, None, "synthetic-inbox", "INBOX"),
+                ],
+            )
+            stub = _StubImap(
+                {
+                    ("Archive", "42"): MIXED_BS,
+                    ("INBOX", "42"): PLAIN_BS,
+                }
+            )
+
+            def boom(*_args, **_kwargs):
+                raise AssertionError("network is forbidden")
+
+            with mock.patch("socket.create_connection", boom):
+                report = meta.fill_metadata(
+                    db,
+                    source="imap",
+                    apply=True,
+                    imap_client=stub,
+                    cmdlines=[],
+                    lock_held=False,
+                )
+            self.assertEqual(
+                stub.events,
+                [
+                    ("select", "Archive", True),
+                    ("fetch", "Archive", "42"),
+                    ("select", "INBOX", True),
+                    ("fetch", "INBOX", "42"),
+                ],
+            )
+            self.assertEqual(report["messages"], 2)
+            self.assertEqual(report["eligible"], 2)
+            self.assertEqual(report["has_attachments"], 1)
+            self.assertFalse(report["partial"])
+            self.assertEqual(report["bytes_stored"], 0)
+            conn = sqlite3.connect(str(db))
+            try:
+                flags = dict(
+                    conn.execute(
+                        "SELECT id, has_attachments FROM messages ORDER BY id"
+                    ).fetchall()
+                )
+                counts = dict(
+                    conn.execute(
+                        "SELECT message_id, COUNT(*) FROM attachments GROUP BY message_id"
+                    ).fetchall()
+                )
+            finally:
+                conn.close()
+            self.assertEqual(flags["ex-archive"], 1)
+            self.assertEqual(flags["ex-inbox"], 0)
+            self.assertGreater(counts["ex-archive"], counts["ex-inbox"])
+            self.assertEqual(counts["ex-inbox"], 1)
+
+    def test_mailbox_filter_does_not_fetch_other_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [
+                    ("ex-archive", "imap-live", "42", None, None, "synthetic-archive", "Archive"),
+                    ("ex-inbox", "imap-live", "42", None, None, "synthetic-inbox", "INBOX"),
+                ],
+            )
+            stub = _StubImap({("INBOX", "42"): PLAIN_BS, ("Archive", "42"): MIXED_BS})
+            report = meta.fill_metadata(
+                db,
+                source="imap",
+                apply=True,
+                imap_client=stub,
+                mailbox="INBOX",
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(
+                stub.events,
+                [("select", "INBOX", True), ("fetch", "INBOX", "42")],
+            )
+            self.assertEqual(report["messages"], 1)
+            self.assertEqual(report["eligible"], 1)
+            self.assertFalse(report["partial"])
+            conn = sqlite3.connect(str(db))
+            try:
+                done = {
+                    row[0]
+                    for row in conn.execute("SELECT message_id FROM attachment_meta_scans")
+                }
+            finally:
+                conn.close()
+            self.assertEqual(done, {"ex-inbox"})
+
+    def test_default_caps_print_a_partial_banner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            rows = [
+                ("m%03d" % i, "imap-live", str(i), None, None, "synthetic", "INBOX")
+                for i in range(201)
+            ]
+            _seed(db, rows)
+            stub = _StubImap({str(i): PLAIN_BS for i in range(201)})
+            report = meta.fill_metadata(
+                db,
+                source="imap",
+                apply=False,
+                imap_client=stub,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(meta._DEFAULT_MAX_MESSAGES, 200)
+            self.assertEqual(meta._DEFAULT_TIMEOUT_S, 30)
+            self.assertEqual(report["messages"], 200)
+            self.assertEqual(report["eligible"], 201)
+            self.assertTrue(report["partial"])
+            self.assertEqual(report["stopped"], "max_messages")
+            banner = "PARTIAL: scanned 200 of 201 (limit max_messages=200)"
+            self.assertEqual(report["partial_banner"], banner)
+            text = meta.format_report(report)
+            self.assertTrue(text.startswith(banner + "\n"))
+            summary = json.loads(text.split("summary_json=", 1)[1])
+            self.assertTrue(summary["partial"])
+            self.assertEqual(summary["bytes_stored"], 0)
+            conn = sqlite3.connect(str(db))
+            try:
+                stored = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(stored, 0)
+            seq = [0, 0, 1000]
+
+            def clock():
+                return seq.pop(0)
+
+            sub = Path(tmp) / "jsonl-case"
+            sub.mkdir()
+            db2, dump = self._jsonl_db(str(sub))
+            timed = meta.fill_metadata(
+                db2,
+                source="jsonl",
+                jsonl_path=dump,
+                apply=False,
+                timeout_s=30,
+                clock=clock,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(timed["stopped"], "timeout")
+            self.assertEqual(timed["messages"], 1)
+            self.assertTrue(timed["partial"])
+            self.assertEqual(
+                timed["partial_banner"],
+                "PARTIAL: scanned 1 of 2 (limit timeout=30)",
+            )
+            finished = meta.fill_metadata(
+                db2,
+                source="jsonl",
+                jsonl_path=dump,
+                apply=False,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertFalse(finished["partial"])
+            self.assertEqual(finished["partial_banner"], "")
+            self.assertNotIn("PARTIAL:", meta.format_report(finished))
+
+    def test_record_over_2mb_is_processed_and_skips_are_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body = b"A" * 2_100_000
+            raw = (
+                b"MIME-Version: 1.0\r\n"
+                b"From: sender@example.com\r\n"
+                b"To: reader@example.com\r\n"
+                b"Subject: synthetic large\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"\r\n" + body + b"\r\n"
+            )
+            rec = json.dumps({"rfc822": raw.decode("ascii")}).encode("utf-8") + b"\n"
+            self.assertGreater(len(rec), 2_000_000)
+            self.assertLess(len(rec), meta._DEFAULT_MAX_RECORD_BYTES)
+            dump = root / "archive-example.jsonl"
+            dump.write_bytes(rec)
+            db = root / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-large", "jsonl-import", None, 0, len(rec), "synthetic-large", None)],
+            )
+            report = meta.fill_metadata(
+                db,
+                source="jsonl",
+                jsonl_path=dump,
+                apply=True,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(meta._DEFAULT_MAX_RECORD_BYTES, 64 * 1024 * 1024)
+            self.assertEqual(report["messages"], 1)
+            self.assertEqual(report["skipped"], 0)
+            self.assertEqual(report["parts"], 1)
+            self.assertEqual(report["bytes_stored"], 0)
+            huge = root / "mailroom-daily-copy.sqlite"
+            _seed(
+                huge,
+                [
+                    (
+                        "ex-huge",
+                        "jsonl-import",
+                        None,
+                        0,
+                        meta._DEFAULT_MAX_RECORD_BYTES + 1,
+                        "synthetic-huge",
+                        None,
+                    )
+                ],
+            )
+            (root / "tiny.jsonl").write_bytes(b"\n")
+            skipped = meta.fill_metadata(
+                huge,
+                source="jsonl",
+                jsonl_path=root / "tiny.jsonl",
+                apply=True,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(skipped["skipped"], 1)
+            self.assertEqual(skipped["messages"], 0)
+            self.assertIn("skipped=1", meta.format_report(skipped))
+            conn = sqlite3.connect(str(huge))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
 
 class CliTests(unittest.TestCase):
     def test_negative_smoke_and_mailroom_refuse(self):
@@ -922,6 +1201,13 @@ class CliTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     meta.main(["--db", str(copy)])
             self.assertEqual(ctx.exception.code, 2)
+            with mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    meta.main(
+                        ["--db", str(copy), "--source", "imap", "--password", "nope"]
+                    )
+            self.assertEqual(ctx.exception.code, 2)
+            self.assertFalse((root / "nope").exists())
 
     def test_cli_dry_run_and_apply(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -992,34 +1278,69 @@ class CliTests(unittest.TestCase):
             self.assertEqual(flag, 1)
             self.assertNotIn(MARKER, _text_blob(db))
 
-    def test_cli_imap_env_does_not_print_the_secret(self):
+    def test_cli_imap_uses_ssl_and_keychain_not_a_password_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom-copy.sqlite"
-            _seed(db, [("ex-plain", "imap-live", "1002", None, None, "synthetic-plain")])
-            seen = {}
+            _seed(
+                db,
+                [
+                    ("ex-archive", "imap-live", "42", None, None, "synthetic-archive", "Archive"),
+                    ("ex-inbox", "imap-live", "42", None, None, "synthetic-inbox", "INBOX"),
+                ],
+            )
+            plain_calls = []
+            seen = {"inits": [], "events": []}
 
-            class Recording:
-                def __init__(self, host, user, password, port=143, mailbox="INBOX", timeout=30):
-                    seen["creds"] = (host, user, password, port, mailbox)
+            class PlainIMAP:
+                def __init__(self, *args, **kwargs):
+                    plain_calls.append((args, kwargs))
+                    raise AssertionError("plain IMAP4")
 
-                def __enter__(self):
-                    return self
+            class FakeSSL:
+                def __init__(self, host, port, timeout=None):
+                    seen["inits"].append((host, port, timeout))
+                    self.mailbox = None
 
-                def __exit__(self, exc_type, exc, tb):
-                    return False
+                def login(self, user, password):
+                    seen["login"] = (user, password)
+                    return "OK", [b"ok"]
 
-                def fetch_bodystructure(self, uid):
-                    return PLAIN_BS
+                def select(self, mailbox, readonly=False):
+                    self.mailbox = mailbox
+                    seen["events"].append(("select", mailbox, readonly))
+                    return "OK", [b"1"]
+
+                def uid(self, command, uid, item):
+                    seen["events"].append(("uid", self.mailbox, command, uid, item))
+                    if self.mailbox == "Archive":
+                        payload = MIXED_BS
+                    else:
+                        payload = PLAIN_BS
+                    raw = b'1 (BODYSTRUCTURE %s)' % payload.encode("utf-8")
+                    return "OK", [raw]
+
+                def logout(self):
+                    seen["events"].append(("logout",))
+                    return "BYE", [b""]
 
             def boom(*_args, **_kwargs):
                 raise AssertionError("network is forbidden")
+
+            def fake_security(args, check=False, capture_output=False, text=False):
+                seen["security"] = list(args)
+                proc = mock.Mock()
+                proc.returncode = 0
+                proc.stdout = "keychain-secret\n"
+                proc.stderr = ""
+                return proc
 
             out = io.StringIO()
             err = io.StringIO()
             env = {
                 "MAILROOM_IMAP_HOST": "imap.example.com",
                 "MAILROOM_IMAP_USER": "user@example.com",
-                "MAILROOM_IMAP_PASSWORD": SECRET,
+                "IMAP_APP_PASSWORD": "env-secret",
+                "MAILROOM_IMAP_PASSWORD": "env-secret",
                 "MAILROOM_IMAP_PORT": "143",
             }
             with mock.patch("socket.create_connection", boom), mock.patch("sys.stderr", err):
@@ -1029,28 +1350,56 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 2)
             self.assertIn("imap host is required", err.getvalue())
-            self.assertNotIn(SECRET, err.getvalue())
-            conn = sqlite3.connect(str(db))
-            try:
-                pending = conn.execute(
-                    "SELECT COUNT(*) FROM attachment_meta_scans"
-                ).fetchone()[0]
-            finally:
-                conn.close()
-            self.assertEqual(pending, 0)
+            self.assertNotIn("env-secret", err.getvalue())
+            self.assertNotIn("keychain-secret", err.getvalue())
             with mock.patch("socket.create_connection", boom), mock.patch(
-                "attachments.meta_fill.ImapBodystructureClient", Recording
+                "attachments.meta_fill.imaplib.IMAP4", PlainIMAP
+            ), mock.patch(
+                "attachments.meta_fill.imaplib.IMAP4_SSL", FakeSSL
+            ), mock.patch(
+                "imap_keychain.subprocess.run", fake_security
             ), mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()):
                 rc = meta.main(
                     ["--db", str(db), "--source", "imap", "--apply"],
                     env=env,
                 )
-            self.assertEqual(rc, 0)
-            self.assertEqual(seen["creds"][0], "imap.example.com")
-            self.assertEqual(seen["creds"][2], SECRET)
-            self.assertNotIn(SECRET, out.getvalue())
-            self.assertNotIn(SECRET, _text_blob(db))
+            self.assertEqual(rc, 0, out.getvalue())
+            self.assertEqual(plain_calls, [])
+            self.assertEqual(seen["inits"], [("imap.example.com", 993, 30)])
+            self.assertEqual(seen["login"], ("user@example.com", "keychain-secret"))
+            self.assertEqual(
+                seen["security"],
+                [
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-s",
+                    "mailroom.imap.app-password",
+                    "-w",
+                ],
+            )
+            self.assertEqual(
+                seen["events"][:4],
+                [
+                    ("select", "Archive", True),
+                    ("uid", "Archive", "FETCH", "42", "(BODYSTRUCTURE)"),
+                    ("select", "INBOX", True),
+                    ("uid", "INBOX", "FETCH", "42", "(BODYSTRUCTURE)"),
+                ],
+            )
+            self.assertNotIn("env-secret", out.getvalue())
+            self.assertNotIn("keychain-secret", out.getvalue())
+            self.assertNotIn("env-secret", _text_blob(db))
+            self.assertNotIn("keychain-secret", _text_blob(db))
             self.assertIn("bytes_stored=0", out.getvalue())
+            conn = sqlite3.connect(str(db))
+            try:
+                flags = dict(
+                    conn.execute("SELECT id, has_attachments FROM messages").fetchall()
+                )
+            finally:
+                conn.close()
+            self.assertEqual(flags["ex-archive"], 1)
+            self.assertEqual(flags["ex-inbox"], 0)
 
 
 class DesignAndBoundaryTests(unittest.TestCase):
@@ -1069,6 +1418,15 @@ class DesignAndBoundaryTests(unittest.TestCase):
         self.assertIn("filename", text.lower())
         self.assertIn("NULL", text)
         self.assertIn("bytes_stored", text)
+        self.assertIn("IMAP4_SSL", text)
+        self.assertIn("993", text)
+        self.assertIn("PARTIAL", text)
+        self.assertIn("attachments_pr1_empty", text)
+        self.assertIn("peak memory", text.lower())
+        self.assertIn("64 MiB", text)
+        self.assertIn("mailroom.imap.app-password", text)
+        self.assertIn("messages.folder", text)
+        self.assertIn("skipped", text)
         for name in ("meta_fill.py", "bodystructure.py", "mime_meta.py"):
             source = (PKG / name).read_text(encoding="utf-8")
             self.assertNotIn("BODY[]", source, name)
@@ -1095,8 +1453,16 @@ class DesignAndBoundaryTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom-copy.sqlite"
-            _seed(db, [("ex-plain", "imap-live", "1002", None, None, "synthetic-plain")])
-            with mock.patch("attachments.meta_fill.imaplib.IMAP4", BadIMAP):
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "1002", None, None, "synthetic-plain", "INBOX")],
+            )
+            plain = mock.Mock(side_effect=AssertionError("plain IMAP4"))
+            with mock.patch("attachments.meta_fill.imaplib.IMAP4", plain), mock.patch(
+                "attachments.meta_fill.imaplib.IMAP4_SSL", BadIMAP
+            ), mock.patch(
+                "attachments.meta_fill.read_imap_app_password", return_value=SECRET
+            ):
                 with self.assertRaises(meta.FillRefuse) as ctx:
                     meta.fill_metadata(
                         db,
@@ -1104,10 +1470,10 @@ class DesignAndBoundaryTests(unittest.TestCase):
                         apply=True,
                         host="imap.example.com",
                         user="user@example.com",
-                        password=SECRET,
                         cmdlines=[],
                         lock_held=False,
                     )
+            self.assertFalse(plain.called)
             self.assertNotIn(SECRET, str(ctx.exception))
             self.assertIsNone(ctx.exception.__cause__)
             self.assertNotIn(SECRET, _text_blob(db))
