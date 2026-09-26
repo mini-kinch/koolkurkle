@@ -2,8 +2,11 @@
 """Copy-only MAILROOM_DB helper for Mini daily children.
 
 Same allowlist as mailroom_daily.py. Honor --db, then $MAILROOM_DB.
-Refuse mailroom.sqlite / unset until SoR cutover (PR-5). Hard-fail,
-not fail-open. No silent default to the SoR name.
+After SoR cutover, explicit mailroom.sqlite is allowed (db_mode=sor)
+alongside the two copy basenames. Unset / unknown still refuse.
+Hard-fail, not fail-open. No silent default to the SoR name. The SoR
+basename is allowed only when explicitly named, and rem-legacy must
+be absent.
 
 Rem-gated copy: Mini copy only when rem-legacy is not writing, or
 after rem-legacy EXIT 0. No SMB/NFS dual-write. No live MBP→Mini
@@ -48,8 +51,14 @@ COPY_DB_BASENAMES = frozenset(
         "mailroom-daily-copy.sqlite",
     }
 )
-ALLOWLIST_HELP = "mailroom-copy.sqlite or mailroom-daily-copy.sqlite"
 SOR_BASENAME = "mailroom.sqlite"
+# SoR basename is allowed only when --db / MAILROOM_DB names it.
+# Unset and unknown basenames still refuse. Not a silent default.
+ALLOWED_DB_BASENAMES = COPY_DB_BASENAMES | {SOR_BASENAME}
+ALLOWLIST_HELP = (
+    "mailroom-copy.sqlite, mailroom-daily-copy.sqlite, or mailroom.sqlite "
+    "(SoR basename allowed only when explicitly named; rem-legacy must be absent)"
+)
 
 
 class CopyDbRefuse(RuntimeError):
@@ -57,7 +66,13 @@ class CopyDbRefuse(RuntimeError):
 
 
 def allowed_copy_db(path: Path) -> bool:
-    return path.name in COPY_DB_BASENAMES
+    """True for a copy basename or an explicit SoR basename."""
+    return path.name in ALLOWED_DB_BASENAMES
+
+
+def db_mode_for(path: Path) -> str:
+    """Return sor for basename mailroom.sqlite, otherwise copy."""
+    return "sor" if path.name == SOR_BASENAME else "copy"
 
 
 def env_db_path() -> Path | None:
@@ -71,27 +86,28 @@ def env_db_path() -> Path | None:
 def unset_db_message() -> str:
     return (
         "MAILROOM_DB is unset. Set an explicit copy path (basename %s). "
-        "Preferred practice: the Mini daily job writes only a copy until "
-        "SoR cutover (PR-5). A silent default to mailroom.sqlite would "
-        "write the SoR name (empty on Mini, or race rem embed)."
+        "The SoR basename is allowed only when explicitly named, and "
+        "rem-legacy must be absent. A silent default to mailroom.sqlite "
+        "would write the SoR name (empty on Mini, or race rem embed)."
         % ALLOWLIST_HELP
     )
 
 
 def refuse_copy_db_message(path: Path) -> str:
     return (
-        "MAILROOM_DB basename %r is not on the copy allowlist (%s). "
-        "Refusing start until SoR cutover (PR-5). No IMAP/embed. "
-        "Use mailroom-copy.sqlite, or mailroom-daily-copy.sqlite when "
-        "rem embed still holds the copy."
+        "MAILROOM_DB basename %r is not on the allowlist (%s). "
+        "Refusing start. No IMAP/embed. Explicit path required "
+        "(copy basenames or mailroom.sqlite; SoR basename allowed only "
+        "when explicitly named, and rem-legacy must be absent)."
         % (path.name, ALLOWLIST_HELP)
     )
 
 
 def resolve_copy_db(cli_db: str | None = None) -> Path:
-    """Hard-fail unless basename is on the copy allowlist.
+    """Hard-fail unless basename is on the allowlist (copy or explicit SoR).
 
-    Precedence: --db / cli_db, then $MAILROOM_DB. Unset and SoR refuse.
+    Precedence: --db / cli_db, then $MAILROOM_DB. Unset / unknown refuse.
+    SoR basename allowed only when explicitly named; rem-legacy must be absent.
     """
     if cli_db:
         path = Path(str(cli_db)).expanduser()
@@ -135,15 +151,16 @@ def resolve_from_argv(argv: list[str] | None = None) -> Path:
 
 
 def bind_copy_db(argv: list[str] | None = None) -> Path:
-    """Resolve the copy DB, export MAILROOM_DB, emit db_mode=copy.
+    """Resolve the DB, export MAILROOM_DB, emit db_mode=copy|sor.
 
     Daily children call this before any sqlite open. argv=None means
     sys.argv[1:] so ``bind_copy_db()`` honors a process-level --db.
-    Raises CopyDbRefuse for unset / mailroom.sqlite / other names.
+    Raises CopyDbRefuse for unset / unknown names. An explicit SoR
+    basename emits db_mode=sor (rem-legacy must be absent).
     """
     path = resolve_from_argv(argv)
     os.environ["MAILROOM_DB"] = str(path)
-    emit_db_mode("copy")
+    emit_db_mode(db_mode_for(path))
     return path
 
 
@@ -155,11 +172,13 @@ def child_main(
     lock_held: bool | None = None,
     lock_path=None,
 ) -> int:
-    """Shared daily-child entry: rem-aware gate, bind copy DB, fail closed.
+    """Shared daily-child entry: rem-aware gate, bind DB, fail closed.
 
     No IMAP, Keychain, or classify work. GitHub contract is SoR bind.
     Mini-local live bodies should call bind_copy_db() the same way.
-    Live SoR + rem/lock → CONFLICT (skip/rem-safe before the clock).
+    Explicit mailroom.sqlite passes when rem-legacy is absent and the
+    writer lock is free. Live SoR + rem/lock → CONFLICT (skip/rem-safe
+    before the clock).
     """
     del name
     try:
@@ -200,7 +219,8 @@ def child_would_open_sor(
     """True if a child would open the SoR basename (or has no copy path).
 
     Used by negative smoke. A daily child honors --db / MAILROOM_DB via
-    the same allowlist; hardcoded mailroom.sqlite is a fail.
+    the same allowlist. Explicit mailroom.sqlite counts as opening SoR.
+    Unset counts as SoR-open / refuse. There is no silent default.
     """
     saved = None
     if env is not None:
@@ -235,9 +255,11 @@ def child_would_open_sor(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Resolve a Mini daily copy DB (--db or $MAILROOM_DB). "
-            "Allowlist: mailroom-copy.sqlite, mailroom-daily-copy.sqlite. "
-            "Unset / mailroom.sqlite refused until SoR cutover."
+            "Resolve a Mini daily DB (--db or $MAILROOM_DB). "
+            "Allowlist: mailroom-copy.sqlite, mailroom-daily-copy.sqlite, "
+            "mailroom.sqlite (SoR basename allowed only when explicitly named; "
+            "rem-legacy must be absent). Unset / unknown refused. "
+            "No silent default to mailroom.sqlite."
         )
     )
     parser.add_argument(
@@ -266,6 +288,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.db:
             refuse_copy_from_live_sor(args.db)
+        else:
+            # --db is absent: still gate an explicit MAILROOM_DB SoR path.
+            # Copy basenames return immediately inside the gate.
+            env_path = env_db_path()
+            if env_path is not None:
+                refuse_copy_from_live_sor(env_path)
         path = resolve_copy_db(args.db)
     except SorWriterRefuse as exc:
         emit_db_mode("refused")
@@ -275,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_db_mode("refused")
         sys.stderr.write("error: %s\n" % exc)
         return 2
-    emit_db_mode("copy")
+    emit_db_mode(db_mode_for(path))
     sys.stdout.write(str(path) + "\n")
     return 0
 

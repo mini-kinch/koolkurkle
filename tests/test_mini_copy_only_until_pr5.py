@@ -31,17 +31,21 @@ PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 
 
 class MiniCopyOnlyUntilPr5Tests(unittest.TestCase):
-    def test_unset_and_sor_basename_hard_fail(self):
+    def test_unset_refuses_and_explicit_sor_is_allowed(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("MAILROOM_DB", None)
             with self.assertRaises(copy_db.CopyDbRefuse) as unset:
                 copy_db.resolve_copy_db(None)
         self.assertIn("unset", str(unset.exception).lower())
-        with self.assertRaises(copy_db.CopyDbRefuse) as sor:
-            copy_db.resolve_copy_db("/tmp/mailroom.sqlite")
-        self.assertIn("mailroom.sqlite", str(sor.exception))
+        sor = copy_db.resolve_copy_db("/tmp/mailroom.sqlite")
+        self.assertEqual(sor.name, "mailroom.sqlite")
+        self.assertEqual(copy_db.db_mode_for(sor), "sor")
+        with self.assertRaises(copy_db.CopyDbRefuse) as unknown:
+            copy_db.resolve_copy_db("/tmp/other.sqlite")
+        self.assertIn("other.sqlite", str(unknown.exception))
         path = copy_db.resolve_copy_db("/tmp/mailroom-copy.sqlite")
         self.assertEqual(path.name, "mailroom-copy.sqlite")
+        self.assertEqual(copy_db.db_mode_for(path), "copy")
 
     def test_daily_plist_copy_only_runatload_unchanged(self):
         data = plistlib.loads(PLIST.read_bytes())
