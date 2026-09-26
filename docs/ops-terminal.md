@@ -187,17 +187,17 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 ## MBP SoR vs Mini copy-only
 
-Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers against SoR while rem-legacy holds the live file. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
+Since the 2026-09-24 SoR flip.
 
-- MBP holds the live SoR DB (`$HOME/MailArchive/mailroom.sqlite` as
-  a path class).
-- Mini writers use `mailroom-copy.sqlite` or
-  `mailroom-daily-copy.sqlite`, or an explicit `mailroom.sqlite`
-  (`db_mode=sor`) only when that basename is named and rem-legacy is
-  absent. Unset or an unknown basename is a hard refuse
-  (`db_mode=refused`). No silent default to `mailroom.sqlite`.
-- Do not start a Mini writer against SoR while rem-legacy is live. Do not promote Mini
-  `mailroom.sqlite` while rem-legacy is live.
+**Mini** is the SoR writer. The nightly daily
+LaunchAgent writes the SoR `mailroom.sqlite` on
+the Mini (`db_mode=sor` is allowlisted there).
+
+- The MBP SoR is a rollback/read target and a
+  non-writer. No MBP daily runs against it, and
+  nothing on the MBP writes the SoR.
+- The Mini's `mailroom-copy.sqlite` still exists
+  as a copy DB.
 
 This gate is docs/tests only. It does not open MailArchive or live
 sqlite, write embed/SoR data, read Keychain, SSH a live machine, or
