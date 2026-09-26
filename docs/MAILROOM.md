@@ -14,6 +14,10 @@ Retrieve: [ask_mail.md](ask_mail.md). Tombstone:
 Unified-search / ask_all (DESIGN ONLY):
 [unified-search-design.md](unified-search-design.md).
 
+`mailroom_daily.py` writes `last_daily_rag_ok` with `embed=skipped`
+when Ollama is down. Why: Path A keeps Ollama off while Qwen is up,
+and retrieval is FTS-only.
+
 ## §5 Soft-delete (DECIDED)
 
 Soft-delete is **DECIDED**. This is not a standby contract.

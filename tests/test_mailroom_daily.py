@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import os
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -204,6 +206,7 @@ class MainChainTests(unittest.TestCase):
         env = {
             "MAILROOM_VENV_PY": str(archive / ".venv" / "bin" / "python"),
             "MAILROOM_APPLE_PY": sys.executable,
+            "MAILROOM_EMBED_REQUIRED": "",
         }
         with patch.dict(os.environ, env, clear=False):
             with patch.object(daily, "check_embed_health"):
@@ -591,6 +594,7 @@ class ChildDbHonorTests(unittest.TestCase):
                 "MAILROOM_COPY_DB_DIR": str(SCRIPTS),
                 "MAILROOM_CHILD_LOG": str(child_log),
                 "MAILROOM_DB": str(copy),
+                "MAILROOM_EMBED_REQUIRED": "",
             }
             with patch.dict(os.environ, env, clear=False):
                 with patch.object(daily, "check_embed_health"):
@@ -722,6 +726,266 @@ class EmbedHealthTests(unittest.TestCase):
                 daily.embed_health_url(),
                 "http://127.0.0.1:11434/api/tags",
             )
+
+
+class _TagsResp:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class EmbedSkipChainTests(unittest.TestCase):
+    """Health-check failures skip embed. urlopen is mocked; no live Ollama."""
+
+    def _layout(self, tmp, embed_rc=0, marker=None):
+        archive = tmp / "MailArchive"
+        scripts = archive / "scripts"
+        logs = archive / "logs"
+        scripts.mkdir(parents=True)
+        logs.mkdir()
+        venv_py = archive / ".venv" / "bin" / "python"
+        venv_py.parent.mkdir(parents=True)
+        # Re-exec the real interpreter so embed_backfill.py actually runs.
+        _write_executable(
+            venv_py,
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n",
+        )
+        ok = "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n"
+        for name in (
+            "imap_newmail.py",
+            "imap_tombstone.py",
+            "imap_fetch_bodies_fts.py",
+            "classify.py",
+            "notify_bills.py",
+        ):
+            _write_executable(scripts / name, ok)
+        if marker is None:
+            embed_body = "#!/usr/bin/env python3\nimport sys\nsys.exit(%d)\n" % embed_rc
+        else:
+            embed_body = (
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "Path(%r).write_text('ran\\n', encoding='utf-8')\n"
+                "import sys\n"
+                "sys.exit(%d)\n" % (str(marker), embed_rc)
+            )
+        _write_executable(scripts / "embed_backfill.py", embed_body)
+        return archive, scripts, logs
+
+    def _run(self, archive, scripts, logs, urlopen, extra_env=None):
+        argv = [
+            "--archive",
+            str(archive),
+            "--scripts",
+            str(scripts),
+            "--logs",
+            str(logs),
+            "--db",
+            str(archive / "mailroom-copy.sqlite"),
+            "--force",
+        ]
+        env = {
+            "MAILROOM_VENV_PY": str(archive / ".venv" / "bin" / "python"),
+            "MAILROOM_APPLE_PY": sys.executable,
+            "OLLAMA_HOST": "http://127.0.0.1:9",
+            "MAILROOM_EMBED_REQUIRED": "",
+        }
+        if extra_env:
+            env.update(extra_env)
+        buf = io.StringIO()
+        with patch.dict(os.environ, env, clear=False):
+            with patch.object(daily.urllib.request, "urlopen", urlopen):
+                with redirect_stderr(buf):
+                    rc = daily.main(argv)
+        return rc, buf.getvalue()
+
+    def test_unreachable_skips_embed_stamps_and_exits_0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "embed_ran"
+            archive, scripts, logs = self._layout(root, marker=marker)
+            urlopen = Mock(side_effect=daily.urllib.error.URLError("down"))
+            rc, err = self._run(archive, scripts, logs, urlopen)
+            stamp = (logs / daily.STAMP_NAME).read_text(encoding="utf-8")
+            self.assertEqual(rc, 0)
+            urlopen.assert_called()
+            self.assertFalse(marker.exists())
+            self.assertIn("embed=skipped", stamp)
+            self.assertNotIn("embed=ok", stamp)
+            self.assertTrue(stamp.splitlines()[0].endswith("Z"))
+            self.assertIn(
+                "step skip: embed (Ollama unreachable at http://127.0.0.1:9/api/tags; "
+                "FTS-only mode) embed=skipped",
+                err,
+            )
+            self.assertIn("daily complete embed=skipped", err)
+            self.assertNotIn("chain aborted", err)
+            self.assertFalse((logs / daily.EMBED_STAMP).exists())
+            self.assertTrue((logs / daily.IMAP_STAMP).is_file())
+            self.assertTrue((logs / daily.BODIES_STAMP).is_file())
+
+    def test_reachable_embed_ok_stamps_embed_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "embed_ran"
+            archive, scripts, logs = self._layout(root, embed_rc=0, marker=marker)
+            urlopen = Mock(return_value=_TagsResp(200))
+            rc, err = self._run(archive, scripts, logs, urlopen)
+            stamp = (logs / daily.STAMP_NAME).read_text(encoding="utf-8")
+            self.assertEqual(rc, 0)
+            urlopen.assert_called()
+            self.assertTrue(marker.is_file())
+            self.assertIn("embed=ok", stamp)
+            self.assertNotIn("embed=skipped", stamp)
+            self.assertIn("daily complete embed=ok", err)
+            self.assertTrue((logs / daily.EMBED_STAMP).is_file())
+            self.assertNotIn(
+                "embed=", (logs / daily.EMBED_STAMP).read_text(encoding="utf-8")
+            )
+
+    def test_reachable_embed_child_failure_aborts_without_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "embed_ran"
+            archive, scripts, logs = self._layout(root, embed_rc=6, marker=marker)
+            urlopen = Mock(return_value=_TagsResp(200))
+            rc, err = self._run(archive, scripts, logs, urlopen)
+            self.assertEqual(rc, 6)
+            urlopen.assert_called()
+            self.assertTrue(marker.is_file())
+            self.assertFalse((logs / daily.STAMP_NAME).exists())
+            self.assertFalse((logs / daily.EMBED_STAMP).exists())
+            self.assertIn("chain aborted", err)
+            self.assertNotIn("daily complete", err)
+            self.assertNotIn("embed=skipped", err)
+
+    def test_embed_required_unreachable_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "embed_ran"
+            archive, scripts, logs = self._layout(root, marker=marker)
+            urlopen = Mock(side_effect=daily.urllib.error.URLError("down"))
+            rc, err = self._run(
+                archive,
+                scripts,
+                logs,
+                urlopen,
+                extra_env={"MAILROOM_EMBED_REQUIRED": "1"},
+            )
+            self.assertEqual(rc, 2)
+            urlopen.assert_called()
+            self.assertFalse(marker.exists())
+            self.assertFalse((logs / daily.STAMP_NAME).exists())
+            self.assertFalse((logs / daily.EMBED_STAMP).exists())
+            self.assertIn("embed health-check failed", err)
+            self.assertIn("chain aborted", err)
+            self.assertNotIn("step skip:", err)
+            self.assertNotIn("daily complete", err)
+
+    def test_timeout_and_non_2xx_skip_like_unreachable(self):
+        cases = (
+            ("timeout", TimeoutError("timed out")),
+            ("non-2xx", None),
+        )
+        for name, exc in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    marker = root / "embed_ran"
+                    archive, scripts, logs = self._layout(root, marker=marker)
+                    if exc is None:
+                        urlopen = Mock(return_value=_TagsResp(503))
+                    else:
+                        urlopen = Mock(side_effect=exc)
+                    rc, err = self._run(archive, scripts, logs, urlopen)
+                    self.assertEqual(rc, 0)
+                    self.assertFalse(marker.exists())
+                    self.assertIn(
+                        "embed=skipped",
+                        (logs / daily.STAMP_NAME).read_text(encoding="utf-8"),
+                    )
+                    self.assertIn("daily complete embed=skipped", err)
+                    self.assertFalse((logs / daily.EMBED_STAMP).exists())
+
+    def test_dry_run_mentions_skip_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "embed_ran"
+            archive, scripts, logs = self._layout(root, marker=marker)
+            urlopen = Mock(side_effect=AssertionError("network"))
+            argv = [
+                "--archive",
+                str(archive),
+                "--scripts",
+                str(scripts),
+                "--logs",
+                str(logs),
+                "--db",
+                str(archive / "mailroom-copy.sqlite"),
+                "--dry-run",
+            ]
+            env = {
+                "MAILROOM_VENV_PY": str(archive / ".venv" / "bin" / "python"),
+                "MAILROOM_APPLE_PY": sys.executable,
+                "OLLAMA_HOST": "http://127.0.0.1:9",
+                "MAILROOM_EMBED_REQUIRED": "",
+            }
+            buf = io.StringIO()
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(daily.urllib.request, "urlopen", urlopen):
+                    with redirect_stderr(buf):
+                        rc = daily.main(argv)
+            err = buf.getvalue()
+            self.assertEqual(rc, 0)
+            urlopen.assert_not_called()
+            self.assertFalse(marker.exists())
+            self.assertFalse((logs / daily.STAMP_NAME).exists())
+            self.assertFalse((logs / daily.EMBED_STAMP).exists())
+            self.assertIn("no network", err)
+            self.assertIn("http://127.0.0.1:9/api/tags", err)
+            self.assertIn("embed=skipped", err)
+            self.assertIn("dry-run complete; stamp not written", err)
+
+    def test_dry_run_required_would_abort_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive, scripts, logs = self._layout(root)
+            urlopen = Mock(side_effect=AssertionError("network"))
+            argv = [
+                "--archive",
+                str(archive),
+                "--scripts",
+                str(scripts),
+                "--logs",
+                str(logs),
+                "--db",
+                str(archive / "mailroom-copy.sqlite"),
+                "--dry-run",
+            ]
+            env = {
+                "MAILROOM_VENV_PY": str(archive / ".venv" / "bin" / "python"),
+                "MAILROOM_APPLE_PY": sys.executable,
+                "OLLAMA_HOST": "http://127.0.0.1:9",
+                "MAILROOM_EMBED_REQUIRED": "1",
+            }
+            buf = io.StringIO()
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(daily.urllib.request, "urlopen", urlopen):
+                    with redirect_stderr(buf):
+                        rc = daily.main(argv)
+            err = buf.getvalue()
+            self.assertEqual(rc, 0)
+            urlopen.assert_not_called()
+            self.assertIn("MAILROOM_EMBED_REQUIRED=1 would abort", err)
+            self.assertIn("no network", err)
+            self.assertFalse((logs / daily.STAMP_NAME).exists())
 
 
 class SourceHygieneTests(unittest.TestCase):
