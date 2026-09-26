@@ -2,6 +2,7 @@
 """Send the daily bills digest via Messages.app. Phone from Keychain only.
 
 Never prints the number. Never includes codes, passwords, or full account numbers.
+A failed read raises KeychainPhoneError and does not try another source.
 """
 from __future__ import annotations
 
@@ -18,18 +19,127 @@ import mailroom_copy_db
 DB = Path.home() / "MailArchive" / "mailroom.sqlite"
 KEYCHAIN_SERVICE = "mailroom.notify.phone"
 KEYCHAIN_ACCOUNT = "mailroom"
+# Absolute path. No PATH lookup and no environment override.
+SECURITY_BIN = "/usr/bin/security"
+_SECURITY_TIMEOUT_SEC = 45
 TZ = ZoneInfo("America/Los_Angeles")
+
+
+class KeychainPhoneError(SystemExit):
+    """Classified Keychain read failure. The message never includes the value."""
+
+    def __init__(self, kind: str, returncode: int | None, detail: str) -> None:
+        self.kind = kind
+        self.returncode = returncode
+        self.detail = detail
+        if returncode is None:
+            rc_text = "none"
+        else:
+            rc_text = str(int(returncode))
+        SystemExit.__init__(
+            self,
+            "Keychain %s %s (security rc=%s): %s"
+            % (KEYCHAIN_SERVICE, kind, rc_text, detail),
+        )
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _as_text(data: str | bytes | None) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    return data
+
+
+def classify_security_failure(returncode: int, stderr: str) -> str:
+    """Map a ``security`` failure to a class. Does not look at stdout."""
+    text = stderr or ""
+    lower = text.lower()
+    if (
+        "-25308" in text
+        or "errsecinteractionnotallowed" in lower
+        or "user interaction is not allowed" in lower
+        or "interaction with the security server is not allowed" in lower
+        or "interaction is not allowed" in lower
+    ):
+        return "interaction_not_allowed"
+    if (
+        "could not be found" in lower
+        or "the item cannot be found" in lower
+        or "errsecitemnotfound" in lower
+        or "-25300" in text
+    ):
+        return "item_not_found"
+    if (
+        "keychain is locked" in lower
+        or "errsecauthfailed" in lower
+        or "-25293" in text
+        or "passphrase you entered is not correct" in lower
+        or "authorization and/or authentication failed" in lower
+        or "authentication failed" in lower
+    ):
+        return "keychain_locked"
+    if returncode == 44:
+        return "item_not_found"
+    if returncode == 36:
+        return "interaction_not_allowed"
+    if returncode == 51:
+        return "keychain_locked"
+    return "other"
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    """Drop the Keychain value from stderr. Keep short OSStatus text."""
+    raw = (text or "").replace("\x00", "")
+    secret = (secret or "").strip()
+    secret_digits = re.sub(r"\D", "", secret)
+    windows: tuple[str, ...] = ()
+    if len(secret_digits) >= 4:
+        windows = tuple(
+            secret_digits[start : start + 4]
+            for start in range(0, len(secret_digits) - 3)
+        )
+
+    def scrub_token(token: str) -> str:
+        if secret and secret in token:
+            token = token.replace(secret, "[redacted]")
+        digits = re.sub(r"\D", "", token)
+        if secret_digits and secret_digits in digits:
+            return "[redacted]"
+        if len(digits) >= 7:
+            return "[redacted]"
+        for window in windows:
+            if window in digits or window in token:
+                return "[redacted]"
+        return token
+
+    parts = re.split(r"(\s+)", raw)
+    redacted = []
+    for part in parts:
+        if part == "" or part.isspace():
+            redacted.append(part)
+        else:
+            redacted.append(scrub_token(part))
+    collapsed = " ".join("".join(redacted).split())
+    if len(collapsed) > 240:
+        return collapsed[:240] + "..."
+    return collapsed
+
+
+def _keychain_error(kind: str, returncode: int | None, stderr: str, secret: str) -> None:
+    detail = _redact_secret(stderr, secret) or "no stderr"
+    raise KeychainPhoneError(kind, returncode, detail) from None
+
+
 def keychain_phone() -> str:
     try:
         result = subprocess.run(
             [
-                "security",
+                SECURITY_BIN,
                 "find-generic-password",
                 "-s",
                 KEYCHAIN_SERVICE,
@@ -39,14 +149,22 @@ def keychain_phone() -> str:
             ],
             check=False,
             capture_output=True,
-            timeout=45,
+            text=True,
+            errors="replace",
+            timeout=_SECURITY_TIMEOUT_SEC,
         )
-    except subprocess.TimeoutExpired:
-        raise SystemExit("Keychain phone prompt timed out") from None
+    except subprocess.TimeoutExpired as exc:
+        _keychain_error("other", None, _as_text(exc.stderr), _as_text(exc.stdout))
+    except OSError:
+        raise KeychainPhoneError(
+            "other", None, "security binary could not be executed"
+        ) from None
+    secret = _as_text(result.stdout)
+    stderr = _as_text(result.stderr)
     if result.returncode != 0:
-        raise SystemExit("Keychain mailroom.notify.phone missing or unreadable")
-    phone = (result.stdout or b"").decode("utf-8", "replace").strip()
-    return normalize_us_phone(phone)
+        kind = classify_security_failure(int(result.returncode), stderr)
+        _keychain_error(kind, int(result.returncode), stderr, secret)
+    return normalize_us_phone(secret.strip())
 
 
 def normalize_us_phone(raw: str) -> str:
