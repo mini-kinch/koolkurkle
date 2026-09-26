@@ -95,7 +95,7 @@ OPS_SUBJ_RE = re.compile(
     r"appointment|safety recall|reduce your use)"
 )
 _GENERIC_LAWSUIT_RE = re.compile(r"(?i)lawsuit|written discovery")
-_PCN_PREFIX_RE = re.compile(r"^pcn\s*-")
+_PCN_PREFIX_RE = re.compile(r"(?i)^pcn\s*-")
 _RECALL_RE = re.compile(r"(?i)safety recall")
 
 
