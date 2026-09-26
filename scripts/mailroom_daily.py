@@ -9,9 +9,12 @@ before IMAP or embed. The plan passes --db and MAILROOM_DB to every
 child so Mini IMAP/classify/bills cannot open the empty SoR stub.
 
 Catch-up: if last_daily_rag_ok is missing or at least 24h old, run the
-chain (resume first failed phase). last_daily_rag_ok is written only after
-imap + bodies + embed succeed (classify/bills may warn). Exclusive flock
-on mailroom.daily.lock so calendar + RunAtLoad do not double-run.
+chain (resume first failed phase). last_daily_rag_ok is written when
+imap + bodies succeed and embed is ok or skipped (classify/bills may
+warn). Path A keeps Ollama down while Qwen is up, so an unreachable
+Ollama skips embed (FTS-only) instead of aborting. MAILROOM_EMBED_REQUIRED=1
+restores the hard-fail. Exclusive flock on mailroom.daily.lock so
+calendar + RunAtLoad do not double-run.
 
   /usr/bin/python3 mailroom_daily.py --print-plan
   /usr/bin/python3 mailroom_daily.py --skip-if-fresh
@@ -62,6 +65,8 @@ STEP_WATERMARK = {
     "embed": EMBED_STAMP,
 }
 WARN_STEPS = frozenset({"classify", "bills"})
+# imap + bodies must be files. embed is last_embed_ok, or a skipped
+# health-check (no last_embed_ok; daily stamp says embed=skipped).
 REQUIRED_STAMPS = (IMAP_STAMP, BODIES_STAMP, EMBED_STAMP)
 
 HEADER_SCRIPTS = ("imap_newmail.py", "imap_tombstone.py")
@@ -181,8 +186,17 @@ def embed_health_url() -> str:
     return ollama_host() + "/api/tags"
 
 
+def embed_required() -> bool:
+    """True when MAILROOM_EMBED_REQUIRED=1 (abort if Ollama is down)."""
+    return (os.environ.get("MAILROOM_EMBED_REQUIRED") or "").strip() == "1"
+
+
 def check_embed_health(timeout: float = 5.0) -> None:
-    """GET local Ollama /api/tags before incremental embed. Embed-only."""
+    """GET local Ollama /api/tags before incremental embed. Embed-only.
+
+    Raises DailyError when Ollama is unreachable, non-2xx, or times out.
+    The driver skips embed unless MAILROOM_EMBED_REQUIRED=1.
+    """
     url = embed_health_url()
     try:
         req = urllib.request.Request(url, method="GET")
@@ -235,12 +249,17 @@ def should_run_pipeline(
     return age >= threshold
 
 
-def write_ok_stamp(path: Path, now: float | None = None) -> None:
-    """Atomic stamp: write temp then replace."""
+def write_ok_stamp(path: Path, now: float | None = None, note: str | None = None) -> None:
+    """Atomic stamp: write temp then replace.
+
+    Optional note is a second line (embed=ok or embed=skipped on the daily stamp).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     ts = time.time() if now is None else now
     when = datetime.fromtimestamp(ts, tz=timezone.utc)
     payload = when.strftime("%Y-%m-%dT%H:%M:%SZ") + "\n"
+    if note:
+        payload += note.rstrip("\n") + "\n"
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(payload, encoding="utf-8")
     os.utime(tmp, (ts, ts))
@@ -485,7 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Mini daily RAG (copy-only): headers (Apple curl) → body/FTS → "
             "classify → bills → incremental embed. MAILROOM_DB basename must "
             "be mailroom-copy.sqlite or mailroom-daily-copy.sqlite. Stamp "
-            "last_daily_rag_ok only after imap+bodies+embed succeed."
+            "last_daily_rag_ok when imap+bodies succeed and embed is ok or "
+            "skipped (Ollama down, FTS-only). MAILROOM_EMBED_REQUIRED=1 "
+            "aborts instead of skipping."
         )
     )
     parser.add_argument(
@@ -634,6 +655,7 @@ def _run_after_guard(args, archive, scripts_dir, logs_dir, db, stamp, log) -> in
         EMBED_STAMP: phase_done_this_cycle(embed_stamp, stamp),
     }
 
+    embed_state = None
     i = 0
     while i < len(items):
         step = items[i].step
@@ -645,6 +667,8 @@ def _run_after_guard(args, archive, scripts_dir, logs_dir, db, stamp, log) -> in
         warn_only = step in WARN_STEPS
         if watermark and done.get(watermark):
             log("skip %s (watermark %s)" % (step, watermark))
+            if step == "embed":
+                embed_state = "ok"
             continue
         if (
             warn_only
@@ -654,13 +678,32 @@ def _run_after_guard(args, archive, scripts_dir, logs_dir, db, stamp, log) -> in
         ):
             log("skip %s (required watermarks already set)" % step)
             continue
-        if step == "embed" and not args.dry_run:
-            try:
-                check_embed_health()
-            except DailyError as exc:
-                log("error: %s" % exc)
-                log("chain aborted; not writing %s" % STAMP_NAME)
-                return 2
+        if step == "embed":
+            if args.dry_run:
+                log(
+                    "dry-run: embed would health-check GET %s (no network); "
+                    "skip embed if Ollama unreachable (FTS-only mode, embed=skipped)"
+                    % embed_health_url()
+                )
+                if embed_required():
+                    log(
+                        "dry-run: MAILROOM_EMBED_REQUIRED=1 would abort "
+                        "instead of skipping"
+                    )
+            else:
+                try:
+                    check_embed_health()
+                except DailyError as exc:
+                    if embed_required():
+                        log("error: %s" % exc)
+                        log("chain aborted; not writing %s" % STAMP_NAME)
+                        return 2
+                    log(
+                        "step skip: embed (Ollama unreachable at %s; "
+                        "FTS-only mode) embed=skipped" % embed_health_url()
+                    )
+                    embed_state = "skipped"
+                    continue
         step_rc = 0
         for item in group:
             rc = run_step(item, dry_run=args.dry_run, log=log)
@@ -681,13 +724,21 @@ def _run_after_guard(args, archive, scripts_dir, logs_dir, db, stamp, log) -> in
             write_ok_stamp(dest)
             done[watermark] = True
             log("wrote %s" % dest)
+            if step == "embed":
+                embed_state = "ok"
 
     if args.dry_run:
         log("dry-run complete; stamp not written")
         return 0
-    if all(done[name] for name in REQUIRED_STAMPS):
-        write_ok_stamp(stamp)
+    phases_ok = all(
+        done[name] for name in REQUIRED_STAMPS if name != EMBED_STAMP
+    ) and (done[EMBED_STAMP] or embed_state == "skipped")
+    if phases_ok:
+        if embed_state not in ("ok", "skipped"):
+            embed_state = "ok"
+        write_ok_stamp(stamp, note="embed=%s" % embed_state)
         log("wrote %s" % stamp)
+        log("daily complete embed=%s" % embed_state)
         return 0
     log("required phases incomplete; not writing %s" % STAMP_NAME)
     return 2

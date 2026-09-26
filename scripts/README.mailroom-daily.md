@@ -116,9 +116,10 @@ Watermarks (atomic temp+replace) under `~/MailArchive/logs/`:
 
 - `last_imap_ok` — headers IMAP succeeded
 - `last_bodies_ok` — body/FTS succeeded
-- `last_embed_ok` — incremental embed succeeded
-- `last_daily_rag_ok` — written **only** when imap + bodies + embed
-  succeeded (classify/bills may warn and still allow this stamp)
+- `last_embed_ok` — incremental embed succeeded (not written when embed is skipped)
+- `last_daily_rag_ok` — written when imap + bodies succeed and embed
+  succeeded or was skipped. A second line records `embed=ok` or
+  `embed=skipped` (classify/bills may warn and still allow this stamp)
 
 Catch-up: `last_daily_rag_ok` missing or ≥ ~24h (15-minute slop so 20:05
 calendar is not skipped) → run, **resume first failed phase**, do not redo
@@ -129,6 +130,15 @@ keep `RunAtLoad` false on the installed Mini plist (match live HOLD).
 
 Embed health-check: `GET http://127.0.0.1:11434/api/tags` (`OLLAMA_HOST`)
 before the embed step. Local Ollama only — not a generate runtime.
+If that GET fails (unreachable, non-2xx, or timeout), the embed child
+is not run: one `step skip` line, exit 0, no `last_embed_ok`, and
+`last_daily_rag_ok` records `embed=skipped`. Why: Path A keeps Ollama
+off while Qwen is up, and retrieval is FTS-only, so a down Ollama must
+not abort imap/bodies that already succeeded. `MAILROOM_EMBED_REQUIRED=1`
+restores the hard-fail (abort, no daily stamp). If Ollama is reachable
+and the embed child itself fails, the chain still aborts and does not
+stamp. `--dry-run` logs the health-check it would do and does not call
+Ollama.
 
 ## Python
 
