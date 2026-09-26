@@ -16,8 +16,15 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+TESTS = ROOT / "tests"
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+
+import ollama_guard  # noqa: E402
+
+ollama_guard.install()
 
 import sor_health_pack as hp  # noqa: E402
 
@@ -422,27 +429,57 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("EXAMPLE_USER_LOCAL", proc.stdout)
         self.assertNotIn("/Users/USERNAME", proc.stdout)
 
-    def test_cli_json_and_hybrid_fail_open(self):
+    def _cli_json_hybrid(self, mode):
+        calls = []
+        opener = ollama_guard.ollama_urlopen(mode, calls)
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom.sqlite"
             _fixture(db)
             buf = io.StringIO()
-            with mock.patch.object(sys, "stdout", buf):
-                rc = hp.main(
-                    [
-                        "--db",
-                        str(db),
-                        "--json",
-                        "--skip-writers",
-                    ]
-                )
-        self.assertEqual(rc, 0)
+            with mock.patch.object(hp.urllib.request, "urlopen", opener):
+                with mock.patch.object(sys, "stdout", buf):
+                    rc = hp.main(
+                        [
+                            "--db",
+                            str(db),
+                            "--json",
+                            "--skip-writers",
+                        ]
+                    )
         payload = json.loads(buf.getvalue())
+        return rc, payload, buf.getvalue(), calls
+
+    def test_cli_json_and_hybrid_fail_open(self):
+        """Ollama down: /api/tags fails, hybrid fail-opens, embed is not called."""
+        rc, payload, text, calls = self._cli_json_hybrid("down")
+        self.assertEqual(rc, 0)
         self.assertTrue(payload["integrity_ok"])
         self.assertEqual(payload["messages"], 4)
-        self.assertNotIn(SECRET_BODY, buf.getvalue())
+        self.assertNotIn(SECRET_BODY, text)
         self.assertTrue(payload["hybrid"])
-        self.assertTrue(any(item.get("fail_open") for item in payload["hybrid"]))
+        self.assertTrue(all(item.get("fail_open") for item in payload["hybrid"]))
+        self.assertTrue(calls)
+        self.assertTrue(all(url.endswith("/api/tags") for url in calls))
+        self.assertFalse(any("/api/embed" in url for url in calls))
+        warnings = " ".join(payload.get("warnings") or []).lower()
+        self.assertIn("fail-open", warnings)
+
+    def test_cli_json_hybrid_when_ollama_up(self):
+        """Ollama up: tags and embed are mocked; vec_rank stays missing, not fail-open."""
+        rc, payload, text, calls = self._cli_json_hybrid("up")
+        self.assertEqual(rc, 0)
+        self.assertTrue(payload["integrity_ok"])
+        self.assertEqual(payload["messages"], 4)
+        self.assertNotIn(SECRET_BODY, text)
+        self.assertTrue(payload["hybrid"])
+        self.assertFalse(any(item.get("fail_open") for item in payload["hybrid"]))
+        self.assertTrue(any(url.endswith("/api/tags") for url in calls))
+        self.assertTrue(any(url.endswith("/api/embed") for url in calls))
+        notes = " ".join(
+            (item.get("detail") or "") for item in payload["hybrid"]
+        )
+        warnings = " ".join(payload.get("warnings") or [])
+        self.assertIn("vec_rank", notes + " " + warnings)
 
     def test_help_mentions_env_and_home(self):
         proc = subprocess.run(
