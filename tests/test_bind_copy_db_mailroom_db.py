@@ -52,38 +52,10 @@ SOR_STUB = "mailroom.sqlite"
 
 
 def _opened_db_line(name, db):
-    """classify.py and notify_bills.py log the basename; other children log the full path."""
-    if name in ("classify.py", "notify_bills.py"):
+    """classify.py logs the basename; other children log the full path."""
+    if name == "classify.py":
         return "opened_db=%s" % Path(db).name
     return "opened_db=%s" % db
-
-
-def _seed_notify_bills_db(path):
-    """Empty bills table so the digest exits quiet. No Keychain, no Messages."""
-    conn = sqlite3.connect(path)
-    try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS bills ("
-            "vendor TEXT, due_date TEXT, account_hint TEXT, "
-            "amount_cents INTEGER, status TEXT)"
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _invoke_child(mod, argv):
-    """notify_bills.main reads sys.argv and needs a bills table to stay quiet."""
-    if mod.__name__ != "notify_bills":
-        return mod.main(argv)
-    if "--db" in argv:
-        db_arg = argv[argv.index("--db") + 1]
-    else:
-        db_arg = os.environ.get("MAILROOM_DB")
-    if db_arg:
-        _seed_notify_bills_db(Path(db_arg))
-    with patch.object(sys, "argv", ["notify_bills.py"] + list(argv)):
-        return notify_bills.main()
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 
@@ -129,7 +101,10 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("db_mode=copy", proc.stderr)
-                self.assertIn(_opened_db_line(name, db), proc.stdout)
+                opened = _opened_db_line(name, db)
+                if name == "notify_bills.py":
+                    opened = "opened_db=%s" % Path(db).name
+                self.assertIn(opened, proc.stdout)
                 if name == "classify.py":
                     self.assertNotIn(str(db), proc.stdout)
                 self.assertNotIn("db_mode=refused", proc.stderr)
@@ -183,6 +158,34 @@ class BindCopyDbOpsPointerTests(unittest.TestCase):
         ops = OPS.read_text(encoding="utf-8")
         self.assertIn("Refuse the SoR stub", ops)
         self.assertIn("Tests only; no live SoR open", ops)
+
+
+def _seed_notify_bills_db(path):
+    """Empty bills table so the digest exits quiet. No Keychain, no Messages."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bills ("
+            "vendor TEXT, due_date TEXT, account_hint TEXT, "
+            "amount_cents INTEGER, status TEXT)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _invoke_child(mod, argv):
+    """notify_bills.main reads sys.argv and needs a bills table to stay quiet."""
+    if mod.__name__ != "notify_bills":
+        return mod.main(argv)
+    if "--db" in argv:
+        db_arg = argv[argv.index("--db") + 1]
+    else:
+        db_arg = os.environ.get("MAILROOM_DB")
+    if db_arg:
+        _seed_notify_bills_db(Path(db_arg))
+    with patch.object(sys, "argv", ["notify_bills.py"] + list(argv)):
+        return notify_bills.main()
 
 
 if __name__ == "__main__":
