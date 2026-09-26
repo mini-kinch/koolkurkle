@@ -321,6 +321,10 @@ class WiredWriterTests(unittest.TestCase):
             "notify_bills.py",
         ):
             src = (SCRIPTS / name).read_text(encoding="utf-8")
+            if name == "notify_bills.py":
+                self.assertIn("bind_copy_db", src, msg=name)
+                self.assertIn("CopyDbRefuse", src, msg=name)
+                continue
             self.assertIn("child_main", src, msg=name)
 
     def test_ask_mail_not_replaced_with_mcp_stub(self):

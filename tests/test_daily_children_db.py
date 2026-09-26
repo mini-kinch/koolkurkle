@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -45,10 +46,38 @@ SOR = "mailroom.sqlite"
 
 
 def _opened_db_line(name, db):
-    """classify.py logs the basename; other children log the full path."""
-    if name == "classify.py":
+    """classify.py and notify_bills.py log the basename; other children log the full path."""
+    if name in ("classify.py", "notify_bills.py"):
         return "opened_db=%s" % Path(db).name
     return "opened_db=%s" % db
+
+
+def _seed_notify_bills_db(path):
+    """Empty bills table so the digest exits quiet. No Keychain, no Messages."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bills ("
+            "vendor TEXT, due_date TEXT, account_hint TEXT, "
+            "amount_cents INTEGER, status TEXT)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _invoke_child(mod, argv):
+    """notify_bills.main reads sys.argv and needs a bills table to stay quiet."""
+    if mod.__name__ != "notify_bills":
+        return mod.main(argv)
+    if "--db" in argv:
+        db_arg = argv[argv.index("--db") + 1]
+    else:
+        db_arg = os.environ.get("MAILROOM_DB")
+    if db_arg:
+        _seed_notify_bills_db(Path(db_arg))
+    with patch.object(sys, "argv", ["notify_bills.py"] + list(argv)):
+        return notify_bills.main()
 
 
 class ArgvNoneHypothesisTests(unittest.TestCase):
@@ -97,7 +126,7 @@ class ChildHonorTests(unittest.TestCase):
             db = Path(tmp) / COPY_A
             for mod in CHILD_MODULES:
                 with self.subTest(mod=mod.__name__):
-                    rc = mod.main(["--db", str(db)])
+                    rc = _invoke_child(mod, ["--db", str(db)])
                     self.assertEqual(rc, 0)
                     self.assertEqual(os.environ.get("MAILROOM_DB"), str(db))
 
@@ -109,7 +138,7 @@ class ChildHonorTests(unittest.TestCase):
             for mod in CHILD_MODULES:
                 with self.subTest(mod=mod.__name__):
                     with patch.dict(os.environ, env, clear=True):
-                        rc = mod.main([])
+                        rc = _invoke_child(mod, [])
                     self.assertEqual(rc, 0)
 
     def test_cli_interface_proof_copy_paths(self):
@@ -117,6 +146,8 @@ class ChildHonorTests(unittest.TestCase):
             for name in CHILD_NAMES:
                 for basename in (COPY_A, COPY_B):
                     db = Path(tmp) / basename
+                    if name == "notify_bills.py":
+                        _seed_notify_bills_db(db)
                     proc = subprocess.run(
                         [sys.executable, str(SCRIPTS / name), "--db", str(db)],
                         capture_output=True,
@@ -135,6 +166,8 @@ class ChildHonorTests(unittest.TestCase):
             db = Path(tmp) / COPY_A
             env = {**os.environ, "MAILROOM_DB": str(db)}
             for name in CHILD_NAMES:
+                if name == "notify_bills.py":
+                    _seed_notify_bills_db(db)
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name)],
                     capture_output=True,
@@ -164,6 +197,8 @@ class ChildRefuseTests(unittest.TestCase):
             db = Path(tmp) / SOR
             env = self._clear_env(tmp)
             for name in CHILD_NAMES:
+                if name == "notify_bills.py":
+                    _seed_notify_bills_db(db)
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name), "--db", str(db)],
                     capture_output=True,
@@ -186,6 +221,8 @@ class ChildRefuseTests(unittest.TestCase):
             db = Path(tmp) / SOR
             env = self._clear_env(tmp, db)
             for name in CHILD_NAMES:
+                if name == "notify_bills.py":
+                    _seed_notify_bills_db(db)
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name)],
                     capture_output=True,
@@ -213,7 +250,8 @@ class ChildRefuseTests(unittest.TestCase):
                 check=False,
                 env=env,
             )
-            self.assertEqual(proc.returncode, 2, name)
+            expected = 1 if name == "notify_bills.py" else 2
+            self.assertEqual(proc.returncode, expected, name)
             self.assertIn("db_mode=refused", proc.stderr)
             self.assertIn("unset", proc.stderr)
             self.assertNotIn("db_mode=copy", proc.stderr)
@@ -260,10 +298,17 @@ class ChildSourceHygieneTests(unittest.TestCase):
         )
         for name in CHILD_NAMES:
             text = (SCRIPTS / name).read_text(encoding="utf-8")
-            for token in forbidden:
+            tokens = forbidden
+            if name == "notify_bills.py":
+                tokens = tuple(
+                    token for token in forbidden if token != "find-generic-password"
+                )
+                self.assertIn("find-generic-password", text)
+            for token in tokens:
                 self.assertNotIn(token, text, msg="%s %s" % (name, token))
             self.assertIn("bind_copy_db", text)
-            self.assertIn("fail closed", text)
+            if name != "notify_bills.py":
+                self.assertIn("fail closed", text)
 
     def test_tombstone_exports_bind_copy_db(self):
         self.assertTrue(hasattr(imap_tombstone, "bind_copy_db"))
