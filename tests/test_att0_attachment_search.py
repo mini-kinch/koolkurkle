@@ -392,8 +392,11 @@ class SchemaMigrationTests(unittest.TestCase):
     def test_cli_refuse_and_copy_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "mailroom-copy.sqlite"
+            sqlite3.connect(str(copy)).close()
             sor = Path(tmp) / "mailroom.sqlite"
             purged = Path(tmp) / "other-copy.sqlite"
+            absent = Path(tmp) / "absent.sqlite"
+            nested = Path(tmp) / "no-such-dir" / "absent.sqlite"
             out = io.StringIO()
             err = io.StringIO()
             with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
@@ -413,6 +416,21 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("refuse", err.getvalue())
             self.assertFalse(purged.exists())
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                rc = mig.main(["--db", str(absent)])
+            self.assertEqual(rc, 2)
+            self.assertIn("database not found", err.getvalue())
+            self.assertFalse(absent.exists())
+            with mock.patch("sys.stderr", err):
+                rc = mig.main(["--db", str(nested)])
+            self.assertEqual(rc, 2)
+            self.assertFalse(nested.exists())
+            self.assertFalse(nested.parent.exists())
+            with mock.patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    mig.main([])
+            self.assertEqual(ctx.exception.code, 2)
 
     def _seed_embeddings(self, db: Path) -> None:
         conn = sqlite3.connect(str(db))

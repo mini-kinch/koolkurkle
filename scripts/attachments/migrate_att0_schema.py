@@ -312,9 +312,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     args = build_parser().parse_args(raw)
+    db_path = Path(args.db)
+    if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:
+        sys.stderr.write(
+            "error: refuse: basename mailroom.sqlite "
+            "(pass --allow-mailroom-sqlite to override)\n"
+        )
+        return 2
+    if not db_path.is_file():
+        sys.stderr.write("error: database not found\n")
+        return 2
     try:
         report = migrate_database(
-            args.db,
+            db_path,
             allow_mailroom_sqlite=bool(args.allow_mailroom_sqlite),
             argv=raw,
         )

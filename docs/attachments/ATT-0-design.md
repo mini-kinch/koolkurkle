@@ -58,7 +58,7 @@ This change does not run the migration. Tests use temporary files only.
 Script: `scripts/attachments/migrate_att0_schema.py`  
 SQL: `scripts/attachments/schema.sql`
 
-The script loads that SQL. It is idempotent (`IF NOT EXISTS`, triggers created only when missing, FTS `rebuild` to match the content table). It does not bump `user_version`. It does not enable a writer pragma profile. It does not call `ask_mail`.
+The script loads that SQL. It is idempotent (`IF NOT EXISTS`, triggers created only when missing, FTS `rebuild` to match the content table). It does not bump `user_version`. It does not enable a writer pragma profile. It does not call `ask_mail`. The CLI returns exit code 2, and does not create a file, when `--db` is omitted or the path is not an existing database.
 
 | Table | Columns |
 | --- | --- |
