@@ -6,12 +6,17 @@ No network. No live mailbox. No system-of-record file.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -635,10 +640,11 @@ class FillTests(unittest.TestCase):
                 cmdlines=[],
                 lock_held=False,
             )
-            self.assertEqual(capped["capped"], 0)
-            self.assertEqual(capped["skipped"], 2)
+            self.assertEqual(capped["capped"], 2)
+            self.assertEqual(capped["skipped"], 0)
             self.assertEqual(capped["messages"], 0)
-            self.assertIn("skipped=2", meta.format_report(capped))
+            self.assertIn("capped: 2", meta.format_report(capped))
+            self.assertNotIn("skipped=2", meta.format_report(capped))
             conn = sqlite3.connect(str(db))
             try:
                 scans = conn.execute(
@@ -824,15 +830,16 @@ class FillTests(unittest.TestCase):
                     cmdlines=[],
                     lock_held=False,
                 )
-            self.assertEqual(report["stopped"], "timeout")
-            self.assertEqual(report["messages"], 0)
-            self.assertEqual(stub.uids, [])
+            self.assertEqual(report["stopped"], "")
+            self.assertEqual(report["messages"], 2)
+            self.assertEqual(stub.uids, ["1001", "1002"])
+            self.assertFalse(report["partial"])
             conn = sqlite3.connect(str(db))
             try:
                 stored = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
             finally:
                 conn.close()
-            self.assertEqual(stored, 0)
+            self.assertEqual(stored, len(EXPECTED_MIXED) + 1)
 
     def test_client_fetches_structure_only_over_ssl(self):
         seen = {}
@@ -987,6 +994,9 @@ class FillTests(unittest.TestCase):
             )
             self.assertEqual(report["messages"], 1)
             self.assertEqual(report["eligible"], 1)
+            self.assertEqual(report["skipped"], 1)
+            self.assertEqual(report["capped"], 0)
+            self.assertIn("capped: 0", meta.format_report(report))
             self.assertFalse(report["partial"])
             conn = sqlite3.connect(str(db))
             try:
@@ -1130,9 +1140,10 @@ class FillTests(unittest.TestCase):
                 cmdlines=[],
                 lock_held=False,
             )
-            self.assertEqual(skipped["skipped"], 1)
+            self.assertEqual(skipped["capped"], 1)
+            self.assertEqual(skipped["skipped"], 0)
             self.assertEqual(skipped["messages"], 0)
-            self.assertIn("skipped=1", meta.format_report(skipped))
+            self.assertIn("capped: 1", meta.format_report(skipped))
             conn = sqlite3.connect(str(huge))
             try:
                 scans = conn.execute(
@@ -1141,6 +1152,234 @@ class FillTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertEqual(scans, 0)
+
+    def test_select_rows_loops_folders_and_mailbox_skips_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [
+                    ("ex-deleted", "imap-live", "1", None, None, "synthetic", "Deleted"),
+                    ("ex-inbox", "imap-live", "1", None, None, "synthetic", "INBOX"),
+                    ("ex-blank", "imap-live", "1", None, None, "synthetic", None),
+                ],
+            )
+            conn = sqlite3.connect(str(db))
+            try:
+                _scanned, groups, skipped = meta._select_rows(conn, "imap", None)
+                self.assertEqual(skipped, 0)
+                self.assertEqual(
+                    [name for name, _rows in groups],
+                    [None, "Deleted", "INBOX"],
+                )
+                self.assertTrue(
+                    all(
+                        row[5] == name or (name is None and not (row[5] or "").strip())
+                        for name, rows in groups
+                        for row in rows
+                    )
+                )
+                _scanned, one, skipped = meta._select_rows(conn, "imap", "INBOX")
+            finally:
+                conn.close()
+            self.assertEqual([name for name, _rows in one], ["INBOX"])
+            self.assertEqual([row[0] for _name, rows in one for row in rows], ["ex-inbox"])
+            self.assertEqual(skipped, 2)
+            source = (PKG / "meta_fill.py").read_text(encoding="utf-8")
+            select = source.split("def _select_rows", 1)[1].split("\ndef ", 1)[0]
+            self.assertIn("folder = ?", select)
+            self.assertNotIn("_group_imap_rows", source)
+
+    def test_frozen_dump_raw_key_is_the_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain = _plain_rfc822()
+            other = b"Subject: not-the-body\r\n\r\nnope\r\n"
+            rec = (
+                json.dumps({"rfc822": other.decode("ascii"), "raw": plain.decode("utf-8")})
+                .encode("utf-8")
+                + b"\n"
+            )
+            dump = root / "archive-example.jsonl"
+            dump.write_bytes(rec)
+            db = root / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-raw", "jsonl-import", None, 0, len(rec), "synthetic-raw", None)],
+            )
+            report = meta.fill_metadata(
+                db,
+                source="jsonl",
+                jsonl_path=dump,
+                apply=True,
+                max_messages=0,
+                timeout_s=0,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(report["messages"], 1)
+            self.assertEqual(report["capped"], 0)
+            self.assertEqual(report["has_attachments"], 0)
+            self.assertEqual(report["stopped"], "")
+            conn = sqlite3.connect(str(db))
+            try:
+                subject_parts = conn.execute(
+                    "SELECT mime, size FROM attachments WHERE message_id='ex-raw'"
+                ).fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(len(subject_parts), 1)
+            self.assertEqual(subject_parts[0][0], "text/plain")
+            self.assertNotEqual(subject_parts[0][1], len(other))
+
+    def test_parse_byte_size_accepts_human_sizes_and_plain_bytes(self):
+        self.assertEqual(meta.parse_byte_size("64MB"), 64 * 1024 * 1024)
+        self.assertEqual(meta.parse_byte_size("64MiB"), 64 * 1024 * 1024)
+        self.assertEqual(meta.parse_byte_size("67108864"), 67108864)
+        self.assertEqual(meta.parse_byte_size("1KB"), 1024)
+        with self.assertRaises(argparse.ArgumentTypeError):
+            meta.parse_byte_size("64TB")
+        parser = meta.build_parser()
+        args = parser.parse_args(
+            [
+                "--db",
+                "x",
+                "--source",
+                "jsonl",
+                "--max-messages",
+                "0",
+                "--timeout",
+                "0",
+                "--max-record-bytes",
+                "64MB",
+            ]
+        )
+        self.assertEqual(args.max_messages, 0)
+        self.assertEqual(args.timeout, 0.0)
+        self.assertEqual(args.max_record_bytes, 64 * 1024 * 1024)
+        help_text = parser.format_help()
+        self.assertIn("full pass", help_text)
+        self.assertIn("--max-messages 0", help_text)
+        self.assertIn("--timeout 0", help_text)
+        self.assertIn("64MB", help_text)
+        self.assertIn("capped:", help_text)
+        self.assertIn("PARTIAL", help_text)
+
+    def test_sixty_mib_raw_record_peak_is_traced(self):
+        body_len = 60 * 1024 * 1024
+        prefix = (
+            b'{"raw":"MIME-Version: 1.0\\r\\n'
+            b"Content-Type: text/plain\\r\\n"
+            b"\\r\\n"
+        )
+        suffix = b'"}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump = root / "archive-example.jsonl"
+            chunk = b"A" * (1024 * 1024)
+            with dump.open("wb") as fh:
+                fh.write(prefix)
+                remaining = body_len
+                while remaining:
+                    n = chunk if remaining >= len(chunk) else chunk[:remaining]
+                    fh.write(n)
+                    remaining -= len(n)
+                fh.write(suffix)
+            length = dump.stat().st_size
+            self.assertLess(length, meta._DEFAULT_MAX_RECORD_BYTES)
+            db = root / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-60", "jsonl-import", None, 0, length, "synthetic-60", None)],
+            )
+            tracemalloc.start()
+            try:
+                report = meta.fill_metadata(
+                    db,
+                    source="jsonl",
+                    jsonl_path=dump,
+                    apply=False,
+                    max_messages=0,
+                    timeout_s=0,
+                    cmdlines=[],
+                    lock_held=False,
+                )
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(report["messages"], 1)
+            self.assertEqual(report["capped"], 0)
+            self.assertEqual(report["skipped"], 0)
+            self.assertEqual(report["has_attachments"], 0)
+            self.assertEqual(report["parts"], 1)
+            self.assertEqual(report["bytes_stored"], 0)
+            # CPython 3.12.3 tracemalloc peak for this fixture. The email
+            # parser, not the JSON reader, holds the extra copies.
+            self.assertAlmostEqual(peak, 699503008, delta=16 * 1024 * 1024)
+            self.assertGreater(peak, body_len)
+
+    def test_clone_dry_run_needs_no_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clone = root / "clone"
+            (clone / "scripts" / "attachments").mkdir(parents=True)
+            for name in (
+                "meta_fill.py",
+                "bodystructure.py",
+                "mime_meta.py",
+                "__init__.py",
+            ):
+                shutil.copy(PKG / name, clone / "scripts" / "attachments" / name)
+            for name in (
+                "imap_keychain.py",
+                "refuse_destructive.py",
+                "sor_writer_gate.py",
+                "with_writer_lock.py",
+            ):
+                shutil.copy(SCRIPTS / name, clone / "scripts" / name)
+            plain = _plain_rfc822()
+            rec = json.dumps({"raw": plain.decode("utf-8")}).encode("utf-8") + b"\n"
+            dump = root / "archive.jsonl"
+            dump.write_bytes(rec)
+            db = root / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-raw", "jsonl-import", None, 0, len(rec), "synthetic-raw", None)],
+            )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = "scripts:scripts/attachments"
+            env.pop("PYTHONHOME", None)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/attachments/meta_fill.py",
+                    "--dry-run",
+                    "--db",
+                    str(db),
+                    "--source",
+                    "jsonl",
+                    "--jsonl",
+                    str(dump),
+                    "--max-messages",
+                    "0",
+                    "--timeout",
+                    "0",
+                    "--max-record-bytes",
+                    "64MB",
+                ],
+                cwd=str(clone),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("dry_run=1", proc.stdout)
+            self.assertIn("messages=1", proc.stdout)
+            self.assertIn("capped: 0", proc.stdout)
+            self.assertIn("bytes_stored=0", proc.stdout)
+            self.assertNotIn("PARTIAL:", proc.stdout)
+
 
 class CliTests(unittest.TestCase):
     def test_negative_smoke_and_mailroom_refuse(self):
@@ -1427,6 +1666,18 @@ class DesignAndBoundaryTests(unittest.TestCase):
         self.assertIn("mailroom.imap.app-password", text)
         self.assertIn("messages.folder", text)
         self.assertIn("skipped", text)
+        self.assertIn("capped:", text)
+        self.assertIn("full pass", text)
+        self.assertIn("--max-messages 0", text)
+        self.assertIn("--timeout 0", text)
+        self.assertIn("64MB", text)
+        self.assertIn("Deleted 980", text)
+        self.assertIn("Junk 509", text)
+        self.assertIn("INBOX 422", text)
+        self.assertIn("Newsletters 177", text)
+        self.assertIn("Sent 34", text)
+        self.assertIn("PYTHONPATH=scripts:scripts/attachments", text)
+        self.assertIn("`raw`", text)
         for name in ("meta_fill.py", "bodystructure.py", "mime_meta.py"):
             source = (PKG / name).read_text(encoding="utf-8")
             self.assertNotIn("BODY[]", source, name)

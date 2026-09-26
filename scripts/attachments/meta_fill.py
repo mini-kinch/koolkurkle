@@ -18,9 +18,13 @@ filename column stays NULL. Refuses basename ``mailroom.sqlite`` unless
 
 ``--max-messages`` (default 200) and ``--timeout`` (default 30 seconds)
 can stop early. The summary then starts with a ``PARTIAL:`` banner and
-sets ``partial`` in the JSON summary. ``--max-record-bytes`` defaults to
-64 MiB. A longer record is skipped, not scanned, and counted in
-``skipped``.
+sets ``partial`` in the JSON summary. A full pass is
+``--max-messages 0 --timeout 0`` (0 means no cap) plus
+``--max-record-bytes 64MB`` when a record is larger than the default.
+``--max-record-bytes`` accepts plain bytes or a human size. Default is
+64 MiB, so records over 2 MB are counted. A row excluded by any cap is
+not counted and is reported as ``capped: N``, separate from ``scanned``
+and ``skipped``. JSONL ``raw`` (frozen dump) or ``rfc822`` is streamed.
 
 Does not create the ATT-0 schema and does not reshape ``messages``.
 A live mailbox or the system of record needs a separate approval.
@@ -33,6 +37,7 @@ import datetime
 import imaplib
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -240,22 +245,290 @@ def _connect(path: Path, apply: bool) -> sqlite3.Connection:
     return conn
 
 
-def _rfc822_from_slice(blob: bytes) -> bytes:
-    stripped = blob.lstrip()
-    if not stripped.startswith(b"{"):
+_SIZE_RE = re.compile(r"^(\d+)\s*([kmg]i?b?)?$", re.IGNORECASE)
+_SIZE_MULT = {
+    "": 1,
+    "k": 1024,
+    "kb": 1024,
+    "kib": 1024,
+    "m": 1024 ** 2,
+    "mb": 1024 ** 2,
+    "mib": 1024 ** 2,
+    "g": 1024 ** 3,
+    "gb": 1024 ** 3,
+    "gib": 1024 ** 3,
+}
+_READ_CHUNK = 1024 * 1024
+_JSON_BODY_KEYS = ("raw", "rfc822")
+
+
+def parse_byte_size(text: str) -> int:
+    """Plain byte count or a human size. ``MB`` and ``MiB`` are 1024*1024."""
+    raw = str(text).strip().replace("_", "")
+    match = _SIZE_RE.fullmatch(raw)
+    if match is None:
+        raise argparse.ArgumentTypeError("invalid size %r" % text)
+    number = int(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit not in _SIZE_MULT:
+        raise argparse.ArgumentTypeError("invalid size %r" % text)
+    return number * _SIZE_MULT[unit]
+
+
+class _SliceReader:
+    """Read at most ``length`` bytes from ``fh`` in chunks. Seek is already done."""
+
+    def __init__(self, fh, length: int) -> None:
+        self._fh = fh
+        self.left = int(length)
+        self._buf = b""
+        self._i = 0
+        self.eof_early = False
+
+    def _pull(self) -> bool:
+        if self._i < len(self._buf):
+            return True
+        if self.left <= 0:
+            self._buf = b""
+            self._i = 0
+            return False
+        n = _READ_CHUNK if self.left > _READ_CHUNK else self.left
+        data = self._fh.read(n)
+        if not data:
+            self.left = 0
+            self._buf = b""
+            self._i = 0
+            self.eof_early = True
+            return False
+        if len(data) < n:
+            self.eof_early = True
+        self.left -= len(data)
+        self._buf = data
+        self._i = 0
+        return True
+
+    def get(self) -> int | None:
+        if not self._pull():
+            return None
+        value = self._buf[self._i]
+        self._i += 1
+        return value
+
+    def read_all(self) -> bytes:
+        """Return every byte of the slice, including bytes already buffered."""
+        parts = []
+        if self._i < len(self._buf):
+            parts.append(self._buf[self._i :])
+            self._i = len(self._buf)
+        while self.left > 0:
+            n = _READ_CHUNK if self.left > _READ_CHUNK else self.left
+            data = self._fh.read(n)
+            if not data:
+                self.eof_early = True
+                break
+            if len(data) < n:
+                self.eof_early = True
+            self.left -= len(data)
+            parts.append(data)
+        return b"".join(parts)
+
+
+class _Pushback:
+    """One-byte pushback over a slice reader."""
+
+    def __init__(self, reader: _SliceReader) -> None:
+        self._reader = reader
+        self._held: int | None = None
+
+    def get(self) -> int | None:
+        if self._held is not None:
+            value = self._held
+            self._held = None
+            return value
+        return self._reader.get()
+
+    def push(self, value: int) -> None:
+        if self._held is not None:
+            raise RuntimeError("pushback full")
+        self._held = value
+
+
+def _skip_ws_pb(pb: _Pushback) -> int | None:
+    while True:
+        ch = pb.get()
+        if ch is None:
+            return None
+        if ch not in (32, 9, 10, 13):
+            return ch
+
+
+def _decode_json_string_pb(pb: _Pushback) -> bytearray:
+    out = bytearray()
+    while True:
+        ch = pb.get()
+        if ch is None:
+            raise ValueError("truncated json string")
+        if ch == 34:
+            return out
+        if ch != 92:
+            out.append(ch)
+            continue
+        esc = pb.get()
+        if esc is None:
+            raise ValueError("truncated json string")
+        mapped = {
+            34: 34,
+            92: 92,
+            47: 47,
+            98: 8,
+            102: 12,
+            110: 10,
+            114: 13,
+            116: 9,
+        }
+        if esc in mapped:
+            out.append(mapped[esc])
+            continue
+        if esc != 117:
+            raise ValueError("bad json string")
+        hex_digits = bytearray()
+        for _ in range(4):
+            digit = pb.get()
+            if digit is None:
+                raise ValueError("truncated json string")
+            hex_digits.append(digit)
+        try:
+            code = int(hex_digits.decode("ascii"), 16)
+        except ValueError as exc:
+            raise ValueError("bad json string") from exc
+        if 0xD800 <= code <= 0xDBFF:
+            if pb.get() != 92 or pb.get() != 117:
+                raise ValueError("bad json string")
+            low_digits = bytearray()
+            for _ in range(4):
+                digit = pb.get()
+                if digit is None:
+                    raise ValueError("truncated json string")
+                low_digits.append(digit)
+            try:
+                low = int(low_digits.decode("ascii"), 16)
+            except ValueError as exc:
+                raise ValueError("bad json string") from exc
+            if not 0xDC00 <= low <= 0xDFFF:
+                raise ValueError("bad json string")
+            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+        out.extend(chr(code).encode("utf-8", "replace"))
+
+
+def _skip_json_value_pb(pb: _Pushback, first: int) -> None:
+    if first == 34:
+        _decode_json_string_pb(pb)
+        return
+    if first == 123:
+        _parse_json_object(pb, capture=False)
+        return
+    if first == 91:
+        ch = _skip_ws_pb(pb)
+        if ch is None:
+            raise ValueError("truncated json record")
+        if ch == 93:
+            return
+        while True:
+            _skip_json_value_pb(pb, ch)
+            nxt = _skip_ws_pb(pb)
+            if nxt == 93:
+                return
+            if nxt != 44:
+                raise ValueError("jsonl record is not an object")
+            ch = _skip_ws_pb(pb)
+            if ch is None:
+                raise ValueError("truncated json record")
+    while True:
+        ch = pb.get()
+        if ch is None:
+            return
+        if ch in (44, 125, 93):
+            pb.push(ch)
+            return
+        if ch in (32, 9, 10, 13):
+            pb.push(ch)
+            return
+
+
+def _parse_json_object(pb: _Pushback, capture: bool) -> bytearray | None:
+    """``pb`` is positioned just after ``{``. Return the body string if capturing."""
+    found_raw: bytearray | None = None
+    found_rfc822: bytearray | None = None
+    ch = _skip_ws_pb(pb)
+    if ch is None:
+        raise ValueError("truncated json record")
+    if ch == 125:
+        if not capture:
+            return None
+        raise ValueError("jsonl record has no raw text")
+    while True:
+        if ch != 34:
+            raise ValueError("jsonl record is not an object")
+        key = _decode_json_string_pb(pb).decode("utf-8", "replace")
+        colon = _skip_ws_pb(pb)
+        if colon != 58:
+            raise ValueError("jsonl record is not an object")
+        val = _skip_ws_pb(pb)
+        if val is None:
+            raise ValueError("truncated json record")
+        if capture and key in _JSON_BODY_KEYS and val == 34:
+            body = _decode_json_string_pb(pb)
+            if key == "raw":
+                found_raw = body
+            elif found_rfc822 is None:
+                found_rfc822 = body
+        else:
+            _skip_json_value_pb(pb, val)
+        if found_raw is not None:
+            return found_raw
+        nxt = _skip_ws_pb(pb)
+        if nxt == 125:
+            break
+        if nxt != 44:
+            raise ValueError("jsonl record is not an object")
+        ch = _skip_ws_pb(pb)
+        if ch is None:
+            raise ValueError("truncated json record")
+    if not capture:
+        return None
+    if found_raw is not None:
+        return found_raw
+    if found_rfc822 is not None:
+        return found_rfc822
+    raise ValueError("jsonl record has no raw text")
+
+
+def _read_rfc822(fh, offset: int, length: int) -> bytes | bytearray:
+    """Stream one jsonl slice. Frozen dumps store the message under ``raw``.
+
+    A non-JSON slice is raw RFC822. A JSON object uses ``raw`` when that
+    key is present, otherwise ``rfc822``. The file is read in 1 MiB chunks.
+    The decoded message is the large buffer; the JSON wrapper is not kept.
+    """
+    fh.seek(offset)
+    reader = _SliceReader(fh, length)
+    pb = _Pushback(reader)
+    first = _skip_ws_pb(pb)
+    if first is None:
+        raise ValueError("short read")
+    if first != 123:
+        fh.seek(offset)
+        whole = _SliceReader(fh, length)
+        blob = whole.read_all()
+        if whole.eof_early or len(blob) != length:
+            raise ValueError("short read")
         return blob
-    try:
-        obj = json.loads(blob.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("jsonl record is not utf-8 json") from exc
-    if not isinstance(obj, dict):
-        raise ValueError("jsonl record is not an object")
-    raw = obj.get("rfc822")
-    if raw is None:
-        raw = obj.get("raw")
-    if not isinstance(raw, str):
-        raise ValueError("jsonl record has no rfc822 text")
-    return raw.encode("utf-8")
+    body = _parse_json_object(pb, capture=True)
+    if body is None:
+        raise ValueError("jsonl record has no raw text")
+    if reader.eof_early:
+        raise ValueError("short read")
+    return body
 
 
 def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
@@ -279,33 +552,90 @@ def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
     }
 
 
-def _select_rows(conn: sqlite3.Connection, source: str):
+_IMAP_NOT_SCANNED = "id NOT IN (SELECT message_id FROM attachment_meta_scans)"
+_IMAP_FOLDER_KEY = (
+    "CASE WHEN folder IS NULL OR TRIM(folder) = '' THEN NULL ELSE folder END"
+)
+
+
+def _select_rows(conn: sqlite3.Connection, source: str, mailbox: str | None = None):
+    """Return ``(already_scanned, groups, skipped_other)``.
+
+    IMAP UIDs are unique per folder. A full pass loops distinct folders and
+    runs ``AND folder=?`` for each before that folder is selected. ``mailbox``
+    is one such query. ``skipped_other`` counts unscanned imap-live rows whose
+    folder is null, blank, or not ``mailbox``. JSONL is a single group and
+    ``skipped_other`` is 0.
+    """
+    cols = _columns(conn, "messages")
     if source == "imap":
-        where = "source = ?"
-        params: tuple = (_IMAP_SOURCE,)
-        order = "id"
-    elif source == "jsonl":
+        if "folder" not in cols:
+            raise FillRefuse("messages.folder is missing")
+        if mailbox is not None:
+            scanned = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE source = ? AND folder = ? "
+                "AND id IN (SELECT message_id FROM attachment_meta_scans)",
+                (_IMAP_SOURCE, mailbox),
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT id, uid, jsonl_offset, jsonl_len, source, folder "
+                "FROM messages WHERE source = ? AND folder = ? AND %s "
+                "ORDER BY id" % _IMAP_NOT_SCANNED,
+                (_IMAP_SOURCE, mailbox),
+            ).fetchall()
+            skipped = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE source = ? AND %s AND "
+                "(folder IS NULL OR TRIM(folder) = '' OR folder != ?)"
+                % _IMAP_NOT_SCANNED,
+                (_IMAP_SOURCE, mailbox),
+            ).fetchone()[0]
+            groups = [(mailbox, rows)] if rows else []
+            return int(scanned), groups, int(skipped)
+        scanned = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE source = ? AND id IN "
+            "(SELECT message_id FROM attachment_meta_scans)",
+            (_IMAP_SOURCE,),
+        ).fetchone()[0]
+        folder_rows = conn.execute(
+            "SELECT DISTINCT %s AS folder_key FROM messages "
+            "WHERE source = ? AND %s ORDER BY folder_key"
+            % (_IMAP_FOLDER_KEY, _IMAP_NOT_SCANNED),
+            (_IMAP_SOURCE,),
+        ).fetchall()
+        groups = []
+        for (folder_key,) in folder_rows:
+            name = _folder_name(folder_key)
+            if name is None:
+                clause = "(folder IS NULL OR TRIM(folder) = '')"
+                params: tuple = (_IMAP_SOURCE,)
+            else:
+                clause = "folder = ?"
+                params = (_IMAP_SOURCE, name)
+            rows = conn.execute(
+                "SELECT id, uid, jsonl_offset, jsonl_len, source, folder "
+                "FROM messages WHERE source = ? AND %s AND %s ORDER BY id"
+                % (clause, _IMAP_NOT_SCANNED),
+                params,
+            ).fetchall()
+            if rows:
+                groups.append((name, rows))
+        return int(scanned), groups, 0
+    if source == "jsonl":
         where = "source != ? AND jsonl_offset IS NOT NULL"
         params = (_IMAP_SOURCE,)
-        order = "jsonl_offset, id"
-    else:
-        raise FillRefuse("source must be imap or jsonl")
-    cols = _columns(conn, "messages")
-    if source == "imap" and "folder" not in cols:
-        raise FillRefuse("messages.folder is missing")
-    folder_expr = "folder" if "folder" in cols else "NULL"
-    scanned = conn.execute(
-        "SELECT COUNT(*) FROM messages WHERE %s AND id IN "
-        "(SELECT message_id FROM attachment_meta_scans)" % where,
-        params,
-    ).fetchone()[0]
-    rows = conn.execute(
-        "SELECT id, uid, jsonl_offset, jsonl_len, source, %s FROM messages "
-        "WHERE %s AND id NOT IN (SELECT message_id FROM attachment_meta_scans) "
-        "ORDER BY %s" % (folder_expr, where, order),
-        params,
-    ).fetchall()
-    return int(scanned), rows
+        scanned = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE %s AND id IN "
+            "(SELECT message_id FROM attachment_meta_scans)" % where,
+            params,
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, uid, jsonl_offset, jsonl_len, source, NULL FROM messages "
+            "WHERE %s AND id NOT IN (SELECT message_id FROM attachment_meta_scans) "
+            "ORDER BY jsonl_offset, id" % where,
+            params,
+        ).fetchall()
+        return int(scanned), [(None, rows)], 0
+    raise FillRefuse("source must be imap or jsonl")
 
 
 def _folder_name(value: Any) -> str | None:
@@ -315,25 +645,6 @@ def _folder_name(value: Any) -> str | None:
     if text.strip() == "":
         return None
     return text
-
-
-def _group_imap_rows(rows, mailbox: str | None):
-    """Group unscanned IMAP rows by folder, preserving id order.
-
-    ``mailbox`` limits the run to that folder. UIDs are only compared
-    inside one folder.
-    """
-    order: list[str | None] = []
-    groups: dict[str | None, list] = {}
-    for row in rows:
-        folder = _folder_name(row[5])
-        if mailbox is not None and folder != mailbox:
-            continue
-        if folder not in groups:
-            order.append(folder)
-            groups[folder] = []
-        groups[folder].append(row)
-    return [(name, groups[name]) for name in order]
 
 
 def _visited(report: dict[str, Any]) -> int:
@@ -367,11 +678,12 @@ def _note_partial(report: dict[str, Any], limit_text: str) -> None:
 
 
 def _stop_for_limits(report, *, start, tick, timeout_s, max_messages) -> bool:
-    if tick() - start > timeout_s:
+    """Stop only when a positive cap is set. ``0`` means unlimited."""
+    if timeout_s > 0 and tick() - start > timeout_s:
         report["stopped"] = "timeout"
         _note_partial(report, "timeout=%s" % _limit_num(timeout_s))
         return True
-    if _visited(report) >= max_messages:
+    if max_messages > 0 and _visited(report) >= max_messages:
         report["stopped"] = "max_messages"
         _note_partial(report, "max_messages=%s" % max_messages)
         return True
@@ -458,12 +770,7 @@ def _parts_for_row(
         raise ValueError("bad offset")
     if length_i > max_record_bytes:
         raise _Oversized()
-    fh.seek(offset_i)
-    blob = fh.read(length_i)
-    if len(blob) != length_i:
-        raise ValueError("short read")
-    raw = _rfc822_from_slice(blob)
-    del blob
+    raw = _read_rfc822(fh, offset_i, length_i)
     parts = parts_from_rfc822(raw)
     del raw
     return parts
@@ -533,24 +840,15 @@ def fill_metadata(
     fh = None
     opened_client = False
     client = imap_client
+    skipped_other = 0
     try:
         _require_schema(conn)
-        scanned, rows = _select_rows(conn, source)
+        scanned, groups, skipped_other = _select_rows(
+            conn, source, mailbox if source == "imap" else None
+        )
         report["scanned"] = scanned
-        if source == "imap":
-            groups = _group_imap_rows(rows, mailbox)
-        else:
-            groups = [(None, list(rows))]
         report["eligible"] = sum(len(group) for _name, group in groups)
-        if timeout_s <= 0:
-            report["stopped"] = "timeout"
-            _note_partial(report, "timeout=%s" % _limit_num(timeout_s))
-            return report
-        if max_messages <= 0:
-            report["stopped"] = "max_messages"
-            _note_partial(report, "max_messages=%s" % max_messages)
-            return report
-        if source == "jsonl" and rows:
+        if source == "jsonl" and report["eligible"]:
             try:
                 fh = open(dump, "rb")
             except OSError:
@@ -626,7 +924,7 @@ def fill_metadata(
                         max_record_bytes=max_record_bytes,
                     )
                 except _Oversized:
-                    report["skipped"] += 1
+                    report["capped"] += 1
                     continue
                 except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError):
                     report["errors"] += 1
@@ -662,6 +960,7 @@ def fill_metadata(
         if fh is not None:
             fh.close()
         conn.close()
+    report["skipped"] = skipped_other
     report["bytes_stored"] = 0
     return report
 
@@ -689,6 +988,7 @@ def format_report(report: dict[str, Any]) -> str:
             "skipped=%s" % report.get("skipped"),
             "errors=%s" % report.get("errors"),
             "partial=%s" % (1 if report.get("partial") else 0),
+            "capped: %s" % report.get("capped"),
         ]
     )
     lines.append("summary_json=%s" % json.dumps(report, sort_keys=True))
@@ -700,7 +1000,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "ATT-0 metadata-only attachment fill. Default is dry-run counts. "
             "Refuses basename mailroom.sqlite unless --allow-mailroom-sqlite. "
-            "Does not store part bytes."
+            "Does not store part bytes. "
+            "A full pass is --max-messages 0 --timeout 0 --max-record-bytes 64MB. "
+            "The summary prints capped: N separate from scanned and skipped. "
+            "Defaults still print a PARTIAL banner when rows remain."
         )
     )
     parser.add_argument("--db", required=True, help="Existing SQLite database.")
@@ -731,13 +1034,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Permit basename mailroom.sqlite. The writer gate still applies.",
     )
-    parser.add_argument("--max-messages", type=int, default=_DEFAULT_MAX_MESSAGES)
+    parser.add_argument(
+        "--max-messages",
+        type=int,
+        default=_DEFAULT_MAX_MESSAGES,
+        help=(
+            "Stop after this many eligible rows (default 200). "
+            "0 means no message cap. A full pass uses --max-messages 0. "
+            "A stopped run still prints a PARTIAL banner."
+        ),
+    )
     parser.add_argument("--max-parts", type=int, default=_DEFAULT_MAX_PARTS)
-    parser.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT_S)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=_DEFAULT_TIMEOUT_S,
+        help=(
+            "Stop after this many seconds (default 30). "
+            "0 means no time cap. A full pass uses --timeout 0. "
+            "A stopped run still prints a PARTIAL banner."
+        ),
+    )
     parser.add_argument(
         "--max-record-bytes",
-        type=int,
+        type=parse_byte_size,
         default=_DEFAULT_MAX_RECORD_BYTES,
+        help=(
+            "Do not parse a JSONL record longer than this. "
+            "Plain bytes or a human size such as 64MB (1024*1024). "
+            "Default 67108864 (64MB). Those rows are capped: N, not scanned."
+        ),
     )
     parser.add_argument("--host", help="IMAP host. Else MAILROOM_IMAP_HOST.")
     parser.add_argument("--user", help="IMAP user. Else MAILROOM_IMAP_USER.")

@@ -169,13 +169,15 @@ Script: `scripts/attachments/meta_fill.py`. It does not create schema and it doe
 
 ### Option 1 — IMAP rows (`source='imap-live'`)
 
-`--source imap`. UIDs are unique only inside one folder. The filler groups unscanned `source='imap-live'` rows by `messages.folder` and issues `SELECT` (readonly) for that folder before UID FETCH of `(BODYSTRUCTURE)` for its rows. The same UID in two folders is two rows. `--mailbox` (or `MAILROOM_IMAP_MAILBOX`) limits the run to one folder. Omit it to select every folder that still has unscanned rows. A row with no folder is an error and is not marked scanned.
+`--source imap`. UIDs are unique only inside one `messages.folder`. `_select_rows` does not load every imap-live row and then select one mailbox. A full pass queries `DISTINCT` folder keys, then for each folder runs `AND folder=?` (a null or blank folder uses `folder IS NULL OR TRIM(folder)=''`) and issues `SELECT` (readonly) for that folder before UID FETCH of `(BODYSTRUCTURE)` for its rows. The same UID in two folders is two rows. `--mailbox` (or `MAILROOM_IMAP_MAILBOX`) is a single `AND folder=?` query for that folder. Rows in other folders, or with a null or blank folder, are not fetched. They are counted in `skipped` and are not marked scanned. Omit `--mailbox` to select every folder that still has unscanned rows. A row with no folder is an error and is not marked scanned.
+
+On the live copy the unscanned imap-live spread is Deleted 980, Junk 509, INBOX 422, Newsletters 177, Sent 34, and 9 in others (2131 rows). A full pass has to walk that set folder by folder.
 
 The connection is `imaplib.IMAP4_SSL` on port 993. Plain IMAP is not constructed. Host and user come from `--host` / `--user` or `MAILROOM_IMAP_HOST` / `MAILROOM_IMAP_USER`. There is no password option and no password environment variable. The password is read from macOS Keychain the same way `scripts/run_mailroom_daily.sh` loads it for the IMAP scripts: `security find-generic-password -s mailroom.imap.app-password -w`, with one fallback to `mailroom.icloud.app-password` when the default item misses. The helper is `scripts/imap_keychain.py`. The password is not written to the report, the database, or the repository. Tests mock `imaplib.IMAP4_SSL` and the Keychain call. Nothing in this packet connects to a real mailbox.
 
 ### Option 2 — archive rows (JSONL dump)
 
-`--source jsonl`. One streamed pass over rows whose `source` is not `imap-live` and whose `jsonl_offset` is not NULL, ordered by that offset. The dump is opened read-only (`rb`). Each row seeks to `jsonl_offset` and reads `jsonl_len` bytes. A slice that starts with `{` is a JSON object with `rfc822` or `raw` text. Anything else is raw RFC822. MIME headers are parsed the same way as option 1. The dump is not rewritten. Tests use a synthetic dump name.
+`--source jsonl`. One streamed pass over rows whose `source` is not `imap-live` and whose `jsonl_offset` is not NULL, ordered by that offset. The dump is opened read-only (`rb`). Each row seeks to `jsonl_offset` and reads `jsonl_len` bytes in 1 MiB chunks. The frozen dump stores the RFC822 text on a `raw` key. A slice that starts with `{` is a JSON object: `raw` wins when that key is present, otherwise `rfc822`. Anything else is raw RFC822. The JSON wrapper is not retained. MIME headers are parsed the same way as option 1. The dump is not rewritten. Tests use a synthetic dump name.
 
 ### What a part row means
 
@@ -198,9 +200,11 @@ A body-only message still gets an `attachment_meta_scans` row (`has_attachments`
 
 `attachment_meta_scans.message_id` is the resume key. A later run skips that message, so turning the flag on later does **not** backfill names. The same is true of `max_parts`: a truncated tree is marked scanned. Choose both before the first apply.
 
-A record longer than `--max-record-bytes` (default 64 MiB, 67108864 bytes) is not parsed from a short slice, is counted in `skipped`, and is **not** marked scanned, so a later higher cap can retry. The dump is not loaded. Each row seeks to `jsonl_offset` and reads at most one record. Peak memory is that record plus the decoded RFC822 text while both are alive, about twice the record size, so about 128 MiB when a record sits at the 64 MiB cap. Both buffers are released before the next row.
+A record longer than `--max-record-bytes` is not parsed from a short slice and is **not** marked scanned, so a later higher cap can retry. The flag accepts plain bytes or a human size (`64MB` and `64MiB` are both 1024*1024, so `64MB` is 67108864). The default is 64 MiB. Those rows are the ones most likely to carry attachments (about 1,503 records are over 2 MB, and 257 are over 10 MB), so a full pass must include them by raising this flag rather than dropping them. Each excluded row increments `capped` and is not counted as `scanned` or `skipped`. The text summary always prints `capped: N` on its own line. The dump is not loaded. Each row seeks to `jsonl_offset` and streams at most one record.
 
-A parse error, a missing UID, or a bad offset is an error and is not marked scanned. `--max-messages` (default 200) and `--timeout` (default 30 seconds) stop before the next message. Those defaults do not cover the whole mailbox. When the run stops early and rows remain, the text summary starts with a loud banner `PARTIAL: scanned X of Y (limit max_messages=…)` or `PARTIAL: scanned X of Y (limit timeout=…)`, and the JSON summary sets `partial` to true. X is how many eligible rows this run handled. Y is the eligible rows at the start of the run (after a mailbox filter). Rows already committed stay. The process exit code is still 0. `scanned` in the report is how many matching rows were already in `attachment_meta_scans` and were skipped. `skipped` is the oversize-record count.
+Peak memory was measured with `tracemalloc` around one dry-run `fill_metadata` of a synthetic JSONL record. The record is a JSON object whose `raw` value is a `text/plain` message with a 60 MiB body (`60*1024*1024` = 62914560 bytes of ASCII `A`), written by hand so `json.dumps` never builds a second copy of the body. The trace starts immediately before `fill_metadata` and the peak is `tracemalloc.get_traced_memory()[1]` after it returns. On CPython 3.12.3 that peak was 699503008 bytes (667.1 MiB). The JSON reader streams the file in 1 MiB chunks and keeps the decoded message, not the wrapper. The peak above that decoded message is `email.message_from_bytes` (`policy.default`), which turns the RFC822 text into one `str` and copies the body line while it records the part size. Those buffers are released before the next row. The same ratio applied to a record at the 64 MiB cap is about 746136542 bytes (711.6 MiB).
+
+A parse error, a missing UID, or a bad offset is an error and is not marked scanned. `--max-messages` (default 200) and `--timeout` (default 30 seconds) stop before the next message. Those defaults do not cover the whole mailbox, and the summary still starts with a `PARTIAL:` banner when they stop the run early. A full pass is `--max-messages 0 --timeout 0` (0 means no cap for those two flags) together with `--max-record-bytes 64MB` when a record is larger than the default. When the run stops early and rows remain, the text summary starts with a loud banner `PARTIAL: scanned X of Y (limit max_messages=…)` or `PARTIAL: scanned X of Y (limit timeout=…)`, and the JSON summary sets `partial` to true. X is how many eligible rows this run handled. Y is the eligible rows at the start of the run (after a mailbox filter). Rows already committed stay. The process exit code is still 0. `scanned` in the report is how many matching rows were already in `attachment_meta_scans` and were left alone. `skipped` is unscanned rows excluded by `--mailbox` (a different folder, or a null or blank folder). `capped` is rows excluded by `--max-record-bytes` or by `--max-parts` of 0. Those three numbers are separate.
 
 ### Writer rules
 
@@ -210,12 +214,20 @@ Both options are writers, including dry-run:
 - Basename `mailroom.sqlite` is refused unless `--allow-mailroom-sqlite`, **before** a connection, including dry-run. The writer gate still runs after that flag.
 - The database file must already exist. A missing path exits 2 and does not create a file.
 - Default is dry-run (counts only). `--apply` writes. Passing both exits 2.
-- Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `eligible`, `stopped`, `capped`, `skipped`, `errors`, `partial`. When `partial` is true the first line is the `PARTIAL:` banner. The same object is printed as one JSON object on the `summary_json=` line.
+- Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `eligible`, `stopped`, `capped`, `skipped`, `errors`, `partial`, and its own line `capped: N`. When `partial` is true the first line is the `PARTIAL:` banner. The same object is printed as one JSON object on the `summary_json=` line.
 - Each apply commits one message: part rows, `has_attachments`, and the scan row, together. A second apply does not insert those parts again.
 
 ### Live run needs a separate approval
 
 This packet does not run the fill against a live mailbox or the system of record. Doing that is a separate approval. In that approval the user decides whether `--store-filenames` is on. Until then, the supported check is `--dry-run` against an explicit copy database.
+
+The dry-run is meant to run from a `/tmp` clone with no install. From the clone root:
+
+```
+PYTHONPATH=scripts:scripts/attachments python3 scripts/attachments/meta_fill.py --dry-run --db /tmp/mailroom-copy.sqlite --source jsonl --jsonl /tmp/archive.jsonl --max-messages 0 --timeout 0 --max-record-bytes 64MB
+```
+
+`PYTHONPATH=scripts:scripts/attachments` is required for that layout. The script also inserts its own directory on `sys.path`, and it does not need a package install.
 
 ---
 
