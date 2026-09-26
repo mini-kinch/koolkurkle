@@ -11,15 +11,16 @@ Idle the live 27B server for 30 minutes with the watchdog booted out, then run a
 
 `cold --idle` sleeps, sends the max-tokens-1 probe with a 60 second timeout, then one paste request. The paste timing bar is 90 seconds. A probe timeout is a wedge (bench exit 4) and the paste is not sent. The harness never calls `launchctl`.
 
-The paste request is three lines, read separately. Thresholds are unchanged (90 seconds, content length greater than 300):
+The paste request is separate lines, read separately. The timing threshold is unchanged (90 seconds). The default paste has an answer key, so the answer line replaces the content-length bar. `content_len` is still printed and is not a pass/fail for that paste.
 
-- `PASS cold_request` / `FAIL cold_request` is timing: the paste returned inside 90 seconds. A short body or `finish_reason` `length` does not flip this line.
-- `PASS cold_truncated truncated=0` or `FAIL cold_truncated truncated=<n> idx=<n> finish=length content_len=<len> completion_tokens=<n>`. `finish_reason` `length` is a cut-off. This line scores the paste only.
-- `PASS cold_content short=0 limit=content_len<=300` or `FAIL cold_content short=<n> limit=content_len<=300 idx=<n> content_len=<len>`. Content length 300 or less is a short answer. A `finish=stop` reply with 79 completion tokens and `content_len` 202 is short, not truncated. One reply can fail both lines.
+- `PASS cold_request` / `FAIL cold_request` is timing: the paste returned inside 90 seconds. A short body, a missing answer fact, or `finish_reason` `length` does not flip this line.
+- `PASS cold_truncated truncated=0` or `FAIL cold_truncated truncated=<n> idx=<n> finish=length content_len=<len> completion_tokens=<n>`. `finish_reason` `length` is a cut-off. This line scores the paste only. A correct reply that was cut off still fails this line.
+- `PASS cold_answer matched=4/4` or `FAIL cold_answer missing=<facts> idx=<n>`. The default paste (`paste_4k_synthetic.txt`) requires `syn-0007`, `2026-02-14`, `sender7@example.com`, and `18.00` (the Copperline Notices renewal: message id, date, sender, and amount). A reply passes when every fact appears. Matching is case-insensitive, whitespace is collapsed, `18.00` also matches `18` and `$18.00`, and the date must be the ISO form in the key. The live correct reply is 80 characters: `message_id: syn-0007, date: 2026-02-14, from: sender7@example.com, amount: 18.00`. That reply is a PASS. It does not fail on length.
+- A paste with no sidecar keeps `PASS cold_content short=0 limit=content_len<=300` or `FAIL cold_content short=<n> limit=content_len<=300 idx=<n> content_len=<len>`. Content length 300 or less is a short answer only for that unkeyed paste. A `finish=stop` reply with 79 completion tokens and `content_len` 202 is short, not truncated.
 
-`cold_probe` is not part of the length check. A max-tokens-1 probe can finish `length` with a one-character body and still be `PASS cold_probe`. Its progress `length=` is `na`. The probe row still records `finish_reason`, `content_len`, and `completion_tokens`.
+`cold_probe` is not part of the answer or length check. A max-tokens-1 probe can finish `length` with a one-character body and still be `PASS cold_probe`. Its progress `length=` is `na`. The probe row still records `finish_reason`, `content_len`, and `completion_tokens`. Its JSONL `content` is null.
 
-Before `OVERALL`, cold prints `FAILS` and `INVALIDS`. A clean run is `FAILS none` and `INVALIDS none`. A cut-off paste is `FAILS cold_truncated`. A short paste is `FAILS cold_content`. Both is `FAILS cold_truncated cold_content`. A slow paste is `FAILS cold_request` as well.
+Before `OVERALL`, cold prints `FAILS` and `INVALIDS`. A clean run is `FAILS none` and `INVALIDS none`. A cut-off paste is `FAILS cold_truncated`. A keyed paste that missed a fact is `FAILS cold_answer`. An unkeyed short paste is `FAILS cold_content`. A cut-off that also missed a fact is `FAILS cold_truncated cold_answer`. A slow paste is `FAILS cold_request` as well.
 
 ## Preconditions
 
@@ -53,7 +54,7 @@ The wrapper:
 
 ## PASS
 
-The bench prints `PASS cold_probe`, `PASS cold_request` with `limit_s=90.000`, `PASS cold_truncated truncated=0`, `PASS cold_content short=0`, `PASS ask_mail`, `FAILS none`, `INVALIDS none`, and `OVERALL PASS`. The probe must not print `WEDGE`. The wrapper then prints:
+The bench prints `PASS cold_probe`, `PASS cold_request` with `limit_s=90.000`, `PASS cold_truncated truncated=0`, `PASS cold_answer matched=4/4`, `PASS ask_mail`, `FAILS none`, `INVALIDS none`, and `OVERALL PASS`. The probe must not print `WEDGE`. The wrapper then prints:
 
 ```text
 PASS cold elapsed_s=<seconds> idle=1800
