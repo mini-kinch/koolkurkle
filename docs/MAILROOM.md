@@ -70,9 +70,12 @@ ask_mail does not take the writer lock.
 
 ## Mini copy-only until PR-5
 
-Mini unset / `mailroom.sqlite` is a hard-fail (`db_mode=refused`).
-Daily LaunchAgent `MAILROOM_DB` is copy-only
-(`mailroom-copy.sqlite` or `mailroom-daily-copy.sqlite`). ask_mail
+Mini unset / unknown basename is a hard-fail (`db_mode=refused`).
+Explicit `mailroom.sqlite` is allowed only when named (`db_mode=sor`),
+and rem-legacy must be absent. No silent default to `mailroom.sqlite`.
+Daily LaunchAgent `MAILROOM_DB` stays copy-only
+(`mailroom-copy.sqlite` or `mailroom-daily-copy.sqlite`) until an
+operator sets the explicit SoR basename. ask_mail
 Mini recipes must set `MAILROOM_DB` to that copy:
 
 ```zsh
@@ -138,8 +141,10 @@ change. See [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
 ## bind_copy_db / daily children honor MAILROOM_DB
 
 `bind_copy_db(argv=None)` reads `sys.argv[1:]`. Daily children open
-the copy DB. Refuse the SoR stub (`mailroom.sqlite`). No live SoR
-open from these tests.
+the allowlisted DB. The SoR basename is allowed only when explicitly
+named, and rem-legacy must be absent. Refuse the SoR stub
+(`mailroom.sqlite`) when rem-legacy is running or the writer lock is
+held. Unset / unknown refuse. No live SoR open from these tests.
 
 ## PR-5 cutover checklist (docs only — do not enable)
 
@@ -155,7 +160,8 @@ copy+integrity → then checklist; not enable with catch-up. Post-rem
 gates before anyone considers enable: rem EXIT (`17223/17223`), #40
 gate live, catch-up Done, single-writer HARD DECK, flock free.
 stale dead-PID lock ≠ false CONFLICT. Mini copy-only until promote GO;
-refuse SoR stub. One cutover + one rollback. Topology: SoR=MBP until
+refuse SoR stub unless it is explicitly named and rem-legacy is absent.
+One cutover + one rollback. Topology: SoR=MBP until
 CoS says; mlx generate localhost; MBP and Mini names only.
 
 ## sor_health_pack read-only / Mini-copy OK

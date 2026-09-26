@@ -104,22 +104,29 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
                 self.assertNotIn("db_mode=refused", proc.stderr)
 
 
-class RefuseSorStubPathTests(unittest.TestCase):
-    def test_refuse_sor_stub_via_flag_and_env(self):
+class ExplicitSorBasenameTests(unittest.TestCase):
+    def test_explicit_sor_stub_via_flag_and_env_is_sor_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             stub = Path(tmp) / SOR_STUB
+            env_base = {k: v for k, v in os.environ.items() if k != "MAILROOM_DB"}
+            env_base["MAILROOM_WRITE_LOCK"] = str(Path(tmp) / "absent.write.lock")
             for name in CHILD_NAMES:
                 proc = subprocess.run(
                     [sys.executable, str(SCRIPTS / name), "--db", str(stub)],
                     capture_output=True,
                     text=True,
                     check=False,
+                    env=env_base,
                 )
-                self.assertEqual(proc.returncode, 2, name)
-                self.assertIn("db_mode=refused", proc.stderr)
-                self.assertIn(SOR_STUB, proc.stderr)
-                self.assertNotIn("opened_db=", proc.stdout)
-            env = {**os.environ, "MAILROOM_DB": str(stub)}
+                self.assertEqual(proc.returncode, 0, "%s %s" % (name, proc.stderr))
+                self.assertIn("db_mode=sor", proc.stderr)
+                self.assertTrue(
+                    ("opened_db=%s" % stub) in proc.stdout
+                    or ("opened_db=%s" % SOR_STUB) in proc.stdout,
+                    msg=proc.stdout,
+                )
+                self.assertNotIn("db_mode=refused", proc.stderr)
+            env = {**env_base, "MAILROOM_DB": str(stub)}
             proc = subprocess.run(
                 [sys.executable, str(SCRIPTS / "imap_tombstone.py")],
                 capture_output=True,
@@ -127,8 +134,9 @@ class RefuseSorStubPathTests(unittest.TestCase):
                 check=False,
                 env=env,
             )
-            self.assertEqual(proc.returncode, 2)
-            self.assertIn("db_mode=refused", proc.stderr)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("db_mode=sor", proc.stderr)
+            self.assertNotIn("db_mode=refused", proc.stderr)
 
 class BindCopyDbOpsPointerTests(unittest.TestCase):
     def test_ops_and_readme_lock_bind_contract(self):
