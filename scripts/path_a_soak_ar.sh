@@ -6,6 +6,7 @@ set -u
 
 LABEL="com.mailroom.path-a-soak"
 HERE=$(cd "$(dirname "$0")" && pwd)
+TREE_ROOT=$(cd "$HERE/.." && pwd)
 BENCH="${SOAK_BENCH:-$HERE/path_a_bench.py}"
 PY="${SOAK_PYTHON:-/usr/bin/python3}"
 LOG="${SOAK_LOG:-$HOME/MailArchive/logs/path-a-soak.log}"
@@ -19,6 +20,41 @@ ASK=""
 BASE=""
 DRY=0
 CMD=""
+
+# Dry-run text must not contain the account home. A path under $HOME is
+# shown with that literal prefix. Any other path inside this tree is
+# shown relative to the tree, because the checkout may live inside the
+# account home (the test HOME override does not move the script).
+display_path() {
+  local _dp _home
+  _dp=$1
+  _home=${HOME%/}
+  if [ -n "$_home" ] && [ "$_home" != "/" ]; then
+    case "$_dp" in
+      "$_home")
+        printf '%s' '$HOME'
+        return
+        ;;
+      "$_home"/*)
+        printf '%s' "\$HOME/${_dp#"$_home"/}"
+        return
+        ;;
+    esac
+  fi
+  if [ -n "${TREE_ROOT:-}" ] && [ "$TREE_ROOT" != "/" ]; then
+    case "$_dp" in
+      "$TREE_ROOT")
+        printf '%s' '.'
+        return
+        ;;
+      "$TREE_ROOT"/*)
+        printf '%s' "${_dp#"$TREE_ROOT"/}"
+        return
+        ;;
+    esac
+  fi
+  printf '%s' "$_dp"
+}
 
 usage() {
   cat <<'EOF'
@@ -146,10 +182,11 @@ build_submit() {
 }
 
 print_submit() {
-  local s
+  local s shown
   printf 'dry-run: launchctl'
   for s in "${SUBMIT_ARGS[@]}"; do
-    printf ' %s' "$s"
+    shown=$(display_path "$s")
+    printf ' %s' "$shown"
   done
   printf '\n'
 }
