@@ -167,7 +167,7 @@ A paste with no sidecar keeps `PASS soak_content short=0` or `FAIL soak_content 
 
 Every soak and cold request row, in the JSONL and on the progress line, records `finish_reason`, `content_len`, and `completion_tokens` (from `usage` when present, otherwise JSON null / progress `na`). The progress line also has `length=`. `TRUNCATED` is `finish_reason` `length`. `SHORT` is `content_len` <= 300 on an unkeyed paste. Both can be true. Neither is `ok`. No content length is `na`. A keyed paste prints `content_len` and does not become SHORT because the body is short. A cold probe row records the same three fields and uses `length=na`; it is not scored on the answer or length lines. Next to the timing `soak` line, cut-off is `PASS soak_truncated truncated=0` or `FAIL soak_truncated truncated=<n>`. The length rollup remains `PASS soak_length truncated=0 short=0` or `FAIL soak_length truncated=<n> short=<n>`. `soak_answer` is printed when any paste had a key. `soak_content` is printed when any paste did not, and lists every unkeyed `content_len` <= 300, including a reply that is also cut off. Cold uses `cold_truncated` and either `cold_answer` or `cold_content` for the paste only. Before `OVERALL`, soak and cold print `FAILS` and `INVALIDS`. Each is `none` or the failed bar names (`soak`, `soak_truncated`, `soak_length`, `soak_answer`, `soak_content`, `soak_mem_at`, `ask_mail`, and the cold names `cold_request`, `cold_truncated`, `cold_answer`, `cold_content`, `cold_probe`).
 
-`--mem-at K` takes one memory sample after request K finishes (1-based), including when that request was hung. The summary bar is mid-soak idle swap under 1024 MB. Ollama is reported on the same line (`down`, `up`, or `unknown`). Swap of 1024 MB or more, or an unknown swap, fails that bar. If the run never reaches K, the line is `FAIL soak_mem_at missing`. K less than 1 or greater than N is exit 2 before any request. A wedge (exit 4) stays exit 4 even when this bar fails.
+`--mem-at K` takes one memory sample after request K finishes (1-based), including when that request was hung. The summary bar is mid-soak idle swap under 1024 MB. Ollama is reported on the same line (`down`, `up`, or `unknown`). Swap of 1024 MB or more, or an unknown swap, fails that bar. If the run never reaches K, the line is `FAIL soak_mem_at missing`. K less than 1 or greater than N is exit 2 before any request. A wedge (exit 4) stays exit 4 even when this bar fails. Deliberate stop = `kill -INT <bench pid>` during the sleep window; rc 130 with summary. The JSONL summary then has `interrupted` true, `completed` (requests finished), and `planned` (N). If K already finished, the `soak_mem_at` line is the normal swap bar. If K was not reached, the line is `soak_mem_at k=<K> not reached (interrupted at <completed>)`: that is not a memory failure and it is not `PASS`.
 
 PASS without those flags means zero hung requests and zero failures (same HTTP and finish checks as warm, without the 45 second / median bars; a keyed paste uses the answer bar instead of content length). The timeout is the hang line.
 
@@ -211,7 +211,7 @@ Request rows (`kind` `request`) include: local ISO timestamp (`ts`), `mode`, `id
 
 Cold and soak request rows also include `content`, `answer_missing`, and `answer_key`. `content` is the stripped assistant text when the paste path is under `tests/fixtures/path_a/`, and JSON null for every other paste (and for a probe row). `answer_key` is the fixture stem when a sidecar was loaded, otherwise null. `answer_missing` is the list of required facts that did not appear. It is empty when the reply matched, or when the paste has no key. A keyed request that returned no content lists every required fact; a soak hang is still not counted on the `soak_answer` line.
 
-The last line of a chat run is `kind` `summary` (counts, min/median/max wall, both ask-mail hashes, overall). `mem` writes one `kind` `mem` row.
+The last line of a chat run is `kind` `summary` (counts, min/median/max wall, both ask-mail hashes, overall). A soak stopped with SIGINT also records `interrupted`, `completed`, and `planned`. `mem` writes one `kind` `mem` row.
 
 ## Exit codes
 
@@ -222,6 +222,7 @@ The last line of a chat run is `kind` `summary` (counts, min/median/max wall, bo
 | 2 | Usage or config error: bad flags, both paste flags, bad fixture, missing or unreadable baseline, chat server unreachable at start, JSONL or baseline path not writable |
 | 4 | Wedge. A soak request hung and `--continue-on-hang` was not set, or a `probe` (including the probe inside `cold --idle`) timed out. The run stopped. |
 | 5 | `mem --baseline` is INVALID: baseline swap was already >= 1024 MB (machine dirty before model load) |
+| 130 | Soak stopped by SIGINT (`kill -INT <bench pid>`) during the request loop. The summary is printed first. |
 
 The human summary ends with one line per bar (`PASS` or `FAIL` plus n, min/median/max wall, failures, and hung where those apply) and an `OVERALL` line.
 

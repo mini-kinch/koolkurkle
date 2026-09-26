@@ -1926,5 +1926,151 @@ class PathABenchTests(unittest.TestCase):
         self.assertIn(EXACT_ANSWER, (self.tmp / "out.jsonl").read_text(encoding="utf-8"))
 
 
+    def _chat_result(self, content: str) -> dict:
+        return {
+            "http_status": 200,
+            "finish_reason": "stop",
+            "content_len": len(content),
+            "reasoning_len": None,
+            "prompt_tokens": 10,
+            "completion_tokens": 40,
+            "error": None,
+            "timed_out": False,
+            "elapsed": 0.01,
+            "content": content,
+        }
+
+    def _soak_interrupt(self, planned: int, mem_at: int, stop_after: int):
+        """Run soak in-process. Sleep raises KeyboardInterrupt after K requests."""
+        ask = self._ask()
+        out = self.tmp / "out.jsonl"
+        done = {"n": 0}
+
+        def fake_chat(*_args, **_kwargs):
+            done["n"] += 1
+            return self._chat_result(EXACT_ANSWER)
+
+        def fake_sleep(_seconds):
+            if done["n"] >= stop_after:
+                raise KeyboardInterrupt()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        env = {
+            "PATH_A_BENCH_TEST_HOOKS": "1",
+            "PATH_A_BENCH_INJECT_SWAP_MB": "100",
+            "PATH_A_BENCH_OLLAMA_PROCESS": "down",
+            "PATH_A_BENCH_OLLAMA_PORT": "closed",
+        }
+        args = [
+            "soak",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--model",
+            "synth-model",
+            "--fixture",
+            str(FIXTURE),
+            "--ask-mail",
+            str(ask),
+            "--out",
+            str(out),
+            "-n",
+            str(planned),
+            "--interval",
+            "1",
+            "--timeout",
+            "5",
+            "--mem-at",
+            str(mem_at),
+        ]
+        with mock.patch.object(BENCH, "resolve_model", return_value="synth-model"), mock.patch.object(
+            BENCH, "perform_chat", side_effect=fake_chat
+        ), mock.patch.object(BENCH.time, "sleep", side_effect=fake_sleep), mock.patch.dict(
+            os.environ, env
+        ), redirect_stdout(
+            stdout
+        ), redirect_stderr(
+            stderr
+        ):
+            code = BENCH.main(args)
+        text = out.read_text(encoding="utf-8")
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        return code, stdout.getvalue(), stderr.getvalue(), rows
+
+    def test_soak_interrupt_after_mem_at_prints_summary(self) -> None:
+        code, stdout, stderr, rows = self._soak_interrupt(planned=5, mem_at=2, stop_after=2)
+        requests = [row for row in rows if row.get("kind") == "request"]
+        summary = rows[-1]
+        self.assertEqual(code, 130)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(summary["kind"], "summary")
+        self.assertIs(summary["interrupted"], True)
+        self.assertEqual(summary["completed"], 2)
+        self.assertEqual(summary["planned"], 5)
+        self.assertIn(
+            "PASS soak_mem_at k=2 swap_used_mb=100.00 limit_mb=1024 ollama=down",
+            stdout,
+        )
+        self.assertIn("OVERALL ", stdout)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("Traceback", stdout)
+
+    def test_soak_interrupt_before_mem_at_is_not_a_mem_failure(self) -> None:
+        code, stdout, stderr, rows = self._soak_interrupt(planned=5, mem_at=4, stop_after=2)
+        requests = [row for row in rows if row.get("kind") == "request"]
+        summary = rows[-1]
+        self.assertEqual(code, 130)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            summary["soak_mem_at"],
+            "soak_mem_at k=4 not reached (interrupted at 2)",
+        )
+        self.assertIn("soak_mem_at k=4 not reached (interrupted at 2)", stdout)
+        self.assertNotIn("PASS soak_mem_at", stdout)
+        self.assertNotIn("FAIL soak_mem_at", stdout)
+        self.assertNotIn("soak_mem_at", summary["fails"])
+        self.assertIs(summary["interrupted"], True)
+        self.assertEqual(summary["completed"], 2)
+        self.assertEqual(summary["planned"], 5)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("Traceback", stdout)
+
+    def test_soak_interrupt_stderr_has_no_traceback(self) -> None:
+        _code, stdout, stderr, _rows = self._soak_interrupt(planned=3, mem_at=2, stop_after=1)
+        self.assertNotIn("Traceback", stderr)
+        self.assertNotIn("Traceback", stdout)
+        self.assertNotIn("KeyboardInterrupt", stderr)
+
+    def test_non_soak_keyboard_interrupt_still_propagates(self) -> None:
+        ask = self._ask()
+        out = self.tmp / "out.jsonl"
+
+        def fake_chat(*_args, **_kwargs):
+            raise KeyboardInterrupt()
+
+        args = [
+            "warm",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--model",
+            "synth-model",
+            "--fixture",
+            str(FIXTURE),
+            "--ask-mail",
+            str(ask),
+            "--out",
+            str(out),
+            "-n",
+            "2",
+            "--timeout",
+            "5",
+        ]
+        with mock.patch.object(BENCH, "resolve_model", return_value="synth-model"), mock.patch.object(
+            BENCH, "perform_chat", side_effect=fake_chat
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                BENCH.main(args)
+
+
 if __name__ == "__main__":
     unittest.main()

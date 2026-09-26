@@ -1314,6 +1314,8 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
         rows = []
         wedged = False
         mem_sample = None
+        interrupted = False
+        completed = 0
         if mode == "cold" and idle is not None and float(idle) > 0:
             idle_wait(float(idle))
         if mode == "cold" and idle is not None:
@@ -1342,75 +1344,82 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
                 print(wedge, file=sys.stderr, flush=True)
                 wedged = True
         if not wedged:
-            for idx in range(1, n + 1):
-                if idx > 1 and interval > 0:
-                    time.sleep(interval)
-                fixture_name, paste, fixture_path, answer = fixtures[
-                    fixture_index(idx, len(fixtures))
-                ]
-                result = perform_chat(url, paste, model, args.max_tokens, timeout)
-                answer_key = None
-                answer_missing = []
-                answer_facts = None
-                log_content = False
-                if mode in ("cold", "soak"):
-                    log_content = synth_paste(fixture_path)
-                    if answer:
-                        answer_key = answer["name"]
-                        answer_facts = list(answer["facts"])
-                        content = result.get("content")
-                        scored = isinstance(content, str)
-                        if scored:
-                            answer_missing = missing_facts(answer_facts, content)
+            try:
+                for idx in range(1, n + 1):
+                    if idx > 1 and interval > 0:
+                        time.sleep(interval)
+                    fixture_name, paste, fixture_path, answer = fixtures[
+                        fixture_index(idx, len(fixtures))
+                    ]
+                    result = perform_chat(url, paste, model, args.max_tokens, timeout)
+                    answer_key = None
+                    answer_missing = []
+                    answer_facts = None
+                    log_content = False
+                    if mode in ("cold", "soak"):
+                        log_content = synth_paste(fixture_path)
+                        if answer:
+                            answer_key = answer["name"]
+                            answer_facts = list(answer["facts"])
+                            content = result.get("content")
+                            scored = isinstance(content, str)
+                            if scored:
+                                answer_missing = missing_facts(answer_facts, content)
+                            else:
+                                answer_missing = list(answer_facts)
+                            result["answer_facts"] = list(answer_facts)
+                            result["answer_missing"] = list(answer_missing)
+                            result["answer_scored"] = scored
+                    wall_s = adjusted_wall(result["elapsed"], limits)
+                    verdict, error = classify_request(mode, wall_s, result, limits)
+                    row_idx = idx
+                    total = n
+                    role = None
+                    if mode == "cold" and idle is not None:
+                        row_idx = idx + 1
+                        total = 2
+                        role = "generate"
+                    row = request_row(
+                        mode,
+                        row_idx,
+                        wall_s,
+                        result,
+                        verdict,
+                        error,
+                        fixture_name,
+                        role=role,
+                        answer_key=answer_key,
+                        answer_missing=answer_missing,
+                        answer_facts=answer_facts,
+                        log_content=log_content,
+                    )
+                    rows.append(row)
+                    jsonl.write(row)
+                    print(_progress(mode, row_idx, total, row), flush=True)
+                    if mode == "soak":
+                        completed = idx
+                    if mode == "soak" and mem_at is not None and idx == mem_at:
+                        mem_sample = evaluate_mem(*collect_host_mem())
+                    if mode == "soak" and verdict == "hung":
+                        if continue_on_hang:
+                            print(
+                                "HUNG soak idx=%d local_time=%s" % (idx, row["ts"]),
+                                flush=True,
+                            )
                         else:
-                            answer_missing = list(answer_facts)
-                        result["answer_facts"] = list(answer_facts)
-                        result["answer_missing"] = list(answer_missing)
-                        result["answer_scored"] = scored
-                wall_s = adjusted_wall(result["elapsed"], limits)
-                verdict, error = classify_request(mode, wall_s, result, limits)
-                row_idx = idx
-                total = n
-                role = None
-                if mode == "cold" and idle is not None:
-                    row_idx = idx + 1
-                    total = 2
-                    role = "generate"
-                row = request_row(
-                    mode,
-                    row_idx,
-                    wall_s,
-                    result,
-                    verdict,
-                    error,
-                    fixture_name,
-                    role=role,
-                    answer_key=answer_key,
-                    answer_missing=answer_missing,
-                    answer_facts=answer_facts,
-                    log_content=log_content,
-                )
-                rows.append(row)
-                jsonl.write(row)
-                print(_progress(mode, row_idx, total, row), flush=True)
-                if mode == "soak" and mem_at is not None and idx == mem_at:
-                    mem_sample = evaluate_mem(*collect_host_mem())
-                if mode == "soak" and verdict == "hung":
-                    if continue_on_hang:
-                        print(
-                            "HUNG soak idx=%d local_time=%s" % (idx, row["ts"]),
-                            flush=True,
-                        )
-                    else:
-                        wedge = "WEDGE soak idx=%d local_time=%s timeout_s=%s" % (
-                            idx,
-                            row["ts"],
-                            fmt_num(timeout),
-                        )
-                        print(wedge, flush=True)
-                        print(wedge, file=sys.stderr, flush=True)
-                        wedged = True
-                        break
+                            wedge = "WEDGE soak idx=%d local_time=%s timeout_s=%s" % (
+                                idx,
+                                row["ts"],
+                                fmt_num(timeout),
+                            )
+                            print(wedge, flush=True)
+                            print(wedge, file=sys.stderr, flush=True)
+                            wedged = True
+                            break
+            except KeyboardInterrupt:
+                if mode != "soak":
+                    raise
+                interrupted = True
         ask_end = hash_ask_mail(ask_path)
         hang_notes = None
         hangs_recovered = True
@@ -1423,7 +1432,14 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
         mem_line = None
         mem_ok = True
         if mode == "soak" and mem_at is not None:
-            mem_line, mem_ok = soak_mem_line(mem_at, mem_sample)
+            if interrupted and completed < mem_at:
+                mem_line = (
+                    "soak_mem_at k=%d not reached (interrupted at %d)"
+                    % (mem_at, completed)
+                )
+                mem_ok = True
+            else:
+                mem_line, mem_ok = soak_mem_line(mem_at, mem_sample)
         lines, code, summary = chat_summary(
             mode,
             rows,
@@ -1437,10 +1453,21 @@ def run_chat(args, limits: Optional[dict] = None) -> int:
             mem_line=mem_line,
             mem_ok=mem_ok,
         )
+        if interrupted:
+            summary["interrupted"] = True
+            summary["completed"] = completed
+            summary["planned"] = n
+            note = "INTERRUPTED completed=%d planned=%d" % (completed, n)
+            if lines and lines[-1].startswith("OVERALL "):
+                lines.insert(-1, note)
+            else:
+                lines.append(note)
         summary["fixtures"] = [name for name, _text, _path, _key in fixtures]
         jsonl.write(summary)
         for line in lines:
             print(line, flush=True)
+        if interrupted:
+            return 130
         return code
     finally:
         jsonl.close()
