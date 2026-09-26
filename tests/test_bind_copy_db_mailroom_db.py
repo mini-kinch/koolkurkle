@@ -49,6 +49,13 @@ COPY_A = "mailroom-copy.sqlite"
 COPY_B = "mailroom-daily-copy.sqlite"
 SOR_STUB = "mailroom.sqlite"
 
+
+def _opened_db_line(name, db):
+    """classify.py logs the basename; other children log the full path."""
+    if name == "classify.py":
+        return "opened_db=%s" % Path(db).name
+    return "opened_db=%s" % db
+
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 
 
@@ -91,7 +98,9 @@ class DailyChildrenOpenCopyDbTests(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("db_mode=copy", proc.stderr)
-                self.assertIn("opened_db=%s" % db, proc.stdout)
+                self.assertIn(_opened_db_line(name, db), proc.stdout)
+                if name == "classify.py":
+                    self.assertNotIn(str(db), proc.stdout)
                 self.assertNotIn("db_mode=refused", proc.stderr)
 
 

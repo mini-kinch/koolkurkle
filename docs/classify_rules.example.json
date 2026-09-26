@@ -1,0 +1,9 @@
+{
+  "property_keep": ["(?i)example-plaza"],
+  "lawsuit_extra": ["(?i)example v\\. sample"],
+  "family_addrs": ["family@example.com"],
+  "lawsuit_domains": ["counsel.example.com"],
+  "money_addrs": ["statements@example.com"],
+  "marketing_domains": ["promo.example.com"],
+  "pcn_keywords": ["examplekeyword"]
+}

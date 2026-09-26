@@ -10,3 +10,6 @@ __pycache__/
 .python-version
 .coverage
 htmlcov/
+
+# Local classifier lists. Never commit personal rule data.
+classify_rules.local.json
