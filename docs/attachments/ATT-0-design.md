@@ -1,6 +1,6 @@
 # ATT-0 design refresh — attachment search (FTS)
 
-**Status:** design + code and tests. The migration is not applied to any database by this change.
+**Status:** design + code and tests. The migration is not applied to any database by this change. The metadata fill is not run against a live mailbox or the system of record.
 **As-of:** 2026-09-26
 **Built from:** [att0-constraints.md](../att0-constraints.md), the repo copy of Heavy `20260914-05-attachment-search-design` (as-of 2026-09-14, about 2:32 PM PT).
 **PII:** none. Fixtures use example.com and made-up names only.
@@ -62,7 +62,8 @@ The script loads that SQL. It is idempotent (`IF NOT EXISTS`, triggers created o
 
 | Table | Columns |
 | --- | --- |
-| `attachments` | `attachment_id` INTEGER PK, `message_id` FK → `messages(id)`, `part_id`, `filename`, `mime`, `size`, `sha256`, `status` |
+| `attachments` | `attachment_id` INTEGER PK, `message_id` FK → `messages(id)`, `part_id`, `filename`, `mime`, `size`, `sha256`, `status`, `content_disposition` |
+| `attachment_meta_scans` | `message_id` PK, `source`, `part_count`, `has_attachments`, `scanned_at` (resume marker for the metadata fill) |
 | `attachment_extracts` | `extract_id` INTEGER PK, `attachment_id` FK, `extractor`, `extractor_version`, `text`, `page_count`, `status`, `error`, `timings` |
 | `attachment_chunks` | `chunk_id` INTEGER PK, `extract_id` FK, `chunk_index`, `page_start`, `page_end`, `text` |
 | `attachment_chunks_fts` | FTS5 `text`, external content `attachment_chunks`, `content_rowid=chunk_id`, `tokenize=unicode61` (no porter, so identifiers are not stemmed) |
@@ -143,11 +144,75 @@ A database without the FTS table raises `SearchError`. The helper does not creat
 
 ---
 
+## Metadata-only catalog fill
+
+A read-only audit of the live system of record found **0 rows** in any attachments data. `messages.has_attachments` is **0 on all ~65.5k rows**. About **2.1k** rows have `source='imap-live'`. About **63.4k** rows were imported from a JSONL dump and already store `messages.jsonl_offset` and `messages.jsonl_len`.
+
+Those counts are why ATT-0 needs a metadata fill before extract or FTS can see attachments. The fill writes **metadata only**:
+
+| Stored | Not stored |
+| --- | --- |
+| mime type, size in bytes, part index/path (`part_id`), content-disposition | part bytes, body text, sha256 (stays NULL), extract rows, chunk rows |
+| `messages.has_attachments` (0 or 1) | any body-section fetch |
+
+`attachments.status` for these rows is `meta`. `bytes_stored` in the report is always 0. The body text is parsed only to learn the tree and the decoded size, then dropped.
+
+Script: `scripts/attachments/meta_fill.py`. It does not create schema and it does not reshape `messages`. Run `migrate_att0_schema.py` on the copy first so `attachments`, `attachment_meta_scans`, and `messages.has_attachments` exist. A missing `has_attachments` column or a missing ATT-0 table is a refuse.
+
+### Option 1 — IMAP rows (`source='imap-live'`)
+
+`--source imap`. For each unscanned row, UID FETCH the item `(BODYSTRUCTURE)` and parse the MIME tree. No body section is requested. Host, user, and password come from `--host`, `--user`, `--password` or from `MAILROOM_IMAP_HOST`, `MAILROOM_IMAP_USER`, `MAILROOM_IMAP_PASSWORD`. Optional port is `MAILROOM_IMAP_PORT` (default 143). Mailbox is `--mailbox` or `MAILROOM_IMAP_MAILBOX` (default `INBOX`). There is no default host. The password is not written to the report, the database, or the repository. Tests pass a stub client. Nothing in this packet connects to a real mailbox.
+
+### Option 2 — archive rows (JSONL dump)
+
+`--source jsonl`. One streamed pass over rows whose `source` is not `imap-live` and whose `jsonl_offset` is not NULL, ordered by that offset. The dump is opened read-only (`rb`). Each row seeks to `jsonl_offset` and reads `jsonl_len` bytes. A slice that starts with `{` is a JSON object with `rfc822` or `raw` text. Anything else is raw RFC822. MIME headers are parsed the same way as option 1. The dump is not rewritten. Tests use a synthetic dump name.
+
+### What a part row means
+
+Part ids follow the tree. A multipart root is `0`. Its children are `1`, `2`, `3`, … A nested multipart `1` has children `1.1`, `1.2`. An attached `message/rfc822` keeps its own id, and the encapsulated body is `4.1` (or `4.1`, `4.2`, … when that body is multipart). Every node is a row, including `text/plain` and multipart containers, so the catalog is complete.
+
+`has_attachments` is 1 when any **stored** part is an attachment:
+
+- disposition `attachment`, or
+- `message/rfc822`, or
+- a major type of image, audio, video, or application, or
+- disposition `inline` on anything other than `text/plain` or `text/html`
+
+Multipart containers are not attachments. `text/plain` and `text/html` without an attachment disposition are not attachments. An inline image is an attachment. The flag is computed from the parts this run stored. `max_parts` keeps a prefix of the walk, so set it before the first apply.
+
+A body-only message still gets an `attachment_meta_scans` row (`has_attachments` 0) so a later run skips it. `part_count` is the number of MIME rows stored.
+
+### Filename flag (default off)
+
+`--store-filenames` defaults **off**. When it is off, `attachments.filename` stays **NULL**. The filler does not write a hash or an extension in its place. When the flag is on, the raw filename is stored (content-disposition filename, otherwise the MIME name parameter).
+
+`attachment_meta_scans.message_id` is the resume key. A later run skips that message, so turning the flag on later does **not** backfill names. The same is true of `max_parts`: a truncated tree is marked scanned. Choose both before the first apply.
+
+A record longer than `--max-record-bytes` (default 2,000,000) is not parsed from a short slice, is counted as capped, and is **not** marked scanned, so a later higher cap can retry. A parse error, a missing UID, or a bad offset is an error and is not marked scanned. `--max-messages` (default 200) and `--timeout` (default 30 seconds) stop before the next message. Rows already committed stay. The report's `stopped` value is `max_messages` or `timeout`, and the process exit code is 0. `scanned` in the report is how many matching rows were already in `attachment_meta_scans` and were skipped.
+
+### Writer rules
+
+Both options are writers, including dry-run:
+
+- `refuse_destructive.refuse_destructive_cli` runs first.
+- Basename `mailroom.sqlite` is refused unless `--allow-mailroom-sqlite`, **before** a connection, including dry-run. The writer gate still runs after that flag.
+- The database file must already exist. A missing path exits 2 and does not create a file.
+- Default is dry-run (counts only). `--apply` writes. Passing both exits 2.
+- Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `stopped`.
+- Each apply commits one message: part rows, `has_attachments`, and the scan row, together. A second apply does not insert those parts again.
+
+### Live run needs a separate approval
+
+This packet does not run the fill against a live mailbox or the system of record. Doing that is a separate approval. In that approval the user decides whether `--store-filenames` is on. Until then, the supported check is `--dry-run` against an explicit copy database.
+
+---
+
 ## Out of scope for this packet
 
 - Applying the migration to the system of record or to a daily copy.
 - Embeddings, Ollama, vec0, RRF, rerank, and any edit to `scripts/ask_mail.py`.
-- OCR, archive member listing, and IMAP part fetch.
+- OCR, archive member listing, and IMAP fetches of body bytes (`BODY[]`, `BODY.PEEK[]`, `RFC822`).
+- A live metadata fill. The design and the dry-run CLI are in this packet. Running it against the system of record needs a separate approval.
 - Auth-lane enforcement and history/`--live` filtering (still specified in the 2026-09-14 contract, not coded here).
 
 ---

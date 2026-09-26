@@ -42,6 +42,7 @@ EXPECTED_COLUMNS = {
         "size",
         "sha256",
         "status",
+        "content_disposition",
     ],
     "attachment_extracts": [
         "extract_id",
@@ -62,6 +63,13 @@ EXPECTED_COLUMNS = {
         "page_end",
         "text",
     ],
+    "attachment_meta_scans": [
+        "message_id",
+        "source",
+        "part_count",
+        "has_attachments",
+        "scanned_at",
+    ],
 }
 
 OWNED_EXACT = {
@@ -76,6 +84,8 @@ OWNED_EXACT = {
     "attachment_chunks_ai",
     "attachment_chunks_ad",
     "attachment_chunks_au",
+    "attachment_meta_scans",
+    "sqlite_autoindex_attachment_meta_scans_1",
 }
 
 TRIGGERS = (

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   size INTEGER,
   sha256 TEXT,
   status TEXT NOT NULL,
+  content_disposition TEXT,
   FOREIGN KEY (message_id) REFERENCES messages(id)
 );
 
@@ -48,6 +49,14 @@ CREATE TABLE IF NOT EXISTS attachment_chunks (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attachment_chunks_extract_index
   ON attachment_chunks(extract_id, chunk_index);
+
+CREATE TABLE IF NOT EXISTS attachment_meta_scans (
+  message_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  part_count INTEGER NOT NULL DEFAULT 0,
+  has_attachments INTEGER NOT NULL DEFAULT 0,
+  scanned_at TEXT NOT NULL
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS attachment_chunks_fts USING fts5(
   text,

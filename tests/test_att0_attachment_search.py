@@ -212,7 +212,7 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertNotIn("ON DELETE CASCADE", sql.upper())
         self.assertNotIn("DROP TABLE", sql.upper())
         self.assertNotIn("ALTER TABLE", sql.upper())
-        for name in ("attachments", "attachment_extracts", "attachment_chunks"):
+        for name in mig.EXPECTED_COLUMNS:
             self.assertEqual(_columns_declared_in_sql(sql, name), mig.EXPECTED_COLUMNS[name])
 
     def test_idempotent_on_a_copy_and_leaves_embeddings_alone(self):
