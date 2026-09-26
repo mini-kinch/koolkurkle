@@ -177,4 +177,14 @@ Expected docs landing (Developer chooses exact paths on main):
 
 ---
 
+## 13. Refresh (2026-09-26)
+
+The operating picture changed after this 2026-09-14 contract. The refresh is
+[attachments/ATT-0-design.md](attachments/ATT-0-design.md) (sole SoR writer
+is one Mac mini; search is FTS-only because there is no embedding service
+and Ollama is down; daily writes use Scope B). The text above stays the
+Heavy 05 record. The refresh does not delete this contract.
+
+---
+
 *End ATT-0. ZERO PII. DESIGN ONLY. Rem untouched.*
