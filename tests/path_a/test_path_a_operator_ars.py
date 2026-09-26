@@ -613,9 +613,11 @@ class ColdTests(OperatorCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertIn("PASS dry-run cold", proc.stdout)
         self.assertIn("launchctl bootout gui/", proc.stdout)
-        self.assertIn("com.mailroom.qwen-watchdog.plist", proc.stdout)
-        self.assertIn("cold --idle 1800", proc.stdout)
+        self.assertIn("$HOME/Library/LaunchAgents/com.mailroom.qwen-watchdog.plist", proc.stdout)
+        self.assertIn("scripts/path_a_bench.py cold --idle 1800", proc.stdout)
         self.assertIn("launchctl bootstrap gui/", proc.stdout)
+        self.assertNotIn(str(BENCH), proc.stdout)
+        self.assertNotIn(str(ROOT), proc.stdout)
         self.assertEqual(self._trace(), "")
 
     def test_refuses_other_plist_basename(self):
@@ -767,11 +769,14 @@ class SoakTests(OperatorCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         self.assertIn("PASS dry-run soak-start", proc.stdout)
         self.assertIn("launchctl submit -l com.mailroom.path-a-soak", proc.stdout)
+        self.assertIn("-o $HOME/MailArchive/logs/path-a-soak.log", proc.stdout)
         self.assertIn("--continue-on-hang", proc.stdout)
         self.assertIn("--mem-at 24", proc.stdout)
         self.assertIn("-n 48", proc.stdout)
         self.assertIn("--interval 300", proc.stdout)
-        self.assertIn("path_a_bench.py soak", proc.stdout)
+        self.assertIn("scripts/path_a_bench.py soak", proc.stdout)
+        self.assertNotIn(str(BENCH), proc.stdout)
+        self.assertNotIn(str(ROOT), proc.stdout)
         self.assertEqual(self._trace(), "")
 
     def test_start_submits_and_does_not_boot_out(self):

@@ -7,6 +7,7 @@ set -u
 
 LABEL="com.mailroom.qwen-watchdog"
 HERE=$(cd "$(dirname "$0")" && pwd)
+TREE_ROOT=$(cd "$HERE/.." && pwd)
 BENCH="${COLD_BENCH:-$HERE/path_a_bench.py}"
 PY="${COLD_PYTHON:-/usr/bin/python3}"
 PLIST="${COLD_PLIST:-$HOME/Library/LaunchAgents/${LABEL}.plist}"
@@ -18,6 +19,41 @@ DRY=0
 uid=""
 STARTED=0
 START_TS=0
+
+# Dry-run text must not contain the account home. A path under $HOME is
+# shown with that literal prefix. Any other path inside this tree is
+# shown relative to the tree, because the checkout may live inside the
+# account home (the test HOME override does not move the script).
+display_path() {
+  local _dp _home
+  _dp=$1
+  _home=${HOME%/}
+  if [ -n "$_home" ] && [ "$_home" != "/" ]; then
+    case "$_dp" in
+      "$_home")
+        printf '%s' '$HOME'
+        return
+        ;;
+      "$_home"/*)
+        printf '%s' "\$HOME/${_dp#"$_home"/}"
+        return
+        ;;
+    esac
+  fi
+  if [ -n "${TREE_ROOT:-}" ] && [ "$TREE_ROOT" != "/" ]; then
+    case "$_dp" in
+      "$TREE_ROOT")
+        printf '%s' '.'
+        return
+        ;;
+      "$TREE_ROOT"/*)
+        printf '%s' "${_dp#"$TREE_ROOT"/}"
+        return
+        ;;
+    esac
+  fi
+  printf '%s' "$_dp"
+}
 
 usage() {
   cat <<'EOF'
@@ -104,13 +140,13 @@ uid=$(id -u)
 
 if [ "$DRY" = "1" ]; then
   echo "dry-run: launchctl print gui/${uid}/${LABEL}"
-  echo "dry-run: launchctl bootout gui/${uid} ${PLIST}"
-  printf 'dry-run: %s %s cold --idle %s' "$PY" "$BENCH" "$IDLE"
-  if [ -n "$ASK" ]; then printf ' --ask-mail %s' "$ASK"; fi
-  if [ -n "$OUT" ]; then printf ' --out %s' "$OUT"; fi
+  echo "dry-run: launchctl bootout gui/${uid} $(display_path "$PLIST")"
+  printf 'dry-run: %s %s cold --idle %s' "$PY" "$(display_path "$BENCH")" "$IDLE"
+  if [ -n "$ASK" ]; then printf ' --ask-mail %s' "$(display_path "$ASK")"; fi
+  if [ -n "$OUT" ]; then printf ' --out %s' "$(display_path "$OUT")"; fi
   if [ -n "$BASE" ]; then printf ' --base-url %s' "$BASE"; fi
   printf '\n'
-  echo "dry-run: launchctl bootstrap gui/${uid} ${PLIST}"
+  echo "dry-run: launchctl bootstrap gui/${uid} $(display_path "$PLIST")"
   echo "PASS dry-run cold"
   exit 0
 fi
