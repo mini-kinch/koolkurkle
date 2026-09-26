@@ -4,10 +4,16 @@
 Option 1 (``--source imap``): rows with ``source='imap-live'``. UIDs are
 unique per folder, so rows are grouped by ``messages.folder`` and each
 folder is selected read-only before its UID FETCH of ``(BODYSTRUCTURE)``.
-The connection is ``imaplib.IMAP4_SSL`` on port 993. The password is read
-from macOS Keychain (``scripts/imap_keychain.py``, same service names as
-``scripts/run_mailroom_daily.sh``). There is no password option and no
-password environment variable. Option 2 (``--source jsonl``): other rows
+The connection is ``imaplib.IMAP4_SSL`` on port 993 with
+``ssl.create_default_context()`` (``CERT_REQUIRED``, ``check_hostname``).
+Folder names are quoted before EXAMINE, including spaces, quotes, and
+backslashes. UIDVALIDITY from that response is stored per folder; a
+mismatch is flagged in ``uidvalidity_mismatch`` and those rows are not
+written. The password is read from macOS Keychain
+(``scripts/imap_keychain.py``). The binary is pinned to
+``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
+with one legacy fallback. There is no password option and no password
+environment variable. Option 2 (``--source jsonl``): other rows
 that already have ``jsonl_offset``. Seeks that offset and reads
 ``jsonl_len`` bytes, then parses MIME headers.
 
@@ -21,9 +27,11 @@ can stop early. The summary then starts with a ``PARTIAL:`` banner and
 sets ``partial`` in the JSON summary. A full pass is
 ``--max-messages 0 --timeout 0`` (0 means no cap) plus
 ``--max-record-bytes 64MB`` when a record is larger than the default.
-``--max-record-bytes`` accepts plain bytes or a human size. Default is
-64 MiB, so records over 2 MB are counted. A row excluded by any cap is
-not counted and is reported as ``capped: N``, separate from ``scanned``
+``--max-parts 0`` means no part cap and is not ``capped``. A truncated
+tree increments ``parts_truncated``; ``has_attachments`` still reflects
+the full tree. ``--max-record-bytes`` accepts plain bytes or a human
+size. Default is 64 MiB, so records over 2 MB are counted. A row over
+that byte cap is reported as ``capped: N``, separate from ``scanned``
 and ``skipped``. JSONL ``raw`` (frozen dump) or ``rfc822`` is streamed.
 
 Does not create the ATT-0 schema and does not reshape ``messages``.
@@ -39,6 +47,7 @@ import json
 import os
 import re
 import sqlite3
+import ssl
 import sys
 import time
 from pathlib import Path
@@ -126,6 +135,7 @@ class ImapBodystructureClient:
         self._password_fn = password_fn
         self._conn: Any = None
         self.mailbox: str | None = None
+        self.uidvalidity: int | None = None
 
     def __enter__(self) -> "ImapBodystructureClient":
         fn = self._password_fn or read_imap_app_password
@@ -134,7 +144,10 @@ class ImapBodystructureClient:
         except KeychainError:
             raise FillRefuse("imap keychain password is missing") from None
         try:
-            self._conn = self._factory(self.host, 993, timeout=self.timeout)
+            context = ssl.create_default_context()
+            self._conn = self._factory(
+                self.host, 993, timeout=self.timeout, ssl_context=context
+            )
             self._conn.login(self.user, password)
         except FillRefuse:
             self._close()
@@ -147,17 +160,19 @@ class ImapBodystructureClient:
         return self
 
     def select(self, mailbox: str, readonly: bool = True) -> None:
-        """SELECT one folder. Readonly. UIDs from another folder are not valid here."""
+        """EXAMINE one folder. Readonly. The mailbox argument is quoted."""
         if readonly is not True:
             raise FillRefuse("imap select must be readonly")
         if mailbox is None or str(mailbox).strip() == "":
             raise ValueError("missing mailbox")
         if self._conn is None:
             raise RuntimeError("imap select failed")
-        typ, _data = self._conn.select(str(mailbox), readonly=True)
+        quoted = quote_imap_mailbox(str(mailbox))
+        typ, _data = self._conn.select(quoted, readonly=True)
         if typ != "OK":
             raise RuntimeError("imap select failed")
         self.mailbox = str(mailbox)
+        self.uidvalidity = _uidvalidity_from_conn(self._conn)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self._close()
@@ -179,6 +194,28 @@ class ImapBodystructureClient:
         if typ != "OK":
             raise ValueError("bodystructure fetch failed")
         return bodystructure_from_fetch(data)
+
+
+def quote_imap_mailbox(name: str) -> str:
+    """IMAP atom quoting. Spaces, quotes, and backslashes stay one mailbox."""
+    escaped = str(name).replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
+
+
+def _uidvalidity_from_conn(conn: Any) -> int:
+    responder = getattr(conn, "response", None)
+    if responder is None:
+        raise RuntimeError("imap uidvalidity missing")
+    typ, data = responder("UIDVALIDITY")
+    if typ != "OK" or not data or data[0] in (None, b"", ""):
+        raise RuntimeError("imap uidvalidity missing")
+    raw = data[0]
+    if isinstance(raw, bytes):
+        raw = raw.decode("ascii", "replace")
+    text = str(raw).strip()
+    if not text.isdigit():
+        raise RuntimeError("imap uidvalidity missing")
+    return int(text)
 
 
 def _default_now() -> str:
@@ -218,6 +255,8 @@ def _require_schema(conn: sqlite3.Connection) -> None:
         raise FillRefuse("messages.source is missing")
     if not _table_exists(conn, "attachment_meta_scans"):
         raise FillRefuse("attachment_meta_scans is missing; migrate first")
+    if not _table_exists(conn, "attachment_folder_uidvalidity"):
+        raise FillRefuse("attachment_folder_uidvalidity is missing; migrate first")
     if not _table_exists(conn, "attachments"):
         raise FillRefuse("attachments is missing; migrate first")
     found = _columns(conn, "attachments")
@@ -549,6 +588,8 @@ def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
         "skipped": 0,
         "partial": False,
         "partial_banner": "",
+        "parts_truncated": 0,
+        "uidvalidity_mismatch": 0,
     }
 
 
@@ -699,8 +740,13 @@ def _record_message(
     parts: list[MimePart],
     store_filenames: bool,
     now: Callable[[], str],
+    attachment_flag: int | None = None,
 ) -> tuple[int, int, int]:
-    flag = has_attachments_flag(parts)
+    flag = (
+        has_attachments_flag(parts)
+        if attachment_flag is None
+        else int(attachment_flag)
+    )
     names = 0
     started = False
     try:
@@ -774,6 +820,29 @@ def _parts_for_row(
     parts = parts_from_rfc822(raw)
     del raw
     return parts
+
+
+def _note_uidvalidity(conn: sqlite3.Connection, folder: str, validity: int, apply: bool) -> bool:
+    """Return True when the stored UIDVALIDITY does not match.
+
+    A missing row is recorded on apply and is not a mismatch. Dry-run
+    does not insert. A mismatch does not update the stored value.
+    """
+    row = conn.execute(
+        "SELECT uidvalidity FROM attachment_folder_uidvalidity WHERE folder=?",
+        (folder,),
+    ).fetchone()
+    if row is None:
+        if apply:
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO attachment_folder_uidvalidity (folder, uidvalidity) "
+                "VALUES (?, ?)",
+                (folder, int(validity)),
+            )
+            conn.commit()
+        return False
+    return int(row[0]) != int(validity)
 
 
 def fill_metadata(
@@ -890,6 +959,13 @@ def fill_metadata(
                     continue
                 try:
                     client.select(folder_name, readonly=True)
+                    if client.uidvalidity is None:
+                        raise RuntimeError("imap uidvalidity missing")
+                    if _note_uidvalidity(
+                        conn, folder_name, int(client.uidvalidity), apply
+                    ):
+                        report["uidvalidity_mismatch"] += 1
+                        continue
                 except FillRefuse:
                     raise
                 except Exception:
@@ -929,11 +1005,10 @@ def fill_metadata(
                 except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError):
                     report["errors"] += 1
                     continue
-                if max_parts <= 0:
-                    report["capped"] += 1
-                    continue
-                if len(parts) > max_parts:
+                full_flag = has_attachments_flag(parts)
+                if max_parts > 0 and len(parts) > max_parts:
                     parts = parts[:max_parts]
+                    report["parts_truncated"] += 1
                 try:
                     flag, names, count = _record_message(
                         conn,
@@ -943,6 +1018,7 @@ def fill_metadata(
                         parts=parts,
                         store_filenames=store_filenames,
                         now=stamp,
+                        attachment_flag=full_flag,
                     )
                 except sqlite3.Error:
                     report["errors"] += 1
@@ -988,6 +1064,8 @@ def format_report(report: dict[str, Any]) -> str:
             "skipped=%s" % report.get("skipped"),
             "errors=%s" % report.get("errors"),
             "partial=%s" % (1 if report.get("partial") else 0),
+            "parts_truncated=%s" % report.get("parts_truncated"),
+            "uidvalidity_mismatch=%s" % report.get("uidvalidity_mismatch"),
             "capped: %s" % report.get("capped"),
         ]
     )
@@ -1116,7 +1194,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     mailbox = _env_text(environ, args.mailbox, "MAILROOM_IMAP_MAILBOX")
 
     def _password_fn() -> str:
-        return read_imap_app_password(environ)
+        return read_imap_app_password()
 
     try:
         report = fill_metadata(

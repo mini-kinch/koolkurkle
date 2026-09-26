@@ -20,7 +20,14 @@ attachments
   a refuse.
 
   A successful run, including the empty-rename path, creates
-  attachment_meta_scans with the rest of the schema.
+  attachment_meta_scans with the rest of the schema. It also creates
+  attachment_folder_uidvalidity (folder, uidvalidity) so a later fill
+  can refuse a UIDVALIDITY mismatch.
+
+  The write path is one transaction: BEGIN IMMEDIATE, then every DDL
+  statement, then COMMIT. A refuse rolls back. A mismatched attachments
+  table that already has rows is refused before any DDL, and the
+  database file bytes are unchanged.
 
   python3 scripts/attachments/migrate_att0_schema.py --db /tmp/mailroom-copy.sqlite
   python3 scripts/attachments/migrate_att0_schema.py --db /tmp/mailroom.sqlite
@@ -85,6 +92,10 @@ EXPECTED_COLUMNS = {
         "has_attachments",
         "scanned_at",
     ],
+    "attachment_folder_uidvalidity": [
+        "folder",
+        "uidvalidity",
+    ],
 }
 
 # Known empty PR-1 sketch. Any empty column mismatch is renamed, not only this list.
@@ -115,6 +126,8 @@ OWNED_EXACT = {
     "attachment_chunks_au",
     "attachment_meta_scans",
     "sqlite_autoindex_attachment_meta_scans_1",
+    "attachment_folder_uidvalidity",
+    "sqlite_autoindex_attachment_folder_uidvalidity_1",
 }
 
 TRIGGERS = (
@@ -269,6 +282,35 @@ def _ensure_triggers(conn: sqlite3.Connection) -> None:
         conn.execute(sql)
 
 
+def _sql_statements(script: str) -> list[str]:
+    """Split a schema script. ``executescript`` would COMMIT first."""
+    statements = []
+    buf: list[str] = []
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            continue
+        buf.append(line)
+        if stripped.endswith(";"):
+            statement = "\n".join(buf).strip()
+            if statement.endswith(";"):
+                statement = statement[:-1].strip()
+            if statement:
+                statements.append(statement)
+            buf = []
+    tail = "\n".join(buf).strip()
+    if tail.endswith(";"):
+        tail = tail[:-1].strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def _execute_script(conn: sqlite3.Connection, script: str) -> None:
+    for statement in _sql_statements(script):
+        conn.execute(statement)
+
+
 def _apply_schema(conn: sqlite3.Connection) -> dict[str, Any]:
     if not SCHEMA_SQL.is_file():
         raise MigrateRefuse("schema sql is missing")
@@ -279,7 +321,7 @@ def _apply_schema(conn: sqlite3.Connection) -> dict[str, Any]:
     before_uv = _user_version(conn)
     existed = {name: _table_exists(conn, name) for name in EXPECTED_COLUMNS}
 
-    conn.executescript(SCHEMA_SQL.read_text(encoding="utf-8"))
+    _execute_script(conn, SCHEMA_SQL.read_text(encoding="utf-8"))
     _ensure_triggers(conn)
     conn.execute(
         "INSERT INTO attachment_chunks_fts(attachment_chunks_fts) VALUES ('rebuild')"
@@ -333,13 +375,15 @@ def migrate_database(
     parent = path.parent
     if parent != Path("") and not parent.is_dir():
         raise MigrateRefuse("database directory is missing")
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), isolation_level=None)
     try:
-        report = _apply_schema(conn)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            report = _apply_schema(conn)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
     report["db_basename"] = path.name

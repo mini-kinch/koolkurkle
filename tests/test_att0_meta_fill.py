@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -262,11 +263,26 @@ class _StubImap:
         self.uids = []
         self.events = []
         self.mailbox = None
+        self.uidvalidity_by_folder = "1"
+        self.uidvalidity = None
 
     def select(self, mailbox, readonly=True):
-        self.mailbox = mailbox
         self.events.append(("select", mailbox, readonly))
+        self.mailbox = mailbox
+        source = self.uidvalidity_by_folder
+        if isinstance(source, dict):
+            chosen = source.get(self.mailbox, "1")
+        else:
+            chosen = source
+        self.uidvalidity = int(chosen)
         return "OK", [b"1"]
+
+    def response(self, code):
+        if str(code).upper() != "UIDVALIDITY":
+            return "OK", [None]
+        if self.uidvalidity is None:
+            return "OK", [None]
+        return "OK", [str(self.uidvalidity).encode("ascii")]
 
     def fetch_bodystructure(self, uid):
         self.uids.append(uid)
@@ -698,7 +714,9 @@ class FillTests(unittest.TestCase):
                 lock_held=False,
             )
             self.assertEqual(report["messages"], 1)
-            self.assertEqual(report["has_attachments"], 0)
+            self.assertEqual(report["has_attachments"], 1)
+            self.assertEqual(report["parts_truncated"], 1)
+            self.assertEqual(report["capped"], 0)
             self.assertEqual(report["parts"], 4)
             conn = sqlite3.connect(str(db))
             try:
@@ -714,7 +732,7 @@ class FillTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertEqual(ids, ["0", "1", "1.1", "1.2"])
-            self.assertEqual(flag, 0)
+            self.assertEqual(flag, 1)
 
     def test_missing_uid_is_an_error_and_not_scanned(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -851,8 +869,8 @@ class FillTests(unittest.TestCase):
                 raise AssertionError("plain IMAP4")
 
         class FakeSSL:
-            def __init__(self, host, port, timeout=None):
-                seen["init"] = (host, port, timeout)
+            def __init__(self, host, port, timeout=None, ssl_context=None):
+                seen["init"] = (host, port, timeout, ssl_context)
 
             def login(self, user, password):
                 seen["login"] = (user, password)
@@ -861,6 +879,9 @@ class FillTests(unittest.TestCase):
             def select(self, mailbox, readonly=False):
                 seen["select"] = (mailbox, readonly)
                 return "OK", [b"1"]
+
+            def response(self, code):
+                return "OK", [b"15"]
 
             def uid(self, command, uid, item):
                 seen["uid"] = (command, uid, item)
@@ -889,9 +910,11 @@ class FillTests(unittest.TestCase):
                 client.select("INBOX", readonly=True)
                 text = client.fetch_bodystructure("9")
         self.assertEqual(plain_calls, [])
-        self.assertEqual(seen["init"], ("imap.example.com", 993, 5))
+        self.assertEqual(seen["init"][:3], ("imap.example.com", 993, 5))
+        self.assertEqual(seen["init"][3].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(seen["init"][3].check_hostname)
         self.assertEqual(seen["uid"], ("FETCH", "9", "(BODYSTRUCTURE)"))
-        self.assertEqual(seen["select"], ("INBOX", True))
+        self.assertEqual(seen["select"], ('"INBOX"', True))
         self.assertEqual(seen["login"][1], SECRET)
         self.assertNotIn(SECRET, text)
         self.assertTrue(seen["logout"])
@@ -1380,6 +1403,205 @@ class FillTests(unittest.TestCase):
             self.assertIn("bytes_stored=0", proc.stdout)
             self.assertNotIn("PARTIAL:", proc.stdout)
 
+    def test_ssl_context_is_verified_and_passed_to_the_factory(self):
+        context = ssl.create_default_context()
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        seen = {}
+
+        class Factory:
+            def __init__(self, host, port, timeout=None, ssl_context=None):
+                seen["call"] = (host, port, timeout, ssl_context)
+
+            def login(self, user, password):
+                return "OK", [b"ok"]
+
+            def logout(self):
+                return "BYE", [b""]
+
+        with mock.patch(
+            "attachments.meta_fill.ssl.create_default_context", return_value=context
+        ):
+            client = meta.ImapBodystructureClient(
+                "imap.example.com",
+                "user@example.com",
+                timeout=5,
+                imap_factory=Factory,
+                password_fn=lambda: "example-secret",
+            )
+            with client:
+                pass
+        self.assertEqual(seen["call"][:3], ("imap.example.com", 993, 5))
+        self.assertIs(seen["call"][3], context)
+        self.assertEqual(seen["call"][3].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(seen["call"][3].check_hostname)
+
+    def test_select_quotes_spaces_quotes_and_backslashes(self):
+        class Recorder:
+            def __init__(self):
+                self.sent = []
+
+            def select(self, mailbox, readonly=False):
+                self.sent.append((mailbox, readonly))
+                return "OK", [b"1"]
+
+            def response(self, code):
+                return "OK", [b"7"]
+
+        client = meta.ImapBodystructureClient(
+            "imap.example.com",
+            "user@example.com",
+            password_fn=lambda: "example-secret",
+        )
+        client._conn = Recorder()
+        client.select("Deleted Messages")
+        client.select('Say "hi"')
+        client.select("a\\b")
+        self.assertEqual(
+            client._conn.sent,
+            [
+                ('"Deleted Messages"', True),
+                ('"Say \\"hi\\""', True),
+                ('"a\\\\b"', True),
+            ],
+        )
+        self.assertEqual(client.uidvalidity, 7)
+
+    def test_max_parts_zero_is_not_a_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db, dump = self._jsonl_db(tmp)
+            report = meta.fill_metadata(
+                db,
+                source="jsonl",
+                jsonl_path=dump,
+                apply=True,
+                max_parts=0,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(report["capped"], 0)
+            self.assertEqual(report["parts_truncated"], 0)
+            self.assertEqual(report["messages"], 2)
+            self.assertEqual(report["has_attachments"], 1)
+            self.assertEqual(report["parts"], len(EXPECTED_MIXED) + 1)
+            self.assertIn("parts_truncated=0", meta.format_report(report))
+
+    def test_uidvalidity_mismatch_does_not_write_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [
+                    (
+                        "ex-deleted",
+                        "imap-live",
+                        "7",
+                        None,
+                        None,
+                        "synthetic-deleted",
+                        "Deleted Messages",
+                    ),
+                    ("ex-inbox", "imap-live", "7", None, None, "synthetic-inbox", "INBOX"),
+                ],
+            )
+            stub = _StubImap(
+                {
+                    ("Deleted Messages", "7"): PLAIN_BS,
+                    ("INBOX", "7"): PLAIN_BS,
+                }
+            )
+            stub.uidvalidity_by_folder = {"Deleted Messages": "10", "INBOX": "20"}
+            first = meta.fill_metadata(
+                db,
+                source="imap",
+                apply=True,
+                imap_client=stub,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(first["messages"], 2)
+            self.assertEqual(first["uidvalidity_mismatch"], 0)
+            self.assertEqual(stub.events[0], ("select", "Deleted Messages", True))
+            conn = sqlite3.connect(str(db))
+            try:
+                conn.execute("DELETE FROM attachment_meta_scans")
+                conn.execute("DELETE FROM attachments")
+                conn.execute(
+                    "UPDATE messages SET has_attachments=0"
+                )
+                conn.commit()
+                stored = dict(
+                    conn.execute(
+                        "SELECT folder, uidvalidity FROM attachment_folder_uidvalidity"
+                    ).fetchall()
+                )
+            finally:
+                conn.close()
+            self.assertEqual(stored, {"Deleted Messages": 10, "INBOX": 20})
+            stub.events.clear()
+            stub.uidvalidity_by_folder = {"Deleted Messages": "10", "INBOX": "21"}
+            second = meta.fill_metadata(
+                db,
+                source="imap",
+                apply=True,
+                imap_client=stub,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(second["uidvalidity_mismatch"], 1)
+            self.assertEqual(second["messages"], 1)
+            self.assertIn("uidvalidity_mismatch=1", meta.format_report(second))
+            conn = sqlite3.connect(str(db))
+            try:
+                done = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT message_id FROM attachment_meta_scans"
+                    )
+                }
+                kept = dict(
+                    conn.execute(
+                        "SELECT folder, uidvalidity FROM attachment_folder_uidvalidity"
+                    ).fetchall()
+                )
+            finally:
+                conn.close()
+            self.assertEqual(done, {"ex-deleted"})
+            self.assertEqual(kept["INBOX"], 20)
+            self.assertNotIn("ex-inbox", done)
+
+    def test_keychain_env_cannot_redirect_the_password_fetch(self):
+        calls = []
+
+        def runner(binary, service):
+            calls.append((binary, service))
+            if service == "mailroom.imap.app-password":
+                return 1, ""
+            if service == "mailroom.icloud.app-password":
+                return 0, "legacy-secret"
+            return 0, "redirected-secret"
+
+        env = {
+            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
+            "MAILROOM_KEYCHAIN_ITEM": "other-item",
+            "IMAP_APP_PASSWORD": "env-secret",
+            "MAILROOM_IMAP_PASSWORD": "env-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            password = imap_keychain.read_imap_app_password(runner=runner)
+        self.assertEqual(
+            calls,
+            [
+                ("/usr/bin/security", "mailroom.imap.app-password"),
+                ("/usr/bin/security", "mailroom.icloud.app-password"),
+            ],
+        )
+        self.assertEqual(password, "legacy-secret")
+        source = (SCRIPTS / "imap_keychain.py").read_text(encoding="utf-8")
+        self.assertNotIn("MAILROOM_SECURITY_BIN", source)
+        self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", source)
+        self.assertNotIn("os.environ", source)
+
 
 class CliTests(unittest.TestCase):
     def test_negative_smoke_and_mailroom_refuse(self):
@@ -1536,8 +1758,9 @@ class CliTests(unittest.TestCase):
                     raise AssertionError("plain IMAP4")
 
             class FakeSSL:
-                def __init__(self, host, port, timeout=None):
+                def __init__(self, host, port, timeout=None, ssl_context=None):
                     seen["inits"].append((host, port, timeout))
+                    seen["ssl_context"] = ssl_context
                     self.mailbox = None
 
                 def login(self, user, password):
@@ -1549,9 +1772,20 @@ class CliTests(unittest.TestCase):
                     seen["events"].append(("select", mailbox, readonly))
                     return "OK", [b"1"]
 
+                def response(self, code):
+                    return "OK", [b"8"]
+
                 def uid(self, command, uid, item):
-                    seen["events"].append(("uid", self.mailbox, command, uid, item))
-                    if self.mailbox == "Archive":
+                    logical = self.mailbox
+                    if (
+                        isinstance(logical, str)
+                        and len(logical) >= 2
+                        and logical.startswith('"')
+                        and logical.endswith('"')
+                    ):
+                        logical = logical[1:-1]
+                    seen["events"].append(("uid", logical, command, uid, item))
+                    if logical == "Archive":
                         payload = MIXED_BS
                     else:
                         payload = PLAIN_BS
@@ -1619,9 +1853,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 seen["events"][:4],
                 [
-                    ("select", "Archive", True),
+                    ("select", '"Archive"', True),
                     ("uid", "Archive", "FETCH", "42", "(BODYSTRUCTURE)"),
-                    ("select", "INBOX", True),
+                    ("select", '"INBOX"', True),
                     ("uid", "INBOX", "FETCH", "42", "(BODYSTRUCTURE)"),
                 ],
             )
@@ -1693,7 +1927,7 @@ class DesignAndBoundaryTests(unittest.TestCase):
 
     def test_login_error_from_the_client_is_redacted(self):
         class BadIMAP:
-            def __init__(self, host, port, timeout=None):
+            def __init__(self, host, port, timeout=None, ssl_context=None):
                 return None
 
             def login(self, user, password):

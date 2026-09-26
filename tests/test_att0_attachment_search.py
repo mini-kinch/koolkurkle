@@ -391,6 +391,42 @@ class SchemaMigrationTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_refused_nonempty_mismatch_preserves_file_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            conn = sqlite3.connect(str(db))
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE attachments (
+                      id TEXT PRIMARY KEY,
+                      message_id TEXT NOT NULL,
+                      filename TEXT,
+                      mime_type TEXT,
+                      size_bytes INTEGER,
+                      content_hash TEXT,
+                      path TEXT,
+                      created_at TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO attachments (id, message_id, filename) "
+                    "VALUES ('att-old', 'msg-old', 'old.txt')"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            before = db.read_bytes()
+            digest = hashlib.sha256(before).hexdigest()
+            with self.assertRaises(mig.MigrateRefuse) as ctx:
+                mig.migrate_database(db, cmdlines=[], lock_held=False)
+            self.assertIn("row", str(ctx.exception))
+            after = db.read_bytes()
+            self.assertEqual(len(after), len(before))
+            self.assertEqual(hashlib.sha256(after).hexdigest(), digest)
+            self.assertEqual(after, before)
+
     def test_empty_legacy_attachments_is_renamed_and_meta_scans_created(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom-copy.sqlite"
