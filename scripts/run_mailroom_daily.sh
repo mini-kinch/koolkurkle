@@ -50,11 +50,11 @@ unset _db _base
 
 # Load IMAP app password from Keychain by service name only.
 # Override the item with MAILROOM_KEYCHAIN_ITEM. Do not print the value.
-# MAILROOM_SECURITY_BIN is a test hook (default: /usr/bin/security).
+# Binary is pinned to /usr/bin/security (same argv as scripts/imap_keychain.py).
 KEYCHAIN_DEFAULT="mailroom.imap.app-password"
 KEYCHAIN_LEGACY="mailroom.icloud.app-password"
 KEYCHAIN_ITEM="${MAILROOM_KEYCHAIN_ITEM:-$KEYCHAIN_DEFAULT}"
-SECURITY_BIN="${MAILROOM_SECURITY_BIN:-/usr/bin/security}"
+SECURITY_BIN="/usr/bin/security"
 if [ -z "${IMAP_APP_PASSWORD:-}" ] && [ -x "$SECURITY_BIN" ]; then
   set +e
   _pw="$("$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_ITEM" -w 2>/dev/null)"

@@ -1086,11 +1086,16 @@ import sys
 from pathlib import Path
 
 log = os.environ.get("MAILROOM_FAKE_SECURITY_LOG")
+argv_log = os.environ.get("MAILROOM_FAKE_SECURITY_ARGV_LOG")
 items = os.environ.get("MAILROOM_FAKE_SECURITY_ITEMS", "")
 empty = set(os.environ.get("MAILROOM_FAKE_SECURITY_EMPTY", "").split(",")) - {""}
 ok = dict(part.split("=", 1) for part in items.split("|") if "=" in part)
 args = sys.argv[1:]
 svc = args[args.index("-s") + 1] if "-s" in args else ""
+if argv_log:
+    path = Path(argv_log)
+    prev = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(prev + " ".join(sys.argv) + "\n", encoding="utf-8")
 if log:
     path = Path(log)
     prev = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -1102,6 +1107,72 @@ if svc in ok:
     sys.exit(0)
 sys.exit(44)
 """
+DECOY_SECURITY = r"""#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+log = os.environ.get("MAILROOM_DECOY_LOG", "")
+if log:
+    Path(log).write_text("decoy\n", encoding="utf-8")
+sys.stdout.write("DECOY_SHOULD_NOT_RUN\n")
+sys.exit(0)
+"""
+# Absolute /usr/bin/security cannot be redirected with PATH. Mount a stub
+# onto that path. Prefer an unprivileged user+mount namespace; some hosts
+# block those and allow only a root mount namespace.
+_OVERLAY_AND_EXEC = r"""
+set -eu
+upper=$(mktemp -d)
+work=$(mktemp -d)
+mount -t overlay overlay -o lowerdir=/usr/bin,upperdir="$upper",workdir="$work" /usr/bin
+cp "$1" /usr/bin/security
+chmod 755 /usr/bin/security
+exec /bin/zsh "$2"
+"""
+_PINNED_SECURITY_PREFIX = None
+
+
+def _pinned_security_prefix() -> list[str]:
+    global _PINNED_SECURITY_PREFIX
+    if _PINNED_SECURITY_PREFIX is not None:
+        return list(_PINNED_SECURITY_PREFIX)
+    probe = subprocess.run(
+        ["unshare", "--user", "--map-root-user", "--mount", "true"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode == 0:
+        _PINNED_SECURITY_PREFIX = [
+            "unshare",
+            "--user",
+            "--map-root-user",
+            "--mount",
+        ]
+    else:
+        sudo = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if sudo.returncode != 0:
+            detail = (probe.stderr or "").strip() or "exit %s" % probe.returncode
+            raise RuntimeError(
+                "cannot stub /usr/bin/security (%s) and sudo -n is unavailable"
+                % detail
+            )
+        _PINNED_SECURITY_PREFIX = [
+            "sudo",
+            "-n",
+            "--preserve-env",
+            "unshare",
+            "--mount",
+        ]
+    return list(_PINNED_SECURITY_PREFIX)
+
+
 DAILY_STUB = r"""
 import hashlib
 import os
@@ -1146,18 +1217,29 @@ class KeychainFallbackTests(unittest.TestCase):
             "MAILARCHIVE_SCRIPTS": str(scripts),
             "MAILARCHIVE_LOGS": str(logs),
             "MAILROOM_DB": str(archive / "mailroom-copy.sqlite"),
-            "MAILROOM_SECURITY_BIN": str(security),
             "MAILROOM_APPLE_PY": sys.executable,
             "MAILROOM_FAKE_SECURITY_LOG": str(log),
             "MAILROOM_FAKE_SECURITY_ITEMS": packed,
             "MAILROOM_FAKE_SECURITY_EMPTY": ",".join(empty),
         }
-        for key in ("IMAP_APP_PASSWORD", "MAILROOM_KEYCHAIN_ITEM"):
+        for key in (
+            "IMAP_APP_PASSWORD",
+            "MAILROOM_KEYCHAIN_ITEM",
+            "MAILROOM_SECURITY_BIN",
+        ):
             env.pop(key, None)
         if extra_env:
             env.update(extra_env)
         proc = subprocess.run(
-            ["/bin/zsh", str(SCRIPTS / "run_mailroom_daily.sh")],
+            _pinned_security_prefix()
+            + [
+                "bash",
+                "-c",
+                _OVERLAY_AND_EXEC,
+                "bash",
+                str(security),
+                str(SCRIPTS / "run_mailroom_daily.sh"),
+            ],
             cwd=str(archive),
             env=env,
             capture_output=True,
@@ -1165,6 +1247,12 @@ class KeychainFallbackTests(unittest.TestCase):
             check=False,
         )
         proc.security_log = log.read_text(encoding="utf-8") if log.exists() else ""
+        argv_log = env.get("MAILROOM_FAKE_SECURITY_ARGV_LOG", "")
+        proc.argv_log = ""
+        if argv_log:
+            argv_path = Path(argv_log)
+            if argv_path.exists():
+                proc.argv_log = argv_path.read_text(encoding="utf-8")
         return proc
 
     def _assert_no_secret_leak(self, proc: subprocess.CompletedProcess[str]) -> None:
@@ -1323,6 +1411,54 @@ class KeychainFallbackTests(unittest.TestCase):
         self.assertIn("password_loaded=1", proc.stdout)
         self.assertIn("password_sha256=%s" % _sha256(PRESET_PW), proc.stdout)
         self.assertEqual(proc.security_log, "")
+        self._assert_no_secret_leak(proc)
+
+    def test_security_bin_env_does_not_change_binary(self):
+        """MAILROOM_SECURITY_BIN must not replace /usr/bin/security.
+
+        Primary item is tried first, then the legacy item. The decoy at
+        /tmp/fake is executable so an honored override would run it.
+        """
+        decoy = Path("/tmp/fake")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv_log = root / "argv.log"
+            decoy_log = root / "decoy.log"
+            decoy_log.write_text("", encoding="utf-8")
+            _write_executable(decoy, DECOY_SECURITY)
+            try:
+                proc = self._run(
+                    root,
+                    items={LEGACY_KEYCHAIN: OLD_PW},
+                    extra_env={
+                        "MAILROOM_SECURITY_BIN": "/tmp/fake",
+                        "MAILROOM_FAKE_SECURITY_ARGV_LOG": str(argv_log),
+                        "MAILROOM_DECOY_LOG": str(decoy_log),
+                    },
+                )
+                decoy_text = decoy_log.read_text(encoding="utf-8")
+            finally:
+                decoy.unlink(missing_ok=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.argv_log.splitlines(),
+            [
+                "/usr/bin/security find-generic-password -s %s -w" % NEW_KEYCHAIN,
+                "/usr/bin/security find-generic-password -s %s -w" % LEGACY_KEYCHAIN,
+            ],
+        )
+        self.assertEqual(
+            proc.security_log.split(),
+            [NEW_KEYCHAIN, LEGACY_KEYCHAIN],
+        )
+        self.assertEqual(decoy_text, "")
+        self.assertNotIn("DECOY_SHOULD_NOT_RUN", proc.stdout)
+        self.assertIn("password_loaded=1", proc.stdout)
+        self.assertIn("password_sha256=%s" % _sha256(OLD_PW), proc.stdout)
+        self.assertIn("falling back", proc.stderr)
+        source = (SCRIPTS / "run_mailroom_daily.sh").read_text(encoding="utf-8")
+        self.assertNotIn("MAILROOM_SECURITY_BIN", source)
+        self.assertIn('SECURITY_BIN="/usr/bin/security"', source)
         self._assert_no_secret_leak(proc)
 
 
