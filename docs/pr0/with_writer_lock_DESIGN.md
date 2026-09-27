@@ -78,7 +78,7 @@ The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB
 
 ## Caller-side basename guards (inventory)
 
-These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each compares `Path.name` to `SOR_BASENAME`. They do not call `is_live_sor`. This table records them. It does not change them. Alias directions have no test. See `docs/heavy/20260927-2159-caller-side-sor-basename-guards.md`.
+These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each compares `Path.name` to `SOR_BASENAME`. They do not call `is_live_sor`. This table records them. It does not change them. Alias directions have no test. See `docs/heavy/20260927-2207-pr90-caller-live-only-guards.md`.
 
 | Guard | Exact code | Test |
 |---|---|---|
