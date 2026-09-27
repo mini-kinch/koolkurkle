@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Consistent snapshot of a SQLite database into a NEW file.
 
-Opens the source with a ``file:...?mode=ro`` URI and
-``PRAGMA query_only=ON``. Copies with ``sqlite3.Connection.backup``
-into a temporary file beside the destination, runs ``PRAGMA
-quick_check``, fsyncs, then ``os.replace``. A failure before the
-replace leaves no destination and no temp file.
+Opens the source with the same no-sidecar rule as ``att0_fp.py``:
+``mode=ro`` and ``immutable=1`` when the source ``-wal`` is missing or
+empty, and a private hardlink plus a copied ``-wal`` opened ``mode=ro``
+when the ``-wal`` is non-empty. The source gains no ``-wal`` or
+``-shm``. ``PRAGMA query_only=ON`` is set on that connection.
+
+Copies with ``sqlite3.Connection.backup`` into a temporary file beside
+the destination. The temp copy is sealed with ``PRAGMA
+journal_mode=DELETE`` before it is closed, so header bytes 18 and 19
+are 1, 1 and ``PRAGMA quick_check`` can open it ``mode=ro`` without a
+``-shm``. A WAL header left in place fails that open on SQLite 3.51.0.
+The next writer re-enables WAL (``scripts/sqlite_pragmas.py``). The
+temp file is fsync'd, then ``os.replace``. A failure before the replace
+leaves no destination and no temp file.
 
 Reading the system of record is allowed. This script does not take the
 writer lock. The operator decides whether to wrap the run in
@@ -17,8 +26,9 @@ conflict.
 
 Refuses (exit 2) when the destination exists, the destination basename
 is ``mailroom.sqlite``, the destination is the same file as the source,
-the destination directory is missing, or the source is missing or not
-SQLite. Never overwrites. Prints basenames only.
+the destination directory is missing, the source is missing or not
+SQLite, or a non-empty source ``-wal`` cannot be staged. Never
+overwrites. Prints basenames only.
 """
 
 from __future__ import annotations
@@ -36,6 +46,11 @@ SCRIPTS = Path(__file__).resolve().parent.parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from attachments.att0_fp import (  # noqa: E402
+    FpRefuse,
+    connect_without_sidecars,
+    release_readonly,
+)
 from sor_writer_gate import (  # noqa: E402
     SOR_BASENAME,
     SorWriterRefuse,
@@ -54,8 +69,49 @@ class BackupRefuse(Exception):
 
 
 def _ro_uri(path: Path) -> str:
+    """Plain ``mode=ro`` for the sealed temp copy (header bytes 18-19 are 1, 1)."""
     posix = Path(os.path.abspath(str(path))).as_posix()
     return "file:%s?mode=ro" % quote(posix, safe="/:")
+
+
+def _open_source(path: Path) -> tuple[sqlite3.Connection, Path | None]:
+    """Open ``path`` without creating sidecars beside it.
+
+    Same rule as ``att0_fp.connect_without_sidecars``. Staging failure
+    stays exit 2. A SQLite open error stays ``refuse: backup failed``.
+    """
+    try:
+        return connect_without_sidecars(path, temp_prefix=".att0-backup-")
+    except FpRefuse as exc:
+        if exc.code == 2:
+            raise BackupRefuse(str(exc), code=2) from None
+        raise BackupRefuse("refuse: backup failed", code=1) from None
+
+
+def _format_versions(path: Path) -> tuple[int, int]:
+    """SQLite header bytes 18-19. 1 is rollback, 2 is WAL."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(18)
+            raw = handle.read(2)
+    except OSError:
+        raw = b""
+    if len(raw) != 2:
+        raise BackupRefuse("refuse: journal_mode mismatch", code=1)
+    return raw[0], raw[1]
+
+
+def _seal_delete(conn: sqlite3.Connection) -> None:
+    """Make the temp copy a rollback journal so a later ``mode=ro`` needs no ``-shm``.
+
+    The next writer sets WAL again (``scripts/sqlite_pragmas.py``).
+    """
+    try:
+        row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+    except sqlite3.Error:
+        raise BackupRefuse("refuse: journal_mode mismatch", code=1) from None
+    if row is None or str(row[0]).lower() != "delete":
+        raise BackupRefuse("refuse: journal_mode mismatch", code=1)
 
 
 def _is_sqlite(path: Path) -> bool:
@@ -192,6 +248,7 @@ def backup_database(
     tmp_path = None
     src_conn = None
     dst_conn = None
+    private = None
     replaced = False
     journal = ""
     try:
@@ -204,27 +261,28 @@ def backup_database(
         tmp_path = Path(tmp_name)
         os.close(fd)
         try:
-            src_conn = sqlite3.connect(
-                _ro_uri(src_path), uri=True, isolation_level=None
-            )
-            src_conn.execute("PRAGMA query_only=ON")
+            src_conn, private = _open_source(src_path)
             dst_conn = sqlite3.connect(str(tmp_path))
             _backup_pages(src_conn, dst_conn)
-            try:
-                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except sqlite3.Error:
-                pass
-            dst_conn.commit()
+            _seal_delete(dst_conn)
+        except BackupRefuse:
+            raise
         except sqlite3.Error:
             raise BackupRefuse("refuse: backup failed", code=1) from None
         dst_conn.close()
         dst_conn = None
         src_conn.close()
         src_conn = None
+        release_readonly(None, private)
+        private = None
         _unlink_sidecars(tmp_path)
+        if _format_versions(tmp_path) != (1, 1):
+            raise BackupRefuse("refuse: journal_mode mismatch", code=1)
         qc, journal = _quick_check(tmp_path)
         if qc != "ok":
             raise BackupRefuse("refuse: quick_check=%s" % (qc or "failed"), code=1)
+        if str(journal).lower() != "delete":
+            raise BackupRefuse("refuse: journal_mode mismatch", code=1)
         try:
             _fsync(tmp_path)
             os.replace(str(tmp_path), str(dest_path))
@@ -247,6 +305,7 @@ def backup_database(
                     conn.close()
                 except sqlite3.Error:
                     pass
+        release_readonly(None, private)
         if tmp_path is not None and not replaced:
             _unlink_db(tmp_path)
     elapsed = time.monotonic() - started

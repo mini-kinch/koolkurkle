@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """Read-only fingerprint of a SQLite file.
 
-Opens the database only with a ``file:...?mode=ro`` URI and
-``PRAGMA query_only=ON``. It does not write SQL. On a WAL database,
-SQLite itself may still create an empty ``-wal`` and a ``-shm``
-read-mark file; those paths are statted before the connection opens,
-and the main-file bytes are not modified.
+Does not create a ``-wal`` or a ``-shm`` beside the fingerprinted
+database, and does not modify the main-file bytes. Stats for those
+paths are taken before the open. ``PRAGMA query_only=ON`` is set on
+the connection.
+
+A missing or empty ``-wal`` is opened ``file:...?mode=ro&immutable=1``.
+That open does not read uncheckpointed frames (there are none). It is
+also the open that works on SQLite 3.51.0: a plain ``mode=ro`` open of
+a WAL database with no ``-shm`` fails there, because a read-only
+connection cannot create the shared-memory file.
+
+A non-empty ``-wal`` is never opened with ``immutable=1`` (that would
+hide committed frames). The main file is hardlinked into a private
+directory on the same filesystem, the ``-wal`` is copied beside that
+link, and the private path is opened ``mode=ro``. The private directory
+is removed after the read. If it cannot be created, the process exits
+2 with ``refuse: cannot stage source wal``. The fingerprinted path is
+not opened in place.
 
 Every ordinary table is reported with a row count and a sha256 of its
 quoted rows. The list is ``sqlite_master`` rows with ``type='table'``,
@@ -42,7 +55,9 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -65,9 +80,146 @@ class FpRefuse(Exception):
         self.code = code
 
 
-def _ro_uri(path: Path) -> str:
+def _file_uri(path: Path, query: str) -> str:
     posix = Path(os.path.abspath(str(path))).as_posix()
-    return "file:%s?mode=ro" % quote(posix, safe="/:")
+    return "file:%s?%s" % (quote(posix, safe="/:"), query)
+
+
+def _ro_uri(path: Path) -> str:
+    """Plain ``mode=ro``. Only for a private stage that already has a ``-wal``."""
+    return _file_uri(path, "mode=ro")
+
+
+def _immutable_uri(path: Path) -> str:
+    """``mode=ro`` plus ``immutable=1``. For a missing or empty ``-wal``."""
+    return _file_uri(path, "mode=ro&immutable=1")
+
+
+def _wal_path(path: Path) -> Path:
+    return Path(str(path) + "-wal")
+
+
+def _wal_nonempty(path: Path) -> bool:
+    wal = _wal_path(path)
+    try:
+        info = wal.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise FpRefuse("refuse: wal unreadable (%s)" % wal.name, code=2) from None
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+
+
+def _copy_bytes(src: Path, dest: Path) -> None:
+    with open(src, "rb") as inp, open(dest, "wb") as out:
+        shutil.copyfileobj(inp, out, length=1024 * 1024)
+
+
+def _remove_private(private: Path | None) -> None:
+    if private is not None:
+        shutil.rmtree(str(private), ignore_errors=True)
+
+
+def release_readonly(conn: sqlite3.Connection | None, private: Path | None) -> None:
+    """Close ``conn`` and remove a staged private directory, if any."""
+    if conn is not None:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    _remove_private(private)
+
+
+def _apply_query_only(conn: sqlite3.Connection, label: str) -> None:
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        flag = conn.execute("PRAGMA query_only").fetchone()
+    except sqlite3.Error:
+        raise FpRefuse(
+            "refuse: database is not readable (%s)" % label, code=1
+        ) from None
+    if flag is None or int(flag[0]) != 1:
+        raise FpRefuse("refuse: query_only did not stick", code=1)
+
+
+def connect_without_sidecars(
+    path: Path, temp_prefix: str = ".att0-fp-"
+) -> tuple[sqlite3.Connection, Path | None]:
+    """Open ``path`` for reading without creating sidecars beside it.
+
+    Missing or empty ``-wal``: ``mode=ro`` and ``immutable=1``. Non-empty
+    ``-wal``: hardlink the main file into a private directory on the same
+    filesystem, copy the ``-wal`` beside that link, and open the private
+    path ``mode=ro``. ``immutable=1`` is never used in that case.
+
+    Returns ``(connection, private_dir)``. ``private_dir`` is None when
+    no stage was needed. The caller must :func:`release_readonly`.
+    """
+    label = path.name
+    if not _wal_nonempty(path):
+        try:
+            conn = sqlite3.connect(
+                _immutable_uri(path), uri=True, isolation_level=None
+            )
+        except sqlite3.Error:
+            raise FpRefuse(
+                "refuse: database is not readable (%s)" % label, code=1
+            ) from None
+        try:
+            _apply_query_only(conn, label)
+        except FpRefuse:
+            conn.close()
+            raise
+        return conn, None
+    private: Path | None = None
+    conn: sqlite3.Connection | None = None
+    try:
+        private = Path(tempfile.mkdtemp(prefix=temp_prefix, dir=str(path.parent)))
+        staged = private / "db.sqlite"
+        os.link(str(path), str(staged))
+        _copy_bytes(_wal_path(path), Path(str(staged) + "-wal"))
+        conn = sqlite3.connect(_ro_uri(staged), uri=True, isolation_level=None)
+        _apply_query_only(conn, label)
+    except FpRefuse:
+        release_readonly(conn, private)
+        raise
+    except sqlite3.Error:
+        release_readonly(conn, private)
+        raise FpRefuse(
+            "refuse: database is not readable (%s)" % label, code=1
+        ) from None
+    except OSError:
+        release_readonly(conn, private)
+        raise FpRefuse("refuse: cannot stage source wal", code=2) from None
+    return conn, private
+
+
+def _format_versions(path: Path) -> tuple[int, int] | None:
+    """SQLite header bytes 18-19. 1 is rollback, 2 is WAL."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(18)
+            raw = handle.read(2)
+    except OSError:
+        return None
+    if len(raw) != 2:
+        return None
+    return raw[0], raw[1]
+
+
+def _journal_mode(path: Path, conn: sqlite3.Connection) -> str:
+    """File journal mode. Header bytes win over an immutable connection.
+
+    ``immutable=1`` reports ``delete`` even when the file is WAL. Bytes
+    18 and 19 equal to 2 mean the file is WAL. Other persistent files
+    use ``PRAGMA journal_mode`` (``delete`` for a rollback file).
+    """
+    if _format_versions(path) == (2, 2):
+        return "wal"
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    if row is None or row[0] is None:
+        raise sqlite3.Error("journal_mode")
+    return str(row[0])
 
 
 def _quote_ident(name: str) -> str:
@@ -135,26 +287,26 @@ def parse_exclusions(extra_tables=None, extra_columns=None):
     return tuple(sorted(tables)), tuple(sorted(columns))
 
 
+_STAGED: dict[int, Path] = {}
+
+
 def open_readonly(path: Path) -> sqlite3.Connection:
-    """Open ``path`` read-only with ``query_only`` on."""
-    try:
-        conn = sqlite3.connect(_ro_uri(path), uri=True, isolation_level=None)
-    except sqlite3.Error:
-        raise FpRefuse(
-            "refuse: database is not readable (%s)" % path.name, code=1
-        ) from None
-    try:
-        conn.execute("PRAGMA query_only=ON")
-        flag = conn.execute("PRAGMA query_only").fetchone()
-    except sqlite3.Error:
-        conn.close()
-        raise FpRefuse(
-            "refuse: database is not readable (%s)" % path.name, code=1
-        ) from None
-    if flag is None or int(flag[0]) != 1:
-        conn.close()
-        raise FpRefuse("refuse: query_only did not stick", code=1)
+    """Open ``path`` read-only with ``query_only`` on.
+
+    Uses the same no-sidecar rule as :func:`connect_without_sidecars`.
+    A non-empty ``-wal`` stages a private directory; close that
+    connection with :func:`close_readonly` so the directory is removed.
+    """
+    conn, private = connect_without_sidecars(path)
+    if private is not None:
+        _STAGED[id(conn)] = private
     return conn
+
+
+def close_readonly(conn: sqlite3.Connection) -> None:
+    """Close a connection from :func:`open_readonly` and drop its stage."""
+    private = _STAGED.pop(id(conn), None)
+    release_readonly(conn, private)
 
 
 def _master_names(conn: sqlite3.Connection, sql_pred: str) -> list[str]:
@@ -273,14 +425,14 @@ def fingerprint(db, extra_tables=None, extra_columns=None) -> dict:
     if not path.is_file() or not _is_sqlite(path):
         raise FpRefuse("refuse: database is not sqlite (%s)" % path.name)
     stat_main = _stat_record(path)
-    stat_wal = _stat_record(Path(str(path) + "-wal"))
+    stat_wal = _stat_record(_wal_path(path))
     stat_shm = _stat_record(Path(str(path) + "-shm"))
     main_sha = _sha256_file(path)
-    conn = open_readonly(path)
+    conn, private = connect_without_sidecars(path)
     try:
         try:
             conn.execute("BEGIN")
-            journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            journal = _journal_mode(path, conn)
             names = _master_names(conn, _ORDINARY_SQL)
             virtual = _master_names(conn, _VIRTUAL_SQL)
             tables = {}
@@ -311,7 +463,7 @@ def fingerprint(db, extra_tables=None, extra_columns=None) -> dict:
                 "refuse: database is not readable (%s)" % path.name, code=1
             ) from None
     finally:
-        conn.close()
+        release_readonly(conn, private)
     doc = {
         "db_basename": path.name,
         "journal_mode": journal,

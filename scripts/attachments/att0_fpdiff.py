@@ -32,6 +32,8 @@ Without ``--logical``, file stats are compared too. An ``-shm`` change
 is a note (a read-only reader updates read marks). A ``-wal`` that
 appears with size 0 is a note. A new non-empty ``-wal`` is a
 difference. If ``-wal`` already existed, its size and mtime must match.
+``att0_fp.py`` does not create those sidecars; the notes still apply
+when a fingerprint recorded them.
 """
 
 from __future__ import annotations

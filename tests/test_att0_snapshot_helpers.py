@@ -17,9 +17,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -121,6 +122,101 @@ def _mutate(path: Path, sql: str, params=()) -> None:
         conn.close()
 
 
+def _format_versions(path: Path) -> tuple[int, int]:
+    """SQLite header bytes 18-19. 1 is rollback, 2 is WAL."""
+    blob = path.read_bytes()
+    return blob[18], blob[19]
+
+
+def _path_from_uri(text: str) -> Path | None:
+    if not str(text).startswith("file:"):
+        return None
+    parsed = urlparse(str(text))
+    if parsed.scheme != "file" or not parsed.path:
+        return None
+    return Path(unquote(parsed.path))
+
+
+@contextmanager
+def _sqlite351_ro_guard(seen=None):
+    """Fail a plain mode=ro open of a WAL file that has no -wal and no -shm.
+
+    SQLite 3.51.0 (Apple /usr/bin/python3) returns ``unable to open database
+    file`` for that open: a read-only connection cannot create ``-shm``.
+    ``immutable=1`` is allowed. A private stage is allowed only after its
+    ``-wal`` has been copied, which is the open that can read those frames.
+    """
+    real = sqlite3.connect
+
+    def guard(database, *args, **kwargs):
+        text = str(database)
+        if seen is not None and text.startswith("file:"):
+            seen.append(text)
+        if (
+            text.startswith("file:")
+            and "mode=ro" in text
+            and "immutable=1" not in text
+        ):
+            path = _path_from_uri(text)
+            if (
+                path is not None
+                and path.is_file()
+                and _format_versions(path) == (2, 2)
+                and not Path(str(path) + "-shm").is_file()
+                and not Path(str(path) + "-wal").is_file()
+            ):
+                raise sqlite3.OperationalError("unable to open database file")
+        return real(database, *args, **kwargs)
+
+    with mock.patch("sqlite3.connect", side_effect=guard):
+        yield
+
+
+def _drop_sidecars(path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+
+
+def _open_uncheckpointed(path: Path) -> sqlite3.Connection | None:
+    """Leave a non-empty ``-wal`` whose latest row is not in the main file.
+
+    Python 3.12+ can close without checkpointing. On 3.9 the connection
+    stays open so close does not fold the ``-wal`` into the main file.
+    """
+    conn = sqlite3.connect(str(path))
+    can_close = hasattr(conn, "setconfig") and hasattr(
+        sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"
+    )
+    if can_close:
+        conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
+    conn.execute("INSERT INTO bills (amount) VALUES (1)")
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("INSERT INTO bills (amount) VALUES (2)")
+    conn.commit()
+    wal = Path(str(path) + "-wal")
+    if not (wal.is_file() and wal.stat().st_size > 0):
+        conn.close()
+        raise AssertionError("expected a non-empty wal")
+    if can_close:
+        conn.close()
+        return None
+    return conn
+
+
+def _family_hashes(path: Path) -> dict:
+    found = {"main": _sha(path)}
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        found[suffix] = _sha(sidecar) if sidecar.is_file() else None
+    return found
+
+
 class _DbCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -172,6 +268,7 @@ class FingerprintTests(_DbCase):
         self.assertEqual(doc["imap_live_not_on_server"], 1)
         self.assertEqual(doc["db_basename"], "sample.sqlite")
         self.assertEqual(doc["stat_main"]["basename"], "sample.sqlite")
+        self.assertEqual(doc["journal_mode"], "delete")
         self.assertIsNone(doc["stat_wal"])
         self.assertEqual(
             doc["exclusions"],
@@ -341,6 +438,10 @@ class FingerprintTests(_DbCase):
         uri = fp._ro_uri(self.db)
         self.assertTrue(uri.startswith("file:"))
         self.assertIn("mode=ro", uri)
+        self.assertNotIn("immutable=1", uri)
+        immutable = fp._immutable_uri(self.db)
+        self.assertIn("mode=ro", immutable)
+        self.assertIn("immutable=1", immutable)
 
     def test_cli_stdout_or_out_and_usage_errors(self):
         code, out, err = _run(fp.main, [str(self.db)])
@@ -365,7 +466,7 @@ class FingerprintTests(_DbCase):
         code, _out, _err = _run(fp.main, [])
         self.assertEqual(code, 2)
 
-    def test_wal_reader_leaves_main_bytes_and_notes_empty_wal(self):
+    def test_wal_reader_leaves_main_bytes_and_creates_no_sidecar(self):
         path = self.root / "wal.sqlite"
         conn = sqlite3.connect(str(path))
         conn.execute("PRAGMA journal_mode=WAL")
@@ -373,30 +474,113 @@ class FingerprintTests(_DbCase):
         conn.execute("INSERT INTO bills (amount) VALUES (1)")
         conn.commit()
         conn.close()
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(path) + suffix)
-            if sidecar.exists():
-                sidecar.unlink()
+        _drop_sidecars(path)
+        self.assertEqual(_format_versions(path), (2, 2))
         before_bytes = _sha(path)
-        first = fp.fingerprint(path)
+        names_before = sorted(item.name for item in self.root.iterdir())
+        seen: list[str] = []
+        with _sqlite351_ro_guard(seen):
+            first = fp.fingerprint(path)
+            second = fp.fingerprint(path)
+        self.assertEqual(first["journal_mode"], "wal")
+        self.assertEqual(first["tables"]["bills"]["count"], 1)
         self.assertIsNone(first["stat_wal"])
+        self.assertIsNone(first["stat_shm"])
+        self.assertIsNone(second["stat_wal"])
+        self.assertIsNone(second["stat_shm"])
+        self.assertEqual(first["tables"], second["tables"])
         self.assertEqual(_sha(path), before_bytes)
-        self.assertTrue(Path(str(path) + "-wal").exists())
-        self.assertEqual(Path(str(path) + "-wal").stat().st_size, 0)
-        second = fp.fingerprint(path)
-        self.assertEqual(_sha(path), before_bytes)
-        self.assertEqual(second["stat_wal"]["size"], 0)
-        self.assertEqual(second["stat_wal"]["basename"], "wal.sqlite-wal")
+        self.assertFalse(Path(str(path) + "-wal").exists())
+        self.assertFalse(Path(str(path) + "-shm").exists())
+        self.assertEqual(sorted(item.name for item in self.root.iterdir()), names_before)
+        hits = [
+            item
+            for item in seen
+            if _path_from_uri(item) is not None
+            and _path_from_uri(item).resolve() == path.resolve()
+        ]
+        self.assertTrue(hits)
+        for item in hits:
+            self.assertIn("immutable=1", item)
+            self.assertIn("mode=ro", item)
+        self.assertFalse(
+            any(
+                "mode=ro" in item and "immutable=1" not in item and path.name in item
+                for item in seen
+            )
+        )
         code, out, err = _run(
             fpdiff.main,
             [self._dump("w1.json", first), self._dump("w2.json", second)],
         )
         self.assertEqual(err, "")
         self.assertEqual(code, 0)
-        self.assertIn("note wal_created_empty_by_ro_reader", out)
-        self.assertIn("note shm_changed", out)
+        self.assertNotIn("wal_created", out)
+        self.assertNotIn("shm_changed", out)
         self.assertIn("note main_sha256_identical", out)
         self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
+
+    def test_nonempty_wal_is_staged_and_wal_only_row_is_visible(self):
+        path = self.root / "wal.sqlite"
+        held = _open_uncheckpointed(path)
+        if held is not None:
+            self.addCleanup(held.close)
+        wal = Path(str(path) + "-wal")
+        self.assertGreater(wal.stat().st_size, 0)
+        before = _family_hashes(path)
+        names_before = sorted(item.name for item in path.parent.iterdir())
+        seen: list[str] = []
+        with _sqlite351_ro_guard(seen):
+            doc = fp.fingerprint(path)
+        self.assertEqual(doc["journal_mode"], "wal")
+        self.assertEqual(doc["tables"]["bills"]["count"], 2)
+        self.assertEqual(doc["stat_wal"]["basename"], "wal.sqlite-wal")
+        self.assertGreater(doc["stat_wal"]["size"], 0)
+        imm = sqlite3.connect(fp._immutable_uri(path), uri=True)
+        try:
+            visible = imm.execute("SELECT amount FROM bills").fetchall()
+        finally:
+            imm.close()
+        self.assertEqual(visible, [(1,)])
+        self.assertEqual(_family_hashes(path), before)
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), names_before)
+        self.assertFalse(
+            any(name.startswith(".att0-fp-") for name in os.listdir(path.parent))
+        )
+        self.assertFalse(
+            any(
+                _path_from_uri(item) is not None
+                and _path_from_uri(item).resolve() == path.resolve()
+                for item in seen
+            )
+        )
+        self.assertTrue(
+            any(
+                "mode=ro" in item and "immutable=1" not in item and "db.sqlite" in item
+                for item in seen
+            )
+        )
+        self.assertFalse(any("immutable=1" in item for item in seen))
+
+    def test_nonempty_wal_stage_failure_exits_2(self):
+        path = self.root / "wal.sqlite"
+        held = _open_uncheckpointed(path)
+        if held is not None:
+            self.addCleanup(held.close)
+        before = _family_hashes(path)
+        names_before = sorted(item.name for item in path.parent.iterdir())
+        with mock.patch("attachments.att0_fp.os.link", side_effect=OSError("injected")):
+            with self.assertRaises(fp.FpRefuse) as ctx:
+                fp.fingerprint(path)
+            code, out, err = _run(fp.main, [str(path)])
+        self.assertEqual(str(ctx.exception), "refuse: cannot stage source wal")
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("cannot stage source wal", err)
+        self.assertNotIn(DIR_TOKEN, err)
+        self.assertEqual(_family_hashes(path), before)
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), names_before)
 
     def test_fts5_virtual_tables_are_skipped_and_shadow_tables_are_hashed(self):
         path = self.root / "fts.sqlite"
@@ -597,6 +781,19 @@ class FpdiffTests(_DbCase):
         self.assertEqual(code, 1)
         self.assertIn("DIFF stat_wal_created_nonempty", out)
 
+    def test_new_empty_wal_is_a_note(self):
+        before = self._doc()
+        after = self._doc(
+            stat_wal={"basename": "sample.sqlite-wal", "size": 0, "mtime_ns": 3},
+            stat_shm={"basename": "sample.sqlite-shm", "size": 32768, "mtime_ns": 4},
+        )
+        code, out, err = self._pair(before, after)
+        self.assertEqual(err, "")
+        self.assertEqual(code, 0)
+        self.assertIn("note wal_created_empty_by_ro_reader", out)
+        self.assertIn("note shm_changed", out)
+        self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
+
     def test_malformed_fingerprint_is_exit_two(self):
         path = self.root / "bad.json"
         path.write_text("{", encoding="utf-8")
@@ -665,6 +862,8 @@ class BackupTests(_DbCase):
         self.assertEqual(err, "")
         self.assertIn("backup_ok", out)
         self.assertIn("quick_check=ok", out)
+        self.assertIn("journal_mode=delete", out)
+        self.assertEqual(_format_versions(dest), (1, 1))
         self.assertIn("src=sample.sqlite", out)
         self.assertIn("dest=copy.sqlite", out)
         self.assertNotIn(DIR_TOKEN, out)
@@ -707,11 +906,37 @@ class BackupTests(_DbCase):
         conn.execute("INSERT INTO bills (amount) VALUES (7)")
         conn.commit()
         conn.close()
-        before = _sha(src)
+        _drop_sidecars(src)
+        self.assertEqual(_format_versions(src), (2, 2))
+        before = _family_hashes(src)
+        names_before = sorted(item.name for item in src.parent.iterdir())
         dest = self.root / "wal-copy.sqlite"
-        line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+        seen: list[str] = []
+        with _sqlite351_ro_guard(seen):
+            line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
         self.assertIn("quick_check=ok", line)
-        self.assertEqual(_sha(src), before)
+        self.assertIn("journal_mode=delete", line)
+        self.assertEqual(_format_versions(dest), (1, 1))
+        self.assertEqual(_family_hashes(src), before)
+        self.assertFalse(Path(str(src) + "-wal").exists())
+        self.assertFalse(Path(str(src) + "-shm").exists())
+        self.assertFalse(Path(str(dest) + "-wal").exists())
+        self.assertFalse(Path(str(dest) + "-shm").exists())
+        names_after = sorted(item.name for item in src.parent.iterdir())
+        self.assertEqual(
+            [name for name in names_after if name != dest.name],
+            names_before,
+        )
+        hits = [
+            item
+            for item in seen
+            if _path_from_uri(item) is not None
+            and _path_from_uri(item).resolve() == src.resolve()
+        ]
+        self.assertTrue(hits)
+        for item in hits:
+            self.assertIn("immutable=1", item)
+            self.assertIn("mode=ro", item)
         check = sqlite3.connect(str(dest))
         try:
             self.assertEqual(
@@ -720,6 +945,71 @@ class BackupTests(_DbCase):
             self.assertEqual(check.execute("PRAGMA quick_check").fetchone()[0], "ok")
         finally:
             check.close()
+
+    def test_uncheckpointed_wal_source_keeps_wal_only_row(self):
+        src = self.root / "wal-src.sqlite"
+        held = _open_uncheckpointed(src)
+        if held is not None:
+            self.addCleanup(held.close)
+        before = _family_hashes(src)
+        names_before = sorted(item.name for item in src.parent.iterdir())
+        dest = self.root / "wal-copy.sqlite"
+        seen: list[str] = []
+        with _sqlite351_ro_guard(seen):
+            line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+        self.assertIn("quick_check=ok", line)
+        self.assertIn("journal_mode=delete", line)
+        self.assertEqual(_format_versions(dest), (1, 1))
+        self.assertEqual(_family_hashes(src), before)
+        self.assertEqual(
+            sorted(
+                item.name
+                for item in src.parent.iterdir()
+                if item.name != dest.name
+            ),
+            names_before,
+        )
+        self.assertFalse(
+            any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
+        )
+        self.assertFalse(
+            any(
+                _path_from_uri(item) is not None
+                and _path_from_uri(item).resolve() == src.resolve()
+                for item in seen
+            )
+        )
+        self.assertTrue(
+            any(
+                "mode=ro" in item and "immutable=1" not in item and "db.sqlite" in item
+                for item in seen
+            )
+        )
+        check = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = check.execute("SELECT amount FROM bills ORDER BY id").fetchall()
+            self.assertEqual(check.execute("PRAGMA quick_check").fetchone()[0], "ok")
+        finally:
+            check.close()
+        self.assertEqual(rows, [(1,), (2,)])
+
+    def test_wal_stage_failure_exits_2_and_leaves_no_dest(self):
+        src = self.root / "wal-src.sqlite"
+        held = _open_uncheckpointed(src)
+        if held is not None:
+            self.addCleanup(held.close)
+        before = _family_hashes(src)
+        dest = self.root / "wal-copy.sqlite"
+        with mock.patch("attachments.att0_fp.os.link", side_effect=OSError("injected")):
+            with self.assertRaises(backup.BackupRefuse) as ctx:
+                backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("cannot stage source wal", str(ctx.exception))
+        self.assertFalse(dest.exists())
+        self.assertEqual(_family_hashes(src), before)
+        self.assertFalse(
+            any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
+        )
 
     def test_refuses_existing_dest_mailroom_name_same_file_and_missing_src(self):
         dest = self.root / "copy.sqlite"
@@ -820,6 +1110,11 @@ class BackupTests(_DbCase):
         self.assertIn("with_writer_lock.py", text)
         self.assertIn("refuse_if_sor_writer_conflict", text)
         self.assertIn("Reading the system of record is allowed", text)
+        self.assertIn("journal_mode=DELETE", text)
+        self.assertIn("sqlite_pragmas.py", text)
+        fp_text = Path(fp.__file__).read_text(encoding="utf-8")
+        self.assertIn("immutable=1", fp_text)
+        self.assertIn("Does not create a ``-wal`` or a ``-shm``", fp_text)
         help_text = backup.build_parser().format_help()
         self.assertIn("with_writer_lock.py", help_text)
 
@@ -851,6 +1146,10 @@ class HelperContractTests(unittest.TestCase):
             "/path/to/db.sqlite",
             "shasum -a 256",
             "mode=ro",
+            "immutable=1",
+            "journal_mode=DELETE",
+            "sqlite_pragmas.py",
+            "cannot stage source wal",
             "quick_check",
             "skipped_virtual_tables",
             "pipefail",
