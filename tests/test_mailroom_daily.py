@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import io
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -1118,59 +1119,89 @@ if log:
 sys.stdout.write("DECOY_SHOULD_NOT_RUN\n")
 sys.exit(0)
 """
-# Absolute /usr/bin/security cannot be redirected with PATH. Mount a stub
-# onto that path. Prefer an unprivileged user+mount namespace; some hosts
-# block those and allow only a root mount namespace.
-_OVERLAY_AND_EXEC = r"""
-set -eu
-upper=$(mktemp -d)
-work=$(mktemp -d)
-mount -t overlay overlay -o lowerdir=/usr/bin,upperdir="$upper",workdir="$work" /usr/bin
-cp "$1" /usr/bin/security
-chmod 755 /usr/bin/security
-exec /bin/zsh "$2"
-"""
-_PINNED_SECURITY_PREFIX = None
+# The real wrapper pins this exact line. Tests copy the script and rewrite
+# only that assignment so the copy execs a stub.
+_PINNED_SECURITY_LINE = 'SECURITY_BIN="/usr/bin/security"'
 
 
-def _pinned_security_prefix() -> list[str]:
-    global _PINNED_SECURITY_PREFIX
-    if _PINNED_SECURITY_PREFIX is not None:
-        return list(_PINNED_SECURITY_PREFIX)
-    probe = subprocess.run(
-        ["unshare", "--user", "--map-root-user", "--mount", "true"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if probe.returncode == 0:
-        _PINNED_SECURITY_PREFIX = [
-            "unshare",
-            "--user",
-            "--map-root-user",
-            "--mount",
-        ]
-    else:
-        sudo = subprocess.run(
-            ["sudo", "-n", "true"],
-            capture_output=True,
-            text=True,
-            check=False,
+def _line_body_and_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    if line.endswith("\r"):
+        return line[:-1], "\r"
+    return line, ""
+
+
+def _rewrite_one_security_bin_line(source: str, stub: Path) -> str:
+    stub_path = str(stub)
+    if any(ch in stub_path for ch in ("\n", "\r", '"', "'", "\\", "$", "`", " ")):
+        raise AssertionError(
+            "stub path cannot be spliced into the wrapper: %s" % stub_path
         )
-        if sudo.returncode != 0:
-            detail = (probe.stderr or "").strip() or "exit %s" % probe.returncode
-            raise RuntimeError(
-                "cannot stub /usr/bin/security (%s) and sudo -n is unavailable"
-                % detail
-            )
-        _PINNED_SECURITY_PREFIX = [
-            "sudo",
-            "-n",
-            "--preserve-env",
-            "unshare",
-            "--mount",
-        ]
-    return list(_PINNED_SECURITY_PREFIX)
+    replacement = 'SECURITY_BIN="%s"' % stub_path
+    if replacement == _PINNED_SECURITY_LINE:
+        raise AssertionError("stub path must differ from /usr/bin/security")
+    matched = 0
+    out_lines = []
+    for line in source.splitlines(keepends=True):
+        body, ending = _line_body_and_ending(line)
+        if body == _PINNED_SECURITY_LINE:
+            matched += 1
+            out_lines.append(replacement + ending)
+        else:
+            out_lines.append(line)
+    if matched != 1:
+        raise AssertionError(
+            "expected exactly one line %r in scripts/run_mailroom_daily.sh; found %d"
+            % (_PINNED_SECURITY_LINE, matched)
+        )
+    rewritten = "".join(out_lines)
+    old_lines = source.splitlines()
+    new_lines = rewritten.splitlines()
+    if len(old_lines) != len(new_lines):
+        raise AssertionError(
+            "security stub rewrite changed the wrapper line count (%d -> %d)"
+            % (len(old_lines), len(new_lines))
+        )
+    pinned_at = old_lines.index(_PINNED_SECURITY_LINE)
+    changed = [
+        i + 1
+        for i, (old, new) in enumerate(zip(old_lines, new_lines))
+        if old != new
+    ]
+    if changed != [pinned_at + 1]:
+        raise AssertionError(
+            "security stub rewrite changed lines %s" % (changed,)
+        )
+    if new_lines[pinned_at] != replacement:
+        raise AssertionError(
+            "security stub rewrite did not point SECURITY_BIN at the stub"
+        )
+    return rewritten
+
+
+def _install_wrapper_copy(dest: Path, stub: Path) -> None:
+    source_path = SCRIPTS / "run_mailroom_daily.sh"
+    shutil.copyfile(source_path, dest)
+    original = source_path.read_text(encoding="utf-8")
+    if dest.read_text(encoding="utf-8") != original:
+        raise AssertionError(
+            "wrapper copy does not match scripts/run_mailroom_daily.sh"
+        )
+    dest.write_text(
+        _rewrite_one_security_bin_line(original, stub), encoding="utf-8"
+    )
+    dest.chmod(dest.stat().st_mode | stat.S_IEXEC)
+
+
+def _daily_wrapper_command(script: Path) -> list[str]:
+    """Interpreter for the wrapper copy: zsh, or bash when zsh is absent."""
+    for shell in ("/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"):
+        if os.access(shell, os.X_OK):
+            return [shell, str(script)]
+    raise AssertionError("zsh or bash is required to run the daily wrapper copy")
 
 
 DAILY_STUB = r"""
@@ -1193,6 +1224,32 @@ def _sha256(value: str) -> str:
 class KeychainFallbackTests(unittest.TestCase):
     """Exercise wrapper Keychain read + legacy fallback. No live Keychain."""
 
+    def _assert_real_wrapper_pins_security_bin(self) -> None:
+        wrapper_path = SCRIPTS / "run_mailroom_daily.sh"
+        wrapper = wrapper_path.read_text(encoding="utf-8")
+        exact = [
+            line for line in wrapper.splitlines() if line == _PINNED_SECURITY_LINE
+        ]
+        hits = []
+        for path in sorted(SCRIPTS.rglob("*")):
+            if path.is_file() and b"MAILROOM_SECURITY_BIN" in path.read_bytes():
+                hits.append(path.relative_to(ROOT).as_posix())
+        problems = []
+        if exact != [_PINNED_SECURITY_LINE]:
+            problems.append(
+                "expected exactly one line %r in %s; found %d"
+                % (
+                    _PINNED_SECURITY_LINE,
+                    wrapper_path.relative_to(ROOT).as_posix(),
+                    len(exact),
+                )
+            )
+        if hits:
+            problems.append(
+                "MAILROOM_SECURITY_BIN appears in scripts/: %s" % ", ".join(hits)
+            )
+        self.assertEqual(problems, [])
+
     def _run(
         self,
         tmp: Path,
@@ -1209,6 +1266,8 @@ class KeychainFallbackTests(unittest.TestCase):
         security = tmp / "fake-security"
         security.write_text(FAKE_SECURITY, encoding="utf-8")
         security.chmod(security.stat().st_mode | stat.S_IEXEC)
+        wrapper = tmp / "run_mailroom_daily.sh"
+        _install_wrapper_copy(wrapper, security)
         log = tmp / "security.log"
         packed = "|".join("%s=%s" % (k, v) for k, v in (items or {}).items())
         env = {
@@ -1231,21 +1290,14 @@ class KeychainFallbackTests(unittest.TestCase):
         if extra_env:
             env.update(extra_env)
         proc = subprocess.run(
-            _pinned_security_prefix()
-            + [
-                "bash",
-                "-c",
-                _OVERLAY_AND_EXEC,
-                "bash",
-                str(security),
-                str(SCRIPTS / "run_mailroom_daily.sh"),
-            ],
+            _daily_wrapper_command(wrapper),
             cwd=str(archive),
             env=env,
             capture_output=True,
             text=True,
             check=False,
         )
+        proc.security_bin = str(security)
         proc.security_log = log.read_text(encoding="utf-8") if log.exists() else ""
         argv_log = env.get("MAILROOM_FAKE_SECURITY_ARGV_LOG", "")
         proc.argv_log = ""
@@ -1414,11 +1466,14 @@ class KeychainFallbackTests(unittest.TestCase):
         self._assert_no_secret_leak(proc)
 
     def test_security_bin_env_does_not_change_binary(self):
-        """MAILROOM_SECURITY_BIN must not replace /usr/bin/security.
+        """Pinned SECURITY_BIN ignores MAILROOM_SECURITY_BIN.
 
-        Primary item is tried first, then the legacy item. The decoy at
-        /tmp/fake is executable so an honored override would run it.
+        The real wrapper line is SECURITY_BIN="/usr/bin/security".
+        This run executes a copy whose SECURITY_BIN line points at the stub.
+        The decoy at /tmp/fake is executable; an honored override would
+        run it. Primary item, then the legacy item.
         """
+        self._assert_real_wrapper_pins_security_bin()
         decoy = Path("/tmp/fake")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1443,8 +1498,9 @@ class KeychainFallbackTests(unittest.TestCase):
         self.assertEqual(
             proc.argv_log.splitlines(),
             [
-                "/usr/bin/security find-generic-password -s %s -w" % NEW_KEYCHAIN,
-                "/usr/bin/security find-generic-password -s %s -w" % LEGACY_KEYCHAIN,
+                "%s find-generic-password -s %s -w" % (proc.security_bin, NEW_KEYCHAIN),
+                "%s find-generic-password -s %s -w"
+                % (proc.security_bin, LEGACY_KEYCHAIN),
             ],
         )
         self.assertEqual(
@@ -1453,12 +1509,11 @@ class KeychainFallbackTests(unittest.TestCase):
         )
         self.assertEqual(decoy_text, "")
         self.assertNotIn("DECOY_SHOULD_NOT_RUN", proc.stdout)
+        self.assertNotIn("/tmp/fake", proc.argv_log)
         self.assertIn("password_loaded=1", proc.stdout)
         self.assertIn("password_sha256=%s" % _sha256(OLD_PW), proc.stdout)
         self.assertIn("falling back", proc.stderr)
-        source = (SCRIPTS / "run_mailroom_daily.sh").read_text(encoding="utf-8")
-        self.assertNotIn("MAILROOM_SECURITY_BIN", source)
-        self.assertIn('SECURITY_BIN="/usr/bin/security"', source)
+        self._assert_real_wrapper_pins_security_bin()
         self._assert_no_secret_leak(proc)
 
 
