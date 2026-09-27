@@ -24,7 +24,7 @@ Daily children get `--db` and `$MAILROOM_DB` and honor them through
 path, not an unnamed empty SoR stub. One writer, no SMB/NFS dual-write.
 
 Install, Keychain **name** (`mailroom.imap.app-password`), launchd Keychain
-proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
+proof (`$HOME` only), and phase watermarks. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve stays on a copy DB until PR-5; PR-5 cutover / RunAtLoad stays gated:
 **[scripts/README.mailroom-daily.md](scripts/README.mailroom-daily.md)**.
 Human Terminal cards, Terminal AR format (one machine, loud MBP or Mini
 banner, one command per copy button, title equals body; no stacked
@@ -66,7 +66,7 @@ Continuous keepgoing (after Done on an authorized chain, immediately issue the n
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check),
 IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge),
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy),
-rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run classic MBP SoR 8pm while rem-legacy is alive),
+rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run the MBP 8pm chain while rem-legacy is alive. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).),
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the allowlisted DB; SoR basename allowed only when explicitly named and rem-legacy is absent; refuse SoR stub when rem-legacy or the writer lock is held; unset / unknown refuse),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),

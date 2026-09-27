@@ -60,8 +60,7 @@ WIRED_NEEDLES = (
 DOC_PATHS = (MAILROOM, OPS, EMBED)
 
 # The numbered refuse list in MAILROOM.md, ops-terminal.md, and
-# embed-backfill.md still cites the previous MBP 8pm label. The prose
-# "classic MBP SoR 8pm" chain remains only in ops-terminal.md.
+# embed-backfill.md still cites the previous MBP 8pm label.
 HISTORICAL_DOC_REFUSE = {
     (
         "MBP 8pm (`imap_newmail`+`classify`+`notify_bills`); "
@@ -350,15 +349,12 @@ class LookAheadDocTests(unittest.TestCase):
             text = " ".join(raw.split())
             self.assertIn(gate.LOOKAHEAD_NEEDLE, text, msg=path.name)
             self.assertIn("look-ahead calendar jobs", text.lower(), msg=path.name)
-            if path == OPS:
-                self.assertIn("classic mbp sor 8pm", text.lower(), msg=path.name)
-            else:
-                self.assertNotIn("classic mbp sor 8pm", text.lower(), msg=path.name)
-                self.assertIn(
-                    "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
-                    raw,
-                    msg=path.name,
-                )
+            self.assertNotIn("classic mbp sor 8pm", text.lower(), msg=path.name)
+            self.assertIn(
+                "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+                raw,
+                msg=path.name,
+            )
             self.assertIn("same-sqlite dual-writer hard deck", text.lower(), msg=path.name)
             self.assertIn("MAILROOM_DB=copy", raw, msg=path.name)
             self.assertIn("CONFLICT", raw, msg=path.name)
@@ -382,7 +378,15 @@ class LookAheadDocTests(unittest.TestCase):
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)
         readme = " ".join(README.read_text(encoding="utf-8").split())
-        self.assertIn("classic MBP SoR 8pm", readme)
+        self.assertNotIn("classic MBP SoR 8pm", readme)
+        self.assertIn(
+            "do not run the MBP 8pm chain while rem-legacy is alive",
+            readme,
+        )
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            readme,
+        )
         daily = " ".join(DAILY.read_text(encoding="utf-8").split())
         self.assertIn(
             "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",

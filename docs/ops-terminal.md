@@ -193,7 +193,7 @@ Since the 2026-09-24 SoR flip.
 
 No MBP writers against SoR.
 
-- The MBP is a non-writer. The MBP SoR is a rollback/read target. No MBP daily runs against it, and nothing on the MBP writes the SoR.
+- The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). No MBP daily runs against it, and nothing on the MBP writes the SoR.
 - Copy DBs remain `mailroom-copy.sqlite` and `mailroom-daily-copy.sqlite`.
 - One writer holds the writer lock (flock). Do not start a second writer against SoR. Do not start a Mini writer against SoR while rem-legacy is live. Do not promote Mini (or any other writer) while rem-legacy is live; promotion stays gated on rem-legacy EXIT 0.
 
@@ -436,8 +436,8 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 Standing rem-aware writer contract: same-sqlite dual-writer HARD DECK
 (never two-wide writers on one `.sqlite`). While rem-legacy is the
 sole writer on live basename `mailroom.sqlite`, classic SoR writers
-CONFLICT. Look-ahead calendar jobs: do not run the classic MBP SoR
-8pm chain while rem-legacy is alive; use Mini/copy until rem EXIT 0.
+CONFLICT. Look-ahead calendar jobs: do not run the MBP 8pm chain while rem-legacy is
+alive; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 Wording: if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
 
@@ -475,7 +475,7 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 
 Standing rem-gated copy contract: Mini copy only when rem-legacy is
 not writing, or after rem-legacy **EXIT 0**. No SMB/NFS dual-write.
-No live MBP→Mini copy from this gate.
+No live copy from MBP to Mini from this gate.
 
 Fail closed: if rem-legacy is still writing, do not live-copy
 MBP→Mini. Use `mailroom-daily-copy.sqlite` when rem still holds

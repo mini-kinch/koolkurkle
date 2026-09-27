@@ -49,8 +49,12 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         self.assertIn("Since the 2026-09-24 SoR flip", section)
         self.assertIn("**Mini** is the SoR writer under the daily only", section)
         self.assertIn("`mailroom.sqlite`", section)
-        self.assertIn("The MBP is a non-writer", section)
-        self.assertIn("rollback/read", section)
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            section,
+        )
+        self.assertNotIn("The MBP SoR is a rollback/read target", section)
+        self.assertNotIn("rollback/read", section)
         self.assertIn("No MBP writers against SoR", section)
         self.assertIn("mailroom-copy.sqlite", section)
         self.assertIn("mailroom-daily-copy.sqlite", section)
@@ -154,8 +158,11 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         section = sor_section(raw)
         self.assertIn("No MBP writers against SoR", section)
         self.assertIn("SoR writer under the daily only", section)
-        self.assertIn("The MBP is a non-writer", section)
-        self.assertIn("rollback/read", section)
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            section,
+        )
+        self.assertNotIn("rollback/read", section)
         self.assertIn(
             "An unset or unknown basename is a hard refuse (`db_mode=refused`).",
             section,

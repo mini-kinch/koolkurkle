@@ -123,8 +123,7 @@ Fixture: `tests/fixtures/rerank_interface_proof.json`.
 | Unreachable | `fail_open` | `lm_studio_unreachable` |
 | Env unset, no `--llm` | `hits_only` | (none — not an error) |
 
-Unit tests cover the labeled fallbacks with mocks. Live MBP matrix is
-the operator gate.
+Unit tests cover the labeled fallbacks with mocks. The MBP live matrix is the operator gate.
 
 ## Negative smoke (rerank)
 

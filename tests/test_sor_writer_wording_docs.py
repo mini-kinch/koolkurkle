@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Doc contract: Mini daily job is the sole SoR writer.
 
-Locks the role wording in beginner-guide, rerank, and ask_mail.
+Locks the role wording in beginner-guide, rerank, ask_mail,
+ops-terminal, the README index, and model-runtime-gates.
 Docs only. No Keychain, no network, no live sqlite.
 """
 
@@ -14,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 GUIDE = ROOT / "docs" / "beginner-guide.md"
 RERANK = ROOT / "docs" / "rerank.md"
 ASK = ROOT / "docs" / "ask_mail.md"
+OPS = ROOT / "docs" / "ops-terminal.md"
+README = ROOT / "README.md"
+GATES = ROOT / "docs" / "model-runtime-gates.md"
 
 CANONICAL = (
     "The Mini daily job is the sole SoR writer; "
@@ -151,6 +155,45 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         hay = text.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)
+
+    def test_followup_spots_drop_stale_sor_writer_wording(self):
+        ops = OPS.read_text(encoding="utf-8")
+        readme = README.read_text(encoding="utf-8")
+        gates = GATES.read_text(encoding="utf-8")
+        self.assertIn(
+            "- %s No MBP daily runs against it, and nothing on the MBP writes the SoR."
+            % (CANONICAL,),
+            ops,
+        )
+        self.assertNotIn("The MBP SoR is a rollback/read target", ops)
+        self.assertNotIn("rollback/read", ops)
+        self.assertIn(
+            "do not run the MBP 8pm chain while rem-legacy is\n"
+            "alive; use Mini/copy until rem EXIT 0. " + CANONICAL,
+            ops,
+        )
+        self.assertNotIn("classic MBP SoR", ops)
+        self.assertIn("No live copy from MBP to Mini from this gate.", ops)
+        self.assertNotIn("No live MBP→Mini copy", ops)
+        self.assertIn(
+            "proof (`$HOME` only), and phase watermarks. %s "
+            "Mini retrieve stays on a copy DB until PR-5; "
+            "PR-5 cutover / RunAtLoad stays gated:" % (CANONICAL,),
+            readme,
+        )
+        self.assertNotIn("Mini copy-only notes", readme)
+        self.assertIn(
+            "do not run the MBP 8pm chain while rem-legacy is alive. " + CANONICAL,
+            readme,
+        )
+        self.assertNotIn("classic MBP SoR 8pm", readme)
+        self.assertIn("The MBP live matrix is the operator gate.", gates)
+        self.assertNotIn("Live MBP", gates)
+        for text in (ops, readme, gates):
+            hay = text.replace("/Users/<operator>/", "")
+            for needle in PRIVACY_NEEDLES:
+                self.assertNotIn(needle, hay)
+            self.assertNotIn("cutover is done", text.lower())
 
 
 if __name__ == "__main__":
