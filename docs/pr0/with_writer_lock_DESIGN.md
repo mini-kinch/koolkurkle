@@ -76,6 +76,17 @@ The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB
 
 `SOR_FORCE_LIVE_CHECKS=1` turns the live checks on for a path that is not the live SoR. No value turns those checks off on the live path. Do not set the variable in a LaunchAgent.
 
+## Caller-side basename guards (inventory)
+
+These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each compares `Path.name` to `SOR_BASENAME`. They do not call `is_live_sor`. This table records them. It does not change them. Alias directions have no test. See `docs/heavy/20260927-2159-caller-side-sor-basename-guards.md`.
+
+| Guard | Exact code | Test |
+|---|---|---|
+| `scripts/attachments/migrate_att0_schema.py:364` in `migrate_database` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_refuses_mailroom_sqlite_without_flag_and_does_not_open_it`. Alias directions: no test |
+| `scripts/attachments/migrate_att0_schema.py:434` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_cli_refuse_and_copy_success`. Alias directions: no test |
+| `scripts/attachments/meta_fill.py:931` in `fill_metadata` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `FillTests.test_refuses_mailroom_sqlite_without_creating_it`. Alias directions: no test |
+| `scripts/attachments/meta_fill.py:1284` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `CliTests.test_negative_smoke_and_mailroom_refuse`. Alias directions: no test |
+
 ## Same-file embed_backfill (HARD DECK)
 
 `--lock` on `embed_backfill.py` is **per batch / heartbeat**, not the
