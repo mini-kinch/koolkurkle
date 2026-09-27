@@ -145,7 +145,12 @@ def parse_lock_payload(raw: str) -> LockInfo:
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
-        fields[key.strip()] = value.strip()
+        key = key.strip()
+        # Purpose is exact. Do not trim it into another allowlist entry.
+        if key == "purpose":
+            fields[key] = value
+        else:
+            fields[key] = value.strip()
     pid_raw = fields.get("pid", "")
     try:
         pid = int(pid_raw) if pid_raw else None
@@ -236,13 +241,18 @@ def release_writer_lock(held: HeldLock) -> None:
         held.fd.close()
 
 
+def _drop_failed(detail: object) -> WriterLockError:
+    return WriterLockError(
+        "search resume +26 drop failed; child not started: %s" % detail
+    )
+
+
 def _drop_search_resume_plus_26() -> None:
     # Caller input: MAILROOM_SEARCH_RESUME_RUN_ID only.
-    # Callers: A2 step 4 and AR-R step 5. Set it to the deadline
-    # file's run_id. Never read the deadline file when this is unset,
-    # and never drop on a bare acquire. A rehearsal acquire passes
-    # no run-id and must not drop. A match drops +26. A mismatch
-    # warns and does not drop and does not block the child.
+    # Absent: do not read the deadline file, do not drop, run the child.
+    # Present and equal to the file run_id: drop +26, then re-read status.
+    # d26_live=yes after that drop stops the child. A mismatch, or a
+    # missing or unreadable file, stops the child. Never invent a run-id.
     run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
     if not run_id:
         return
@@ -250,20 +260,21 @@ def _drop_search_resume_plus_26() -> None:
         import search_resume_watchdog
     except Exception as exc:
         # Import failure must be caught before any use of the module
-        # name. Otherwise `except search_resume_watchdog.DeadlineMismatch`
-        # raises UnboundLocalError and main() prints a traceback (rc 1).
-        raise WriterLockError(
-            "search resume +26 drop failed; child not started: %s" % exc
-        ) from exc
+        # name. Otherwise a later attribute lookup raises UnboundLocalError
+        # and main() prints a traceback (rc 1).
+        raise _drop_failed(exc) from exc
     try:
         search_resume_watchdog.drop_early_deadline(run_id)
-    except search_resume_watchdog.DeadlineMismatch as exc:
-        sys.stderr.write("search resume +26 not dropped: %s\n" % exc)
-        return
     except Exception as exc:
-        raise WriterLockError(
-            "search resume +26 drop failed; child not started: %s" % exc
-        ) from exc
+        raise _drop_failed(exc) from exc
+    status, parsed = search_resume_watchdog.load_deadline(
+        search_resume_watchdog.deadline_path()
+    )
+    if status != "ok" or parsed is None:
+        raise _drop_failed("deadline status %s" % status)
+    lines = search_resume_watchdog.format_status(parsed).splitlines()
+    if "d26_live=yes" in lines:
+        raise _drop_failed("d26_live=yes")
 
 
 def run_with_lock(

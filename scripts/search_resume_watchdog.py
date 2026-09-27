@@ -27,8 +27,10 @@ cannot be started by kickstart alone. The restore is:
 Not loaded means print exits 113, or its output contains
 "Could not find service". Any other print result is logged and that
 tick is skipped. Exit 0 means the job is loaded. Kickstart is issued
-without -k, and only after bootstrap returns 0. There is at most one
-bootstrap attempt per tick. The domain is gui/$UID.
+without -k, and only after bootstrap returns 0. If kickstart fails,
+one follow-up print: loaded is a success no-op, otherwise the loud
+failure. There is at most one bootstrap attempt per tick. No enable.
+No print-disabled. The domain is gui/$UID.
 
 The writer lock is observed read-only with lsof and signal 0. This
 process does not take the lock (no exclusive probe, including a
@@ -48,8 +50,10 @@ Defaults (override with the env vars):
 The wrapper drops +26 only when the caller sets
 MAILROOM_SEARCH_RESUME_RUN_ID to the run_id in the deadline file.
 That is the only extra input. Unset means do not drop and the
-deadline file is not read for a drop. A mismatch warns and does
-not drop and does not block the child.
+deadline file is not read for a drop. A match drops +26, then
+re-reads status. If d26_live is still yes, the child does not run.
+A mismatch, or a missing or unreadable file, stops the child.
+The wrapper does not invent a run-id.
 
 Commands:
   search_resume_watchdog.py watch
@@ -537,7 +541,8 @@ def watch_once(runner: Optional[Runner] = None, now: Optional[int] = None) -> in
         _log(destination, LOUD % (pid_text, purpose_text), loud=True)
         return 0
     plist = str(installed_plist_path())
-    # At most one bootstrap per tick. Never -k. Never a second attempt.
+    # At most one bootstrap per tick. Never -k. Never enable.
+    # Never print-disabled. Never a second attempt.
     boot_rc, _boot_out, _boot_err = run(
         ["launchctl", "bootstrap", _gui_domain(uid), plist]
     )
@@ -551,16 +556,13 @@ def watch_once(runner: Optional[Runner] = None, now: Optional[int] = None) -> in
             return 0
         _log(destination, "search restore failed bootstrap rc=%s" % boot_rc)
         return 0
-    kick_rc, kick_out, kick_err = run(["launchctl", "kickstart", target])
+    kick_rc, _kick_out, _kick_err = run(["launchctl", "kickstart", target])
     if kick_rc != 0:
-        if _not_loaded_signal(kick_rc, kick_out, kick_err):
-            # RunAtLoad may already have started it. Do not bootstrap again.
-            follow_rc, _follow_out, _follow_err = run(
-                ["launchctl", "print", target]
-            )
-            if follow_rc == 0:
-                _log(destination, ALREADY_LOADED)
-                return 0
+        # Not-found or any other failure: one follow-up print. No -k.
+        follow_rc, _follow_out, _follow_err = run(["launchctl", "print", target])
+        if follow_rc == 0:
+            _log(destination, ALREADY_LOADED)
+            return 0
         _log(destination, "search restore failed kickstart rc=%s" % kick_rc)
         return 0
     _log(destination, "search restored")

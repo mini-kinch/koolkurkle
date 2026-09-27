@@ -892,6 +892,77 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             self.log.read_text(encoding="utf-8"),
         )
 
+    def test_kickstart_other_failure_then_loaded_is_noop(self) -> None:
+        pid = self._dead_pid()
+        runner = self._scripted(
+            {
+                "print": [(113, "", ""), (0, "state = running", "")],
+                "lsof": (1, "", ""),
+                "bootstrap": (0, "", ""),
+                "kickstart": (1, "", "not a not-found signal"),
+            }
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc = self._call_watch(
+                runner,
+                self._past(),
+                "pid=%s\npurpose=migrate-copy\n" % pid,
+            )
+        self.assertEqual(rc, 0)
+        kicks = [argv for argv in runner.calls if argv[1] == "kickstart"]
+        prints = [argv for argv in runner.calls if argv[1] == "print"]
+        self.assertEqual(kicks, [["launchctl", "kickstart", self._service()]])
+        self.assertEqual(len(prints), 2)
+        self.assertEqual(
+            len([argv for argv in runner.calls if argv[1] == "bootstrap"]),
+            1,
+        )
+        for argv in runner.calls:
+            self.assertNotIn("-k", argv)
+            self.assertNotIn("enable", argv)
+            self.assertNotIn("print-disabled", argv)
+        log_text = self.log.read_text(encoding="utf-8")
+        self.assertIn("search already loaded", log_text)
+        self.assertNotIn("failed", log_text)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_kickstart_other_failure_still_unloaded_is_loud_once(self) -> None:
+        pid = self._dead_pid()
+        runner = self._scripted(
+            {
+                "print": [(113, "", ""), (113, "", "")],
+                "lsof": (1, "", ""),
+                "bootstrap": (0, "", ""),
+                "kickstart": (2, "", "nope"),
+            }
+        )
+        rc = self._call_watch(
+            runner,
+            self._past(),
+            "pid=%s\npurpose=migrate-copy\n" % pid,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            len([argv for argv in runner.calls if argv[1] == "print"]),
+            2,
+        )
+        self.assertEqual(
+            len([argv for argv in runner.calls if argv[1] == "bootstrap"]),
+            1,
+        )
+        self.assertEqual(
+            len([argv for argv in runner.calls if argv[1] == "kickstart"]),
+            1,
+        )
+        for argv in runner.calls:
+            self.assertNotIn("-k", argv)
+            self.assertNotIn("enable", argv)
+            self.assertNotIn("print-disabled", argv)
+        log_text = self.log.read_text(encoding="utf-8")
+        self.assertIn("search restore failed kickstart rc=2", log_text)
+        self.assertNotIn("search already loaded", log_text)
+
     def test_live_recorded_pid_is_held(self) -> None:
         proc = self._run(
             ["watch"],
@@ -1190,7 +1261,7 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
 
     def test_explicit_run_id_only_rehearsal_mismatch_and_match(self) -> None:
-        """Bare acquire and a mismatch leave d26 live. A match drops it."""
+        """Bare acquire leaves d26 live. A mismatch stops. A match drops."""
         import with_writer_lock as wwl
 
         body = "run_id=att0-L1-EXAMPLE\ndeadline_26=%d\ndeadline_50=%d\n" % (
@@ -1235,7 +1306,6 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             ],
         )
 
-        warn = io.StringIO()
         with mock.patch.dict(
             os.environ,
             {
@@ -1244,21 +1314,20 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with mock.patch.object(wwl.sys, "stderr", warn):
-                miss = wwl.run_with_lock(
+            with self.assertRaises(wwl.WriterLockError) as miss:
+                wwl.run_with_lock(
                     "att0-migrate",
                     child(mismatched, "ran"),
                     lock_path=self.lock,
                     action_required_path=self.home / "ACTION_REQUIRED",
                 )
-        self.assertEqual(miss, 0)
-        self.assertEqual(mismatched.read_text(encoding="utf-8"), "ran")
+        self.assertIn("child not started", str(miss.exception))
+        self.assertIn("run-id mismatch", str(miss.exception))
+        self.assertNotIn(SECRET, str(miss.exception))
+        self.assertFalse(mismatched.exists())
         self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
-        self.assertEqual(
-            warn.getvalue(),
-            "search resume +26 not dropped: run-id mismatch\n",
-        )
-        self.assertNotIn(SECRET, warn.getvalue())
+        held = wwl.acquire_writer_lock(self.lock, "after-mismatch")
+        wwl.release_writer_lock(held)
         miss_status = self._run(["status"], deadline=body)
         self.assertIn("d26_live=yes\n", miss_status.stdout)
 
@@ -1496,6 +1565,135 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         held = wwl.acquire_writer_lock(self.lock, "later")
         wwl.release_writer_lock(held)
 
+    def _marker_cmd(self, marker: Path) -> list:
+        return [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path(%r).write_text('ran')" % str(marker),
+        ]
+
+    def _run_lock_main(self, marker: Path, run_id: str | None):
+        import with_writer_lock as wwl
+
+        env = {}
+        env["SEARCH_RESUME_DEADLINE_FILE"] = str(self.deadline)
+        if run_id is not None:
+            env["MAILROOM_SEARCH_RESUME_RUN_ID"] = run_id
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False):
+            if run_id is None:
+                os.environ.pop("MAILROOM_SEARCH_RESUME_RUN_ID", None)
+            with mock.patch.object(wwl.sys, "stderr", stderr):
+                rc = wwl.main(
+                    [
+                        "--purpose",
+                        "cli-probe",
+                        "--lock-file",
+                        str(self.lock),
+                        "--action-required-file",
+                        str(self.home / "ACTION_REQUIRED"),
+                        "--",
+                        *self._marker_cmd(marker),
+                    ]
+                )
+        return wwl, rc, stderr.getvalue()
+
+    def _assert_lock_free(self, wwl) -> None:
+        held = wwl.acquire_writer_lock(self.lock, "later")
+        wwl.release_writer_lock(held)
+
+    def test_run_id_absent_runs_child_without_drop(self) -> None:
+        body = "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n" % (
+            self.now + 26 * 60,
+            self.now + 50 * 60,
+        )
+        self.deadline.parent.mkdir(parents=True, exist_ok=True)
+        self.deadline.write_text(body, encoding="utf-8")
+        marker = self.home / "absent-ran"
+        wwl, rc, err = self._run_lock_main(marker, None)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "ran")
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
+        self._assert_lock_free(wwl)
+
+    def test_run_id_match_drops_then_runs_child(self) -> None:
+        body = "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n" % (
+            self.now + 26 * 60,
+            self.now + 50 * 60,
+        )
+        self.deadline.parent.mkdir(parents=True, exist_ok=True)
+        self.deadline.write_text(body, encoding="utf-8")
+        marker = self.home / "match-ran"
+        wwl, rc, err = self._run_lock_main(marker, "run1")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "ran")
+        text = self.deadline.read_text(encoding="utf-8")
+        self.assertNotIn("deadline_26", text)
+        status = self._run(["status"], deadline=text)
+        self.assertIn("d26_live=no\n", status.stdout)
+        self._assert_lock_free(wwl)
+
+    def test_run_id_match_still_live_stops_child(self) -> None:
+        body = "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n" % (
+            self.now + 26 * 60,
+            self.now + 50 * 60,
+        )
+        self.deadline.parent.mkdir(parents=True, exist_ok=True)
+        self.deadline.write_text(body, encoding="utf-8")
+        marker = self.home / "still-live"
+
+        def noop_drop(run_id, path=None):
+            return None
+
+        with mock.patch("search_resume_watchdog.drop_early_deadline", noop_drop):
+            wwl, rc, err = self._run_lock_main(marker, "run1")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            err,
+            "error: search resume +26 drop failed; child not started: d26_live=yes\n",
+        )
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
+        self._assert_lock_free(wwl)
+
+    def test_run_id_mismatch_or_missing_stops_child(self) -> None:
+        body = "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n" % (
+            self.now + 26 * 60,
+            self.now + 50 * 60,
+        )
+        self.deadline.parent.mkdir(parents=True, exist_ok=True)
+        self.deadline.write_text(body, encoding="utf-8")
+        mismatched = self.home / "mismatch-ran"
+        wwl, rc, err = self._run_lock_main(mismatched, "other-run")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            err,
+            "error: search resume +26 drop failed; child not started: "
+            "run-id mismatch\n",
+        )
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(mismatched.exists())
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
+        self._assert_lock_free(wwl)
+
+        if self.deadline.exists():
+            self.deadline.unlink()
+        missing = self.home / "missing-ran"
+        wwl, rc, err = self._run_lock_main(missing, "run1")
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            err,
+            "error: search resume +26 drop failed; child not started: "
+            "deadline file missing\n",
+        )
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(missing.exists())
+        self.assertFalse(self.deadline.exists())
+        self._assert_lock_free(wwl)
+
     def test_unset_run_id_runs_child_when_module_unimportable(self) -> None:
         marker = self.home / "did-run"
         _wwl, proc = self._run_isolated_lock(marker, None)
@@ -1573,7 +1771,6 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertEqual(self.deadline.read_text(encoding="utf-8"), restore_body)
         marker = self.home / "restore-ran"
         stale_marker = self.home / "stale-ran"
-        warn = io.StringIO()
         with mock.patch.dict(
             os.environ,
             {
@@ -1582,8 +1779,8 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             },
             clear=False,
         ):
-            with mock.patch.object(wwl.sys, "stderr", warn):
-                stale_rc = wwl.run_with_lock(
+            with self.assertRaises(wwl.WriterLockError) as stale:
+                wwl.run_with_lock(
                     "att0-restore",
                     [
                         sys.executable,
@@ -1594,10 +1791,9 @@ class SearchResumeWatchdogTests(unittest.TestCase):
                     lock_path=self.lock,
                     action_required_path=self.home / "ACTION_REQUIRED",
                 )
-        self.assertEqual(stale_rc, 0)
-        self.assertEqual(stale_marker.read_text(encoding="utf-8"), "stale")
-        self.assertIn("run-id mismatch", warn.getvalue())
-        self.assertNotIn("child not started", warn.getvalue())
+        self.assertIn("child not started", str(stale.exception))
+        self.assertIn("run-id mismatch", str(stale.exception))
+        self.assertFalse(stale_marker.exists())
         self.assertEqual(self.deadline.read_text(encoding="utf-8"), restore_body)
         held = wwl.acquire_writer_lock(self.lock, "after-stale")
         wwl.release_writer_lock(held)
@@ -1632,12 +1828,12 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertEqual(info.purpose, "att0-restore")
         self.assertNotIn(SECRET, text)
 
-    def test_gate_refuses_att0_restore_purpose(self) -> None:
+    def test_gate_allows_exact_att0_restore_purpose(self) -> None:
         import sor_writer_gate as gate
         import with_writer_lock as wwl
         from datetime import datetime, timezone
 
-        self.assertNotIn("att0-restore", gate.WRITER_PURPOSE_ALLOWLIST)
+        self.assertIn("att0-restore", gate.WRITER_PURPOSE_ALLOWLIST)
         self.assertIn("att0-migrate", gate.WRITER_PURPOSE_ALLOWLIST)
         token = "fixture-token-value"
         when = datetime(2026, 9, 27, 22, 15, tzinfo=timezone.utc)
@@ -1659,9 +1855,19 @@ class SearchResumeWatchdogTests(unittest.TestCase):
                 return gate._identity_decision(self.lock, child_pid=os.getpid())
 
         matched, why = decide("att0-restore")
-        self.assertFalse(matched)
-        self.assertEqual(why, "purpose not allowed")
+        self.assertTrue(matched)
+        self.assertEqual(why, "match")
         self.assertNotIn(token, why)
+        for near in (
+            "att0_restore",
+            "att0-restor",
+            "att0-restore ",
+            "ATT0-restore",
+        ):
+            refused, why_no = decide(near)
+            self.assertFalse(refused, near)
+            self.assertEqual(why_no, "purpose not allowed")
+            self.assertNotIn(token, why_no)
         matched_ok, why_ok = decide("att0-migrate")
         self.assertTrue(matched_ok)
         self.assertEqual(why_ok, "match")

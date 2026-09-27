@@ -65,15 +65,19 @@ the same wrapper, with this variable unset, does not drop.
 
 `scripts/with_writer_lock.py` does the drop. The hook is the delimited
 block immediately after a successful acquire, before the child and
-before the identity-token handoff. The first successful acquire whose
-`MAILROOM_SEARCH_RESUME_RUN_ID` equals the file's `run_id` drops
-`+26`. A later acquire with the same run-id is a no-op drop. A value
-that does not equal the file warns on stderr,
-`search resume +26 not dropped: run-id mismatch`, leaves `+26` live,
-and still runs the child. Heavy §4 names the drop, not a second lock:
-a non-matching acquire is not the acquire that drops, so it must not
-block the writer. `arm --run-id` still refuses a mismatch, because
-that command's only job is the drop.
+before the identity-token handoff. The wrapper never invents a run-id.
+
+| `MAILROOM_SEARCH_RESUME_RUN_ID` | What happens |
+|---|---|
+| Absent | No drop. The deadline file is not read for a drop. The child runs. |
+| Present and equal to the file `run_id`, and a re-read shows `d26_live=no` | Drop `+26`, then run the child. A later acquire with the same run-id is a no-op drop and still runs the child. |
+| Present and equal to the file `run_id`, and a re-read still shows `d26_live=yes` | Stop. Clean error, exit 2, child not run, lock released. |
+| Present, and the run-id mismatches, or the deadline file is missing or unreadable | Stop. Clean error, exit 2, child not run, lock released. The file is left as it was. |
+| Present, and `search_resume_watchdog` cannot be loaded | Stop. Clean error, exit 2, child not run, lock released. |
+
+The clean error is `error: search resume +26 drop failed; child not started`.
+`arm --run-id` still refuses a mismatch, because that command's only
+job is the drop.
 
 The drop calls `drop_early_deadline(run_id)` in
 `scripts/search_resume_watchdog.py`. That rewrites the deadline file
@@ -83,12 +87,12 @@ atomically: a temp file in the same directory, `fsync`, then
 It refuses a missing or unparseable file and does not change the file
 in those cases.
 
-If the variable is set and the drop cannot be completed (the file is
-missing or unparseable, or the rewrite fails), the wrapper does not
-run the child. It releases the lock and exits non-zero. That is
-fail-closed for the SoR. The message includes
-`search resume +26 drop failed; child not started`. A mismatch is not
-that failure.
+If the variable is set and the drop cannot be completed (the module
+cannot be loaded, the file is missing or unreadable, the run-id
+mismatches, the rewrite fails, or `d26_live` is still `yes`), the
+wrapper does not run the child. It releases the lock and exits 2.
+That is fail-closed for the SoR. The message is
+`error: search resume +26 drop failed; child not started`.
 
 Fallback, in the same scripted breath as the writer start:
 
@@ -99,23 +103,18 @@ Fallback, in the same scripted breath as the writer start:
 
 `arm --run-id` is that same drop. It is not a card to walk away from.
 
-This branch is stacked on PR #90 at
-`fe7c076db762b440f0ffc7c524c254223b671434`. Later pushes to
-`cursor/l1-writer-lock-identity-16b2` need another rebase. The hook
-stays a small delimited block. PR #89 must be rebased again after
-PR #90 merges into main.
+The hook stays a small delimited block on the wrapper from PR #90.
 
 The restore flow overwrites the deadline file with a new run-id of
 the form `att0-L1-<STAMP>-R`. Its first acquire uses purpose
 `att0-restore` and must set `MAILROOM_SEARCH_RESUME_RUN_ID` to that
 `-R` run-id. A stale S1 run-id no longer matches after the overwrite.
 
-The wrapper accepts purpose `att0-restore` (any non-empty purpose is
-stored). The SoR gate does not. `att0-restore` is not in
-`WRITER_PURPOSE_ALLOWLIST` in `scripts/sor_writer_gate.py` on this
-base. This change does not edit that allowlist. A wrapped child that
-presents the lock token with purpose `att0-restore` is refused
-(`purpose not allowed`) until Mailroom adds that purpose.
+The wrapper stores purpose `att0-restore` as that exact string. The
+SoR gate allowlist includes `att0-restore` and does not alias it to
+`att0-migrate`. `att0_restore`, `att0-restor`, a trailing space on
+`att0-restore`, and `ATT0-restore` are refused with
+`purpose not allowed`.
 
 ## +50 backstop
 
@@ -230,10 +229,13 @@ per tick. No `-k`. No retry. No enable subcommand.
    kickstart.
 6. If bootstrap returns 0, `launchctl kickstart gui/$UID/com.mailroom.ask-mail-serve`
    with no `-k`.
-7. If kickstart says not found (exit 113, or output containing
-   `Could not find service`), print once. If that print exits 0, this
-   is a success no-op: `RunAtLoad` already started the job. Log
-   `search already loaded` as info. Do not bootstrap again.
+7. If kickstart does not return 0 (not found, or any other failure),
+   print once. If that print exits 0, this is a success no-op:
+   `RunAtLoad` already started the job. Log `search already loaded`
+   as info. Otherwise log the existing loud line
+   `search restore failed kickstart rc=<rc>`. Do not bootstrap again.
+   Do not kickstart again. The watchdog does not call `enable` and
+   does not call `print-disabled`.
 
 ```zsh
 launchctl print "gui/$UID/com.mailroom.ask-mail-serve"
@@ -302,8 +304,8 @@ only from the pid and the purpose.
 - It never takes `mailroom.write.lock` and never opens that file for
   writing.
 - It never kills a writer.
-- It never calls `launchctl` with `-k`, and it never uses the user
-  domain.
+- It never calls `launchctl` with `-k`, it never calls `enable`, it
+  never calls `print-disabled`, and it never uses the user domain.
 - It never adds `KeepAlive` to `ask-mail-serve`.
 
 The log file is `$HOME/MailArchive/logs/search_resume_watchdog.log`

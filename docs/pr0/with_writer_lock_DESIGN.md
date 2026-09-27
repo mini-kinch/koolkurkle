@@ -62,6 +62,20 @@ with_writer_lock.py --purpose embed_backfill -- \
 
 Testing overrides: `--lock-file`, `--max-age-hours` (default 4).
 
+## Search-resume +26 drop
+
+After the lock is acquired, and before the child runs, the wrapper looks only at `MAILROOM_SEARCH_RESUME_RUN_ID`. It never invents a run-id from the deadline file.
+
+| `MAILROOM_SEARCH_RESUME_RUN_ID` | What happens |
+|---|---|
+| Absent | No drop. The deadline file is not read for a drop. The child runs. |
+| Present and equal to the file `run_id`, and a re-read shows `d26_live=no` | Drop `+26`, then run the child. |
+| Present and equal to the file `run_id`, and a re-read still shows `d26_live=yes` | Stop. Clean error, exit 2, child not run, lock released. |
+| Present, and the run-id mismatches, or the deadline file is missing or unreadable | Stop. Clean error, exit 2, child not run, lock released. |
+| Present, and `search_resume_watchdog` cannot be loaded | Stop. Clean error, exit 2, child not run, lock released. |
+
+The clean error is `error: search resume +26 drop failed; child not started`. A bare acquire never drops.
+
 ## Identity handoff
 
 The wrapper draws `secrets.token_urlsafe(16)` or longer, stores it in the lock file as `writer_token`, and passes it to the child with the wrapper pid and purpose:
@@ -70,7 +84,7 @@ The wrapper draws `secrets.token_urlsafe(16)` or longer, stores it in the lock f
 - `MAILROOM_WRITER_LOCK_PID`
 - `MAILROOM_WRITER_LOCK_PURPOSE`
 
-The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB`, then closes that probe fd. It does not keep the probe lock. With no token in the environment, a free lock is allowed and a held lock is a conflict, same as before. With a token, a free lock is a conflict (the wrapper died; do not write unlocked). A held lock is allowed only when the lock-file `writer_token` matches, the recorded pid is live, that pid is the child or an ancestor, and the purpose is on the writer allowlist (`att0-migrate`, `att0 meta fill`, and the existing writer purposes). Any miss or ancestor-walk error refuses. The walk is at most 32 steps and does not use `/proc` on Darwin.
+The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB`, then closes that probe fd. It does not keep the probe lock. With no token in the environment, a free lock is allowed and a held lock is a conflict, same as before. With a token, a free lock is a conflict (the wrapper died; do not write unlocked). A held lock is allowed only when the lock-file `writer_token` matches, the recorded pid is live, that pid is the child or an ancestor, and the purpose is an exact allowlist match (`att0-migrate`, `att0-restore`, `att0 meta fill`, and the existing writer purposes). `att0-restore` is not an alias of `att0-migrate`. `att0_restore`, `att0-restor`, a trailing space on `att0-restore`, and `ATT0-restore` are refused with `purpose not allowed`. The purpose field is not trimmed when the lock file is read. Any miss or ancestor-walk error refuses. The walk is at most 32 steps and does not use `/proc` on Darwin.
 
 `is_live_sor` compares realpaths, so a symlink is not judged by its raw path string.
 
