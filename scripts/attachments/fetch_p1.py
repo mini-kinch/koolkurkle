@@ -17,7 +17,6 @@ truncated at 2 MB.
 from __future__ import annotations
 
 import argparse
-import imaplib
 import json
 import os
 import re
@@ -206,7 +205,7 @@ def _unescape_quoted(raw: bytes) -> bytes:
 
 
 def parse_fetch_literal(data: Any) -> bytes:
-    """Pull the BODY.PEEK literal out of an imaplib FETCH response."""
+    """Pull the BODY.PEEK literal out of a FETCH response."""
     if not data:
         raise FetchRefuse("empty part fetch")
     literals: list[bytes] = []
@@ -352,13 +351,205 @@ def _publish_bytes(final: Path, data: bytes) -> None:
         raise
 
 
+_CURL_BIN = "/usr/bin/curl"
+_PEEK_ITEM_RE = re.compile(r"^\(BODY\.PEEK\[[0-9.]+\]<\d+\.\d+>\)$")
+
+
+def _curl_escape(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _imaps_base_url(host: str, port: int) -> str:
+    """``imaps://host:port/`` with no mailbox, so curl does not SELECT."""
+    text = str(host or "")
+    if not text or any(char in text for char in " \t\r\n\x00/@\\"):
+        raise FetchRefuse("imap host is required")
+    return "imaps://%s:%s/" % (text, int(port))
+
+
+def _curl_config(
+    user: str,
+    password: str,
+    host: str,
+    port: int,
+    timeout_s: float,
+    commands: list,
+) -> str:
+    """Stdin curl config. The password is not placed in argv."""
+    url = _imaps_base_url(host, port)
+    seconds = float(timeout_s) if timeout_s and timeout_s > 0 else DEFAULT_TIMEOUT_S
+    timeout_text = str(int(seconds)) if seconds == int(seconds) else str(seconds)
+    blocks = []
+    for command in commands:
+        if any(char in str(command) for char in "\r\n\x00"):
+            raise FetchRefuse("part fetch failed")
+        block = "".join(
+            [
+                "silent\n",
+                "show-error\n",
+                'connect-timeout = "%s"\n' % _curl_escape(timeout_text),
+                'max-time = "%s"\n' % _curl_escape(timeout_text),
+                'user = "%s"\n' % _curl_escape("%s:%s" % (user, password)),
+                'request = "%s"\n' % _curl_escape(command),
+                'url = "%s"\n' % _curl_escape(url),
+            ]
+        )
+        blocks.append(block.rstrip("\n"))
+    return "\nnext\n".join(blocks) + "\n"
+
+
+def _curl_env(password: str) -> dict:
+    blocked = {
+        "CURL_BIN",
+        "IMAP_APP_PASSWORD",
+        "MAILROOM_IMAP_PASSWORD",
+        "MAILROOM_IMAP_APP_PASSWORD",
+    }
+    env = {}
+    for key, value in os.environ.items():
+        if key in blocked:
+            continue
+        if password and value == password:
+            continue
+        env[key] = value
+    return env
+
+
+def _imap_literals(buf: bytes) -> list:
+    """Return each ``{n}`` literal. The bytes are not decoded."""
+    found = []
+    index = 0
+    size = len(buf)
+    while index < size:
+        brace = buf.find(b"{", index)
+        if brace < 0:
+            break
+        end = buf.find(b"}", brace + 1)
+        if end < 0:
+            break
+        width = buf[brace + 1 : end]
+        if not width.isdigit():
+            index = brace + 1
+            continue
+        count = int(width)
+        if buf[end + 1 : end + 3] == b"\r\n":
+            start = end + 3
+        elif end + 1 < size and buf[end + 1 : end + 2] == b"\n":
+            start = end + 2
+        else:
+            index = end + 1
+            continue
+        if start + count > size:
+            break
+        found.append(buf[start : start + count])
+        index = start + count
+    return found
+
+
+def _last_imap_literal(buf: bytes) -> bytes:
+    found = _imap_literals(buf)
+    if found:
+        return found[-1]
+    if re.search(br"FETCH\b", buf) and b"NIL" in buf:
+        return b""
+    raise FetchRefuse("part fetch had no literal")
+
+
+class _CurlPartConn:
+    """One pinned ``/usr/bin/curl`` ``imaps://`` process per command.
+
+    EXAMINE is read-only. The mailbox is not in the URL, so curl does not
+    SELECT. Partial ``UID FETCH`` items are the only fetches.
+    """
+
+    def __init__(self, host: str, port: int, timeout: float) -> None:
+        self.host = host
+        self.port = int(port)
+        self.timeout = timeout
+        self.user = ""
+        self.password = ""
+        self.mailbox: str | None = None
+
+    def login(self, user: str, password: str) -> tuple:
+        if any(char in str(user) + str(password) for char in "\r\n\x00"):
+            raise FetchRefuse("imap login failed")
+        self.user = str(user)
+        self.password = str(password)
+        return "OK", [b""]
+
+    def logout(self) -> tuple:
+        self.password = ""
+        return "BYE", [b""]
+
+    def _run(self, commands: list) -> bytes:
+        config = _curl_config(
+            self.user,
+            self.password,
+            self.host,
+            self.port,
+            self.timeout,
+            commands,
+        )
+        argv = [_CURL_BIN, "--silent", "--show-error", "--fail-early", "-K", "-"]
+        try:
+            proc = subprocess.run(
+                argv,
+                input=config.encode("utf-8"),
+                capture_output=True,
+                env=_curl_env(self.password),
+                timeout=self.timeout if self.timeout and self.timeout > 0 else DEFAULT_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise FetchRefuse("part fetch failed") from None
+        except OSError:
+            raise FetchRefuse("part fetch failed") from None
+        finally:
+            config = ""
+        if proc.returncode != 0:
+            raise FetchRefuse("part fetch failed")
+        return proc.stdout or b""
+
+    def select(self, mailbox: str, readonly: bool = False) -> tuple:
+        if readonly is not True:
+            raise FetchRefuse("imap select failed")
+        self._run(["EXAMINE %s" % mailbox])
+        self.mailbox = str(mailbox)
+        return "OK", [b"1"]
+
+    def uid(self, cmd: str, uid: str, item: str) -> tuple:
+        if str(cmd).upper() != "FETCH":
+            raise FetchRefuse("part fetch failed")
+        if not _UID_RE.match(str(uid)) or not _PEEK_ITEM_RE.match(str(item)):
+            raise FetchRefuse("part fetch failed")
+        if not self.mailbox:
+            raise FetchRefuse("imap select failed")
+        raw = self._run(
+            [
+                "EXAMINE %s" % self.mailbox,
+                "UID FETCH %s %s" % (uid, item),
+            ]
+        )
+        blob = _last_imap_literal(raw)
+        meta = ("1 (BODY[1] {%d}" % len(blob)).encode("ascii")
+        return "OK", [(meta, blob), b")"]
+
+
 class ImapPartClient:
     """UID FETCH of partial ``BODY.PEEK[part]<offset.count>`` ranges.
 
-    Readonly EXAMINE on imaplib.IMAP4_SSL port 993. The password comes
-    from ``password_fn`` (default Keychain via ``read_imap_app_password``).
-    Plain IMAP is refused. Each chunk is written to ``dest`` and dropped
-    so peak memory stays one chunk.
+    Production transport is pinned ``/usr/bin/curl`` ``imaps://`` port 993
+    with readonly EXAMINE. The mailbox is not in the URL. Plain IMAP is
+    refused. The password comes from ``password_fn`` (default Keychain via
+    ``read_imap_app_password``). Each chunk is written to ``dest`` and
+    dropped so peak memory stays one chunk. Tests inject ``imap_factory``.
     """
 
     def __init__(
@@ -372,13 +563,13 @@ class ImapPartClient:
     ) -> None:
         if not host:
             raise FetchRefuse("imap host is required")
+        if imap_factory is not None and getattr(imap_factory, "__name__", "") == "IMAP4":
+            raise FetchRefuse("plain IMAP is refused")
         self.host = host
         self.user = user or ""
         self.port = _IMAP_SSL_PORT
         self.timeout = timeout
-        self._factory = imaplib.IMAP4_SSL if imap_factory is None else imap_factory
-        if self._factory is imaplib.IMAP4:
-            raise FetchRefuse("plain IMAP is refused")
+        self._factory = imap_factory
         self._password_fn = password_fn
         self._conn: Any = None
         self.mailbox: str | None = None
@@ -391,15 +582,19 @@ class ImapPartClient:
                 password = fn()
             except KeychainError:
                 raise FetchRefuse("imap keychain password is missing") from None
-            context = ssl.create_default_context()
             try:
-                self._conn = self._factory(
-                    self.host,
-                    self.port,
-                    timeout=self.timeout,
-                    ssl_context=context,
-                )
-                self._conn.login(self.user, password)
+                if self._factory is None:
+                    self._conn = _CurlPartConn(self.host, self.port, self.timeout)
+                    self._conn.login(self.user, password)
+                else:
+                    context = ssl.create_default_context()
+                    self._conn = self._factory(
+                        self.host,
+                        self.port,
+                        timeout=self.timeout,
+                        ssl_context=context,
+                    )
+                    self._conn.login(self.user, password)
             except FetchRefuse:
                 self._close()
                 raise
