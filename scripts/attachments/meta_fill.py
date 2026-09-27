@@ -3,21 +3,32 @@
 
 Option 1 (``--source imap``): rows with ``source='imap-live'``. UIDs are
 unique per folder, so rows are grouped by ``messages.folder`` and each
-folder is selected read-only before its UID FETCH of ``(BODYSTRUCTURE)``.
-The connection is ``imaplib.IMAP4_SSL`` on port 993 with
-``ssl.create_default_context()`` (``CERT_REQUIRED``, ``check_hostname``).
-Folder names are quoted before EXAMINE, including spaces, quotes, and
-backslashes. UIDVALIDITY from that response is stored per folder on
-the first ``--apply`` fill, not at ingest. A mismatch is counted in
+folder is examined before its UID FETCH of ``(BODYSTRUCTURE)``. The
+production transport is pinned ``/usr/bin/curl`` ``imaps://`` (port 993).
+It does not construct ``imaplib`` or a Python socket, and ``CURL_BIN``
+cannot redirect it. Per folder, curl EXAMINEs a URL whose path is the
+mailbox percent-encoded (spaces, quotes, and backslashes). The ``-X``
+command quotes that mailbox (``"Deleted Messages"``). UID FETCH
+``(BODYSTRUCTURE)`` is a second ``-X`` on the same folder URL and does
+not change the seen flag. UIDVALIDITY is parsed from curl's IMAP
+response (``[UIDVALIDITY n]``) and stored per folder on the first
+``--apply`` fill, not at ingest. A mismatch is counted in
 ``uidvalidity_mismatch`` (one per row, not per folder) and those rows
 are not written. The ``PARTIAL:`` banner includes
-``uidvalidity_mismatch=N``. The password is read from macOS Keychain
-(``scripts/imap_keychain.py``). The binary is pinned to
-``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
-with one legacy fallback. There is no password option and no password
-environment variable. Option 2 (``--source jsonl``): other rows
-that already have ``jsonl_offset``. Seeks that offset and reads
-``jsonl_len`` bytes, then parses MIME headers.
+``uidvalidity_mismatch=N``. A non-zero curl status, an authentication
+failure, or an Errno 9 / bad-file-descriptor error fails closed after
+one attempt. Nothing from that failure is marked scanned. The password
+is read from macOS Keychain (``scripts/imap_keychain.py``). The binary
+is pinned to ``/usr/bin/security`` and the item is
+``mailroom.imap.app-password`` with one legacy fallback. Curl receives
+it only on stdin (``--config -``, ``user = "..."``), never in argv, the
+environment, or a file. TLS verification stays on (no ``-k``). There is
+no password option and no password environment variable.
+``ImapBodystructureClient`` is a test-only ``imaplib.IMAP4_SSL`` double
+on port 993 and is not constructed by the CLI or by ``fill_metadata``.
+Option 2 (``--source jsonl``): other rows that already have
+``jsonl_offset``. Seeks that offset and reads ``jsonl_len`` bytes, then
+parses MIME headers.
 
 Default is ``--dry-run`` (counts only). ``--apply`` writes. Filename text
 is stored only with ``--store-filenames`` (default off); otherwise the
@@ -108,8 +119,10 @@ class _Oversized(Exception):
 
 
 class ImapBodystructureClient:
-    """UID FETCH of ``(BODYSTRUCTURE)`` over imaplib.IMAP4_SSL port 993.
+    """Test-only UID FETCH double over imaplib.IMAP4_SSL port 993.
 
+    The CLI and ``fill_metadata`` do not construct this class. Production
+    IMAP goes through ``/usr/bin/curl imaps://`` (``_CurlProductionClient``).
     The password comes from Keychain via ``password_fn`` (default
     ``read_imap_app_password``). This class does not read a password
     argument or a password environment variable, and it does not put the
@@ -203,6 +216,59 @@ def quote_imap_mailbox(name: str) -> str:
     """IMAP atom quoting. Spaces, quotes, and backslashes stay one mailbox."""
     escaped = str(name).replace("\\", "\\\\").replace('"', '\\"')
     return '"' + escaped + '"'
+
+
+def _load_imap_curl():
+    """Import the curl transport without loading it for a JSONL-only run."""
+    import imap_curl
+
+    return imap_curl
+
+
+class _CurlProductionClient:
+    """CLI / fill_metadata IMAP path. Curl only. Never constructs imaplib."""
+
+    def __init__(self, host, user, timeout, password_fn, port=993, cacert=None) -> None:
+        mod = _load_imap_curl()
+        self._mod = mod
+        fn = read_imap_app_password if password_fn is None else password_fn
+        try:
+            self._inner = mod.CurlImapsClient(
+                host,
+                user,
+                timeout=timeout,
+                password_fn=fn,
+                port=int(port),
+                cacert=cacert,
+            )
+        except mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        self.mailbox = None
+        self.uidvalidity = None
+
+    def __enter__(self) -> "_CurlProductionClient":
+        try:
+            self._inner.__enter__()
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._inner.__exit__(exc_type, exc, tb)
+
+    def select(self, mailbox: str, readonly: bool = True) -> None:
+        try:
+            self._inner.select(mailbox, readonly=readonly)
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        self.mailbox = self._inner.mailbox
+        self.uidvalidity = self._inner.uidvalidity
+
+    def fetch_bodystructure(self, uid: str) -> str:
+        try:
+            return self._inner.fetch_bodystructure(uid)
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
 
 
 def _uidvalidity_from_conn(conn: Any) -> int:
@@ -895,6 +961,8 @@ def fill_metadata(
     user: str | None = None,
     password_fn: Callable[[], str] | None = None,
     mailbox: str | None = None,
+    imap_port: int = 993,
+    cacert: str | None = None,
     max_messages: int = _DEFAULT_MAX_MESSAGES,
     max_parts: int = _DEFAULT_MAX_PARTS,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
@@ -904,10 +972,14 @@ def fill_metadata(
 ) -> dict[str, Any]:
     """Count or write attachment metadata. ``bytes_stored`` is always 0.
 
-    ``imap_client`` skips socket setup and Keychain. The CLI builds
-    ``ImapBodystructureClient`` only when this is omitted and host is set.
-    ``mailbox`` limits IMAP rows to that folder. Omit it to select every
-    folder that still has unscanned rows.
+    ``imap_client`` skips curl and Keychain. When it is omitted and the
+    source is imap, the CLI builds ``_CurlProductionClient`` (pinned
+    ``/usr/bin/curl imaps://``). That path does not construct imaplib.
+    ``ImapBodystructureClient`` is a test-only double. ``mailbox`` limits
+    IMAP rows to that folder. Omit it to examine every folder that still
+    has unscanned rows. ``imap_port`` and ``cacert`` are test injections
+    for a local fake IMAPS server. The CLI does not pass them. Production
+    uses port 993 and does not pass ``--cacert``.
     """
     path = Path(db)
     refuse_destructive_cli([] if argv is None else list(argv))
@@ -960,11 +1032,13 @@ def fill_metadata(
                 raise FillRefuse("imap host is required")
             if not user:
                 raise FillRefuse("imap user is required")
-            client = ImapBodystructureClient(
+            client = _CurlProductionClient(
                 host,
                 user,
                 timeout=timeout_s if timeout_s > 0 else _DEFAULT_TIMEOUT_S,
                 password_fn=password_fn,
+                port=imap_port,
+                cacert=cacert,
             )
             try:
                 client.__enter__()

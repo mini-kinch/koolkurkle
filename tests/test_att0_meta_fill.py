@@ -2028,56 +2028,15 @@ class CliTests(unittest.TestCase):
                 ],
             )
             plain_calls = []
-            seen = {"inits": [], "events": []}
+            seen = {"curls": []}
 
-            class PlainIMAP:
-                def __init__(self, *args, **kwargs):
-                    plain_calls.append((args, kwargs))
-                    raise AssertionError("plain IMAP4")
+            def boom_imap(*_args, **_kwargs):
+                plain_calls.append("imaplib")
+                raise AssertionError("production opened imaplib")
 
-            class FakeSSL:
-                def __init__(self, host, port, timeout=None, ssl_context=None):
-                    seen["inits"].append((host, port, timeout))
-                    seen["ssl_context"] = ssl_context
-                    self.mailbox = None
-
-                def login(self, user, password):
-                    seen["login"] = (user, password)
-                    return "OK", [b"ok"]
-
-                def select(self, mailbox, readonly=False):
-                    self.mailbox = mailbox
-                    seen["events"].append(("select", mailbox, readonly))
-                    return "OK", [b"1"]
-
-                def response(self, code):
-                    if str(code).upper() != "UIDVALIDITY":
-                        return str(code).upper(), [None]
-                    return "UIDVALIDITY", [b"8"]
-
-                def uid(self, command, uid, item):
-                    logical = self.mailbox
-                    if (
-                        isinstance(logical, str)
-                        and len(logical) >= 2
-                        and logical.startswith('"')
-                        and logical.endswith('"')
-                    ):
-                        logical = logical[1:-1]
-                    seen["events"].append(("uid", logical, command, uid, item))
-                    if logical == "Archive":
-                        payload = MIXED_BS
-                    else:
-                        payload = PLAIN_BS
-                    raw = b'1 (BODYSTRUCTURE %s)' % payload.encode("utf-8")
-                    return "OK", [raw]
-
-                def logout(self):
-                    seen["events"].append(("logout",))
-                    return "BYE", [b""]
-
-            def boom(*_args, **_kwargs):
-                raise AssertionError("network is forbidden")
+            def boom_socket(*_args, **_kwargs):
+                plain_calls.append("socket")
+                raise AssertionError("production opened a socket")
 
             def fake_security(args, check=False, capture_output=False, text=False):
                 seen["security"] = list(args)
@@ -2087,6 +2046,22 @@ class CliTests(unittest.TestCase):
                 proc.stderr = ""
                 return proc
 
+            def fake_curl(argv, config_text, env, timeout):
+                seen["curls"].append(
+                    {"argv": list(argv), "config": config_text, "env": dict(env)}
+                )
+                command = argv[argv.index("-X") + 1]
+                url = argv[-1]
+                if str(command).startswith("UID FETCH"):
+                    payload = MIXED_BS if "Archive" in url else PLAIN_BS
+                    body = "* 1 FETCH (BODYSTRUCTURE %s)\n" % " ".join(payload.split())
+                else:
+                    body = (
+                        "* OK [UIDVALIDITY 8] UIDs valid\n"
+                        "A003 OK [READ-ONLY] EXAMINE completed\n"
+                    )
+                return 0, body, ""
+
             out = io.StringIO()
             err = io.StringIO()
             env = {
@@ -2095,8 +2070,11 @@ class CliTests(unittest.TestCase):
                 "IMAP_APP_PASSWORD": "env-secret",
                 "MAILROOM_IMAP_PASSWORD": "env-secret",
                 "MAILROOM_IMAP_PORT": "143",
+                "CURL_BIN": "/tmp/not-curl",
             }
-            with mock.patch("socket.create_connection", boom), mock.patch("sys.stderr", err):
+            with mock.patch("socket.create_connection", boom_socket), mock.patch(
+                "sys.stderr", err
+            ):
                 rc = meta.main(
                     ["--db", str(db), "--source", "imap", "--apply"],
                     env={},
@@ -2105,12 +2083,14 @@ class CliTests(unittest.TestCase):
             self.assertIn("imap host is required", err.getvalue())
             self.assertNotIn("env-secret", err.getvalue())
             self.assertNotIn("keychain-secret", err.getvalue())
-            with mock.patch("socket.create_connection", boom), mock.patch(
-                "attachments.meta_fill.imaplib.IMAP4", PlainIMAP
+            with mock.patch("socket.create_connection", boom_socket), mock.patch(
+                "imaplib.IMAP4_SSL", boom_imap
             ), mock.patch(
-                "attachments.meta_fill.imaplib.IMAP4_SSL", FakeSSL
+                "attachments.meta_fill.imaplib.IMAP4_SSL", boom_imap
             ), mock.patch(
                 "imap_keychain.subprocess.run", fake_security
+            ), mock.patch(
+                "imap_curl.run_subprocess", fake_curl
             ), mock.patch("sys.stdout", out), mock.patch("sys.stderr", io.StringIO()):
                 rc = meta.main(
                     ["--db", str(db), "--source", "imap", "--apply"],
@@ -2118,8 +2098,6 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0, out.getvalue())
             self.assertEqual(plain_calls, [])
-            self.assertEqual(seen["inits"], [("imap.example.com", 993, 30)])
-            self.assertEqual(seen["login"], ("user@example.com", "keychain-secret"))
             self.assertEqual(
                 seen["security"],
                 [
@@ -2130,15 +2108,16 @@ class CliTests(unittest.TestCase):
                     "-w",
                 ],
             )
-            self.assertEqual(
-                seen["events"][:4],
-                [
-                    ("select", '"Archive"', True),
-                    ("uid", "Archive", "FETCH", "42", "(BODYSTRUCTURE)"),
-                    ("select", '"INBOX"', True),
-                    ("uid", "INBOX", "FETCH", "42", "(BODYSTRUCTURE)"),
-                ],
-            )
+            self.assertGreaterEqual(len(seen["curls"]), 4)
+            first = seen["curls"][0]
+            self.assertEqual(first["argv"][0], "/usr/bin/curl")
+            self.assertIn("--config", first["argv"])
+            self.assertIn("-", first["argv"])
+            self.assertNotIn("keychain-secret", first["argv"])
+            self.assertNotIn("env-secret", first["argv"])
+            self.assertNotIn("keychain-secret", first["env"].values())
+            self.assertNotIn("env-secret", first["env"].values())
+            self.assertIn('user = "user@example.com:keychain-secret"', first["config"])
             self.assertNotIn("env-secret", out.getvalue())
             self.assertNotIn("keychain-secret", out.getvalue())
             self.assertNotIn("env-secret", _text_blob(db))
@@ -2213,15 +2192,11 @@ class DesignAndBoundaryTests(unittest.TestCase):
             self.assertNotIn("ask_mail", source, name)
 
     def test_login_error_from_the_client_is_redacted(self):
-        class BadIMAP:
-            def __init__(self, host, port, timeout=None, ssl_context=None):
-                return None
+        calls = []
 
-            def login(self, user, password):
-                raise RuntimeError("rejected %s" % password)
-
-            def logout(self):
-                return "BYE", [b""]
+        def fake_curl(argv, config_text, env, timeout):
+            calls.append(list(argv))
+            return 67, "", "Login denied for %s" % SECRET
 
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom-copy.sqlite"
@@ -2231,10 +2206,10 @@ class DesignAndBoundaryTests(unittest.TestCase):
             )
             plain = mock.Mock(side_effect=AssertionError("plain IMAP4"))
             with mock.patch("attachments.meta_fill.imaplib.IMAP4", plain), mock.patch(
-                "attachments.meta_fill.imaplib.IMAP4_SSL", BadIMAP
+                "attachments.meta_fill.imaplib.IMAP4_SSL", plain
             ), mock.patch(
                 "attachments.meta_fill.read_imap_app_password", return_value=SECRET
-            ):
+            ), mock.patch("imap_curl.run_subprocess", fake_curl):
                 with self.assertRaises(meta.FillRefuse) as ctx:
                     meta.fill_metadata(
                         db,
@@ -2246,9 +2221,607 @@ class DesignAndBoundaryTests(unittest.TestCase):
                         lock_held=False,
                     )
             self.assertFalse(plain.called)
+            self.assertEqual(len(calls), 1)
             self.assertNotIn(SECRET, str(ctx.exception))
             self.assertIsNone(ctx.exception.__cause__)
             self.assertNotIn(SECRET, _text_blob(db))
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
+
+
+class CurlTransportTests(unittest.TestCase):
+    """Production path is /usr/bin/curl imaps://. No live mailbox."""
+
+    def test_curl_argv_shape_keeps_the_password_out_of_argv_and_env(self):
+        import imap_curl as imap_curl
+
+        captured = {}
+        password = 'p"q\\r'
+        env_password = "env-secret-token"
+
+        def runner(argv, config_text, env, timeout):
+            captured["argv"] = list(argv)
+            captured["config"] = config_text
+            captured["env"] = dict(env)
+            return 0, "* OK [UIDVALIDITY 42] UIDs valid\n", ""
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CURL_BIN": "/tmp/not-curl",
+                "MAILROOM_IMAP_PASSWORD": env_password,
+                "IMAP_APP_PASSWORD": env_password,
+            },
+            clear=False,
+        ):
+            client = imap_curl.CurlImapsClient(
+                "imap.example.invalid",
+                "user@example.invalid",
+                timeout=30,
+                password_fn=lambda: password,
+                runner=runner,
+            )
+            with client:
+                client.select("Deleted Messages")
+        argv = captured["argv"]
+        self.assertEqual(
+            argv,
+            [
+                "/usr/bin/curl",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--connect-timeout",
+                "30",
+                "--dump-header",
+                "-",
+                "--config",
+                "-",
+                "-X",
+                'EXAMINE "Deleted Messages"',
+                "imaps://imap.example.invalid:993/Deleted%20Messages",
+            ],
+        )
+        self.assertEqual(argv[0], "/usr/bin/curl")
+        self.assertIn("imaps://", argv[-1])
+        self.assertEqual(argv[argv.index("--config") + 1], "-")
+        self.assertEqual(argv[argv.index("-X") + 1], 'EXAMINE "Deleted Messages"')
+        self.assertNotIn("-k", argv)
+        self.assertNotIn("--insecure", argv)
+        self.assertNotIn("--cacert", argv)
+        self.assertNotIn(password, argv)
+        self.assertNotIn(env_password, argv)
+        self.assertNotIn("CURL_BIN", captured["env"])
+        self.assertNotIn(password, captured["env"].values())
+        self.assertNotIn(env_password, captured["env"].values())
+        self.assertEqual(
+            captured["config"],
+            'user = "user@example.invalid:p\\"q\\\\r"\n',
+        )
+        self.assertEqual(client.uidvalidity, 42)
+        fetch_calls = {}
+
+        def fetch_runner(argv, config_text, env, timeout):
+            fetch_calls["argv"] = list(argv)
+            fetch_calls["env"] = dict(env)
+            return (
+                0,
+                '* 1 FETCH (BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1))\n',
+                "",
+            )
+
+        client._runner = fetch_runner
+        text = client.fetch_bodystructure("9")
+        self.assertNotIn(password, fetch_calls["argv"])
+        self.assertNotIn(password, fetch_calls["env"].values())
+        self.assertEqual(
+            fetch_calls["argv"][fetch_calls["argv"].index("-X") + 1],
+            "UID FETCH 9 (BODYSTRUCTURE)",
+        )
+        self.assertTrue(fetch_calls["argv"][-1].endswith("/Deleted%20Messages"))
+        self.assertIn("TEXT", text)
+
+    def test_quoted_folders_encode_spaces_quotes_and_backslashes(self):
+        import imap_curl as imap_curl
+
+        cases = [
+            ("Deleted Messages", "Deleted%20Messages", '"Deleted Messages"'),
+            ('Say "hi"', "Say%20%22hi%22", '"Say \\"hi\\""'),
+            ("a\\b", "a%5Cb", '"a\\\\b"'),
+        ]
+        for mailbox, encoded, quoted in cases:
+            url = imap_curl.folder_url("imap.example.invalid", mailbox, 993)
+            self.assertTrue(url.startswith("imaps://imap.example.invalid:993/"))
+            self.assertTrue(url.endswith("/" + encoded), url)
+            command = imap_curl.examine_command(mailbox)
+            self.assertEqual(command, "EXAMINE " + quoted)
+            argv = imap_curl.curl_argv(url, command, 30)
+            self.assertEqual(argv[0], "/usr/bin/curl")
+            self.assertEqual(argv[argv.index("-X") + 1], command)
+            self.assertEqual(argv[-1], url)
+            self.assertEqual(argv[argv.index("--config") + 1], "-")
+            self.assertNotIn("-k", argv)
+            self.assertNotIn("--insecure", argv)
+            fetch = imap_curl.curl_argv(
+                url, imap_curl.fetch_command("9"), 30
+            )
+            self.assertEqual(
+                fetch[fetch.index("-X") + 1], "UID FETCH 9 (BODYSTRUCTURE)"
+            )
+            self.assertEqual(fetch[-1], url)
+
+    def test_real_curl_parses_uidvalidity_and_bodystructure(self):
+        """fill_metadata EXAMINEs, reads UIDVALIDITY, and UID FETCHes via real curl."""
+        import imap_curl as imap_curl
+
+        if not os.access("/usr/bin/curl", os.X_OK):
+            self.skipTest("curl is not available")
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            key = str(Path(tmp) / "key.pem")
+            cert = str(Path(tmp) / "cert.pem")
+            proc = subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    key,
+                    "-out",
+                    cert,
+                    "-days",
+                    "1",
+                    "-nodes",
+                    "-subj",
+                    "/CN=127.0.0.1",
+                    "-addext",
+                    "subjectAltName=IP:127.0.0.1",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0 or not Path(cert).is_file():
+                self.skipTest("could not generate a throwaway certificate")
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(cert, key)
+            except ssl.SSLError:
+                self.skipTest("TLS is not available")
+
+            validity = {
+                "Deleted Messages": 11,
+                'Say "hi"': 22,
+                "a\\b": 33,
+            }
+            needles = [
+                (imap_curl.quote_imap_mailbox(name).encode("utf-8"), value)
+                for name, value in validity.items()
+            ]
+            seen = []
+            lock = threading.Lock()
+
+            def handler(conn):
+                buf = b""
+                try:
+                    conn.sendall(b"* OK IMAP4rev1 ready\r\n")
+                    while True:
+                        data = conn.recv(8192)
+                        if not data:
+                            return
+                        buf += data
+                        while b"\r\n" in buf:
+                            line, buf = buf.split(b"\r\n", 1)
+                            text = line.decode("utf-8", "replace")
+                            with lock:
+                                seen.append(text)
+                            parts = line.split(b" ", 2)
+                            tag = parts[0]
+                            cmd = parts[1].upper() if len(parts) > 1 else b""
+                            arg = parts[2] if len(parts) > 2 else b""
+                            if cmd == b"CAPABILITY":
+                                conn.sendall(
+                                    b"* CAPABILITY IMAP4rev1\r\n"
+                                    + tag
+                                    + b" OK CAPABILITY completed\r\n"
+                                )
+                            elif cmd == b"LOGIN":
+                                conn.sendall(tag + b" OK LOGIN completed\r\n")
+                            elif cmd in (b"SELECT", b"EXAMINE"):
+                                number = b"11"
+                                for needle, value in needles:
+                                    if needle in line:
+                                        number = str(value).encode("ascii")
+                                        break
+                                conn.sendall(
+                                    b"* 1 EXISTS\r\n* OK [UIDVALIDITY "
+                                    + number
+                                    + b"] UIDs valid\r\n* OK [PERMANENTFLAGS ()] "
+                                    b"Read-only\r\n"
+                                    + tag
+                                    + b" OK [READ-ONLY] EXAMINE completed\r\n"
+                                )
+                            elif cmd == b"UID":
+                                conn.sendall(
+                                    b"* 1 FETCH (UID 9 BODYSTRUCTURE "
+                                    b'("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1))\r\n'
+                                    + tag
+                                    + b" OK UID FETCH completed\r\n"
+                                )
+                            elif cmd == b"LOGOUT":
+                                conn.sendall(b"* BYE\r\n" + tag + b" OK LOGOUT\r\n")
+                                return
+                            else:
+                                conn.sendall(tag + b" BAD\r\n")
+                except Exception:
+                    return
+                finally:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(8)
+            listener.settimeout(0.5)
+            port = listener.getsockname()[1]
+            stop = threading.Event()
+
+            def loop():
+                while not stop.is_set():
+                    try:
+                        conn, _addr = listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return
+                    try:
+                        wrapped = ctx.wrap_socket(conn, server_side=True)
+                    except ssl.SSLError:
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+                        continue
+                    handler(wrapped)
+
+            thread = threading.Thread(target=loop, daemon=True)
+            thread.start()
+            calls = []
+            real_run = imap_curl.run_subprocess
+
+            def spy(argv, config_text, env, timeout):
+                calls.append(
+                    {"argv": list(argv), "config": config_text, "env": dict(env)}
+                )
+                return real_run(argv, config_text, env, timeout)
+
+            def boom(*_args, **_kwargs):
+                raise AssertionError("fill opened imaplib or a python socket")
+
+            rows = [
+                ("ex-deleted", "imap-live", "9", None, None, "synthetic", "Deleted Messages"),
+                ("ex-quote", "imap-live", "9", None, None, "synthetic", 'Say "hi"'),
+                ("ex-slash", "imap-live", "9", None, None, "synthetic", "a\\b"),
+            ]
+            main_src = (PKG / "meta_fill.py").read_text(encoding="utf-8").split(
+                "def main(", 1
+            )[1]
+            self.assertNotIn("cacert", main_src.split("\ndef ", 1)[0])
+            try:
+                bare = Path(tmp) / "bare.sqlite"
+                _seed(bare, rows)
+                with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                    "imaplib.IMAP4_SSL", boom
+                ), mock.patch(
+                    "attachments.meta_fill.imaplib.IMAP4_SSL", boom
+                ), mock.patch("socket.create_connection", boom):
+                    with self.assertRaises(meta.FillRefuse) as denied:
+                        meta.fill_metadata(
+                            bare,
+                            source="imap",
+                            apply=True,
+                            host="127.0.0.1",
+                            user="user@example.invalid",
+                            password_fn=lambda: "example-secret",
+                            imap_port=port,
+                            cmdlines=[],
+                            lock_held=False,
+                            max_messages=0,
+                            timeout_s=15,
+                        )
+                self.assertNotIn("example-secret", str(denied.exception))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["argv"][0], "/usr/bin/curl")
+                self.assertNotIn("--cacert", calls[0]["argv"])
+                self.assertNotIn("-k", calls[0]["argv"])
+                self.assertNotIn("--insecure", calls[0]["argv"])
+                self.assertNotIn("example-secret", calls[0]["argv"])
+                self.assertNotIn("example-secret", calls[0]["env"].values())
+                conn = sqlite3.connect(str(bare))
+                try:
+                    scans = conn.execute(
+                        "SELECT COUNT(*) FROM attachment_meta_scans"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(scans, 0)
+                calls.clear()
+                seen.clear()
+
+                db = Path(tmp) / "mailroom-copy.sqlite"
+                _seed(db, rows)
+                with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                    "imaplib.IMAP4_SSL", boom
+                ), mock.patch(
+                    "attachments.meta_fill.imaplib.IMAP4_SSL", boom
+                ), mock.patch("socket.create_connection", boom):
+                    report = meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=True,
+                        host="127.0.0.1",
+                        user="user@example.invalid",
+                        password_fn=lambda: "example-secret",
+                        imap_port=port,
+                        cacert=cert,
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=15,
+                    )
+                self.assertEqual(report["messages"], 3)
+                self.assertEqual(report["parts"], 3)
+                self.assertEqual(report["bytes_stored"], 0)
+                self.assertEqual(report["uidvalidity_mismatch"], 0)
+                self.assertEqual(report["errors"], 0)
+                self.assertGreaterEqual(len(calls), 6)
+                commands = []
+                for item in calls:
+                    self.assertEqual(item["argv"][0], "/usr/bin/curl")
+                    self.assertIn("--cacert", item["argv"])
+                    self.assertEqual(item["argv"][item["argv"].index("--cacert") + 1], cert)
+                    self.assertNotIn("-k", item["argv"])
+                    self.assertNotIn("--insecure", item["argv"])
+                    self.assertNotIn("example-secret", item["argv"])
+                    self.assertNotIn("example-secret", item["env"].values())
+                    self.assertIn(
+                        'user = "user@example.invalid:example-secret"', item["config"]
+                    )
+                    self.assertIn("imaps://127.0.0.1:%s/" % port, item["argv"][-1])
+                    commands.append(item["argv"][item["argv"].index("-X") + 1])
+                self.assertIn('EXAMINE "Deleted Messages"', commands)
+                self.assertIn('EXAMINE "Say \\"hi\\""', commands)
+                self.assertIn('EXAMINE "a\\\\b"', commands)
+                self.assertEqual(commands.count("UID FETCH 9 (BODYSTRUCTURE)"), 3)
+                transcript = "\n".join(seen)
+                self.assertIn('EXAMINE "Deleted Messages"', transcript)
+                self.assertIn('SELECT "Deleted Messages"', transcript)
+                self.assertIn('EXAMINE "Say \\"hi\\""', transcript)
+                self.assertIn('EXAMINE "a\\\\b"', transcript)
+                self.assertIn("UID FETCH 9 (BODYSTRUCTURE)", transcript)
+                conn = sqlite3.connect(str(db))
+                try:
+                    stored = dict(
+                        conn.execute(
+                            "SELECT folder, uidvalidity FROM attachment_folder_uidvalidity"
+                        ).fetchall()
+                    )
+                    parts = conn.execute(
+                        "SELECT message_id, mime, size FROM attachments ORDER BY message_id"
+                    ).fetchall()
+                    scans = conn.execute(
+                        "SELECT COUNT(*) FROM attachment_meta_scans"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(
+                    stored,
+                    {"Deleted Messages": 11, 'Say "hi"': 22, "a\\b": 33},
+                )
+                self.assertEqual(scans, 3)
+                self.assertEqual(len(parts), 3)
+                self.assertTrue(all(row[1] == "text/plain" and row[2] == 4 for row in parts))
+            finally:
+                stop.set()
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+                thread.join(timeout=3)
+
+    def test_production_fill_never_constructs_imaplib_or_a_socket(self):
+        """CLI fill stays on curl when imaplib and sockets are poisoned.
+
+        On 9c8a4548 this fails: fill_metadata constructs imaplib.IMAP4_SSL,
+        the poison raises, and the command exits 2 with nothing fetched.
+        """
+        raised = []
+
+        def boom(*_args, **_kwargs):
+            raised.append("called")
+            raise AssertionError("production opened imaplib or a socket")
+
+        def fake_security(args, check=False, capture_output=False, text=False):
+            proc = mock.Mock()
+            proc.returncode = 0
+            proc.stdout = "keychain-secret\n"
+            proc.stderr = ""
+            return proc
+
+        def fake_curl(argv, config_text, env, timeout):
+            command = argv[argv.index("-X") + 1] if "-X" in argv else ""
+            if str(command).startswith("UID FETCH"):
+                body = (
+                    '* 1 FETCH (BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1))\n'
+                )
+            else:
+                body = "* OK [UIDVALIDITY 5] UIDs valid\nA003 OK [READ-ONLY] EXAMINE completed\n"
+            return 0, body, ""
+
+        patches = [
+            mock.patch("imaplib.IMAP4_SSL", boom),
+            mock.patch("socket.create_connection", boom),
+            mock.patch("attachments.meta_fill.imaplib.IMAP4_SSL", boom),
+            mock.patch("imap_keychain.subprocess.run", fake_security),
+        ]
+        try:
+            import imap_curl as imap_curl  # noqa: F401
+        except ImportError:
+            imap_curl = None
+        else:
+            patches.append(
+                mock.patch("imap_curl.run_subprocess", fake_curl)
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
+            )
+            out = io.StringIO()
+            err = io.StringIO()
+            with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                active = []
+                for item in patches:
+                    active.append(item)
+                    item.start()
+                try:
+                    rc = meta.main(
+                        [
+                            "--db",
+                            str(db),
+                            "--source",
+                            "imap",
+                            "--apply",
+                            "--max-messages",
+                            "0",
+                            "--timeout",
+                            "0",
+                        ],
+                        env={
+                            "MAILROOM_IMAP_HOST": "imap.example.invalid",
+                            "MAILROOM_IMAP_USER": "user@example.invalid",
+                            "CURL_BIN": "/tmp/not-curl",
+                        },
+                    )
+                finally:
+                    for item in reversed(active):
+                        item.stop()
+            self.assertEqual(rc, 0, err.getvalue())
+            self.assertEqual(raised, [])
+            self.assertIn("messages=1", out.getvalue())
+            self.assertNotIn("keychain-secret", out.getvalue())
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+                stored = conn.execute(
+                    "SELECT uidvalidity FROM attachment_folder_uidvalidity WHERE folder='INBOX'"
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(scans, 1)
+            self.assertEqual(stored[0], 5)
+
+    def test_curl_error_fails_closed_without_retry(self):
+        import imap_curl as imap_curl
+
+        calls = []
+
+        def runner(argv, config_text, env, timeout):
+            calls.append(list(argv))
+            return 67, "", "Login denied %s\nErrno 9 Bad file descriptor" % SECRET
+
+        client = imap_curl.CurlImapsClient(
+            "imap.example.invalid",
+            "user@example.invalid",
+            timeout=5,
+            password_fn=lambda: SECRET,
+            runner=runner,
+        )
+        with client:
+            with self.assertRaises(imap_curl.CurlImapError) as ctx:
+                client.select("INBOX")
+            with self.assertRaises(imap_curl.CurlImapError):
+                client.fetch_bodystructure("9")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("errno 9", str(ctx.exception))
+        self.assertIn("not retrying", str(ctx.exception))
+        self.assertNotIn(SECRET, str(ctx.exception))
+
+        calls.clear()
+
+        def auth_runner(argv, config_text, env, timeout):
+            calls.append(1)
+            return 67, "", "Login denied"
+
+        client = imap_curl.CurlImapsClient(
+            "imap.example.invalid",
+            "user@example.invalid",
+            timeout=5,
+            password_fn=lambda: SECRET,
+            runner=auth_runner,
+        )
+        with client:
+            with self.assertRaises(imap_curl.CurlImapError) as ctx:
+                client.select("Deleted Messages")
+        self.assertEqual(calls, [1])
+        self.assertIn("authentication failed", str(ctx.exception))
+        self.assertNotIn(SECRET, str(ctx.exception))
+
+        calls.clear()
+
+        def rc_runner(argv, config_text, env, timeout):
+            calls.append(1)
+            return 56, "", "curl failed %s" % SECRET
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
+            )
+            with mock.patch("imap_curl.run_subprocess", rc_runner), mock.patch(
+                "attachments.meta_fill.read_imap_app_password", return_value=SECRET
+            ):
+                with self.assertRaises(meta.FillRefuse) as ctx:
+                    meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=True,
+                        host="imap.example.invalid",
+                        user="user@example.invalid",
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=0,
+                    )
+            self.assertEqual(calls, [1])
+            self.assertIn("imap curl failed", str(ctx.exception))
+            self.assertNotIn(SECRET, str(ctx.exception))
+            self.assertIsNone(ctx.exception.__cause__)
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
 
 
 if __name__ == "__main__":
