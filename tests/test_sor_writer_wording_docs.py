@@ -103,10 +103,11 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         self.assertIn(CANONICAL, text)
         self.assertNotIn("MBP-SoR-only", text)
         self.assertIn(
-            "SoR (%s): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`"
+            "%s SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`"
             % (CANONICAL,),
             text,
         )
+        self.assertNotIn("read-only).):", text)
         for comment in ASK_COMMENTS:
             self.assertIn("# %s — %s" % (MBP_LABEL, comment), text)
         for command in ASK_COMMANDS:

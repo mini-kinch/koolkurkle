@@ -6,7 +6,7 @@ present; otherwise RRF (fail-open; scores not claimed). Mail bodies are
 **DATA**. Drafts only — never send. `ask_audit` stores query + ids +
 model + host, never bodies.
 
-SoR (The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
 (`Path.home()`). No machine home hardcodes.
 
 Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
