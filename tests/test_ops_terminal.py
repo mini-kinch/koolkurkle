@@ -231,8 +231,25 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("--phase retrieve", text)
         self.assertIn("copy-only", text)
         self.assertIn("MBP SoR vs Mini copy-only", text)
-        self.assertIn("live Source of Record", text)
-        self.assertIn("No Mini writers against SoR", text)
+        index = next(
+            line
+            for line in text.splitlines()
+            if line.startswith("MBP SoR vs Mini copy-only")
+        )
+        self.assertIn("Mini is the only SoR writer", index)
+        self.assertIn("`mailroom.sqlite`", index)
+        self.assertIn("under the daily only", index)
+        self.assertIn("the MBP is a non-writer", index)
+        self.assertIn("No MBP writers against SoR", index)
+        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", index)
+        self.assertIn(
+            "authority CRM-log/20260924-1201-mini-only-writer-user.md:4",
+            index,
+        )
+        self.assertNotIn("MBP is the live Source of Record", index)
+        self.assertNotIn("live Source of Record", index)
+        self.assertNotIn("Mini is copy-only", index)
+        self.assertNotIn("No Mini writers against SoR", index)
         self.assertIn("gated on rem-legacy EXIT 0", text)
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("same copy", text)

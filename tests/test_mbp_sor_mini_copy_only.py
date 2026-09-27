@@ -94,14 +94,34 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
 
     def test_operators_can_find_the_contract(self):
         raw = README.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
         self.assertIn("ops-terminal.md", raw)
-        self.assertIn("MBP SoR vs Mini copy-only", text)
-        self.assertIn("MBP is the live Source of Record", text)
-        self.assertIn("mailroom.sqlite", text)
-        self.assertIn("Mini is copy-only", text)
-        self.assertIn("no Mini writers against SoR", text)
-        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", text)
+        index = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("MBP SoR vs Mini copy-only")
+        )
+        self.assertIn("MBP SoR vs Mini copy-only", index)
+        self.assertIn("Mini is the only SoR writer", index)
+        self.assertIn("`mailroom.sqlite`", index)
+        self.assertIn("under the daily only", index)
+        self.assertIn("the MBP is a non-writer", index)
+        self.assertIn("no MBP writers against SoR", index)
+        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", index)
+        self.assertIn(
+            "authority CRM-log/20260924-1201-mini-only-writer-user.md:4",
+            index,
+        )
+        self.assertNotIn("MBP is the live Source of Record", index)
+        self.assertNotIn("Mini is copy-only", index)
+        self.assertNotIn("no Mini writers against SoR", index)
+        recipes = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("`mailroom.sqlite` name the Mini SoR")
+        )
+        self.assertIn("the only SoR writer", recipes)
+        self.assertIn("The MBP is a non-writer", recipes)
+        self.assertNotIn("MBP-SoR-only", recipes)
         hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)
