@@ -89,7 +89,7 @@ is still not a rerank Ready.
 
 ## SoR + retrieve smoke
 
-Until PR-5, Mini SoR is an empty stub. Mini retrieve recipes set
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve recipes set
 `MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
 `mailroom-daily-copy.sqlite`). Do not default Mini to
 `mailroom.sqlite`. Recipes that use `mailroom.sqlite` are
@@ -141,7 +141,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 ```
 
 ```zsh
-# Mini — hybrid retrieve (copy DB until PR-5; Mini SoR is an empty stub)
+# Mini — hybrid retrieve (copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'SDGE bill'
 ```

@@ -374,7 +374,7 @@ NoteStore.
 | Job | Where |
 |---|---|
 | Snapshot chat.db / NoteStore | MBP (FDA) |
-| Mail IMAP / rem / att apply | MBP SoR until PR-5 |
+| Mail IMAP / rem / att apply | The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. |
 | Embed year-band / small notes | Mini on **copies of our SoRs**, not Apple files |
 | Generate | MBP `127.0.0.1:1234` |
 | `ask_all` | Reads local files. After PR-5, Mini can host retrieve if generate still gets snippets over localhost |

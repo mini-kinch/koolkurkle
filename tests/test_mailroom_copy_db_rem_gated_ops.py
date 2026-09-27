@@ -60,7 +60,7 @@ class MailroomCopyDbRemGatedOpsTests(unittest.TestCase):
         daily = " ".join(DAILY.read_text(encoding="utf-8").split())
         self.assertIn("copy from live SoR only when rem-legacy is not writing", daily)
         self.assertNotIn("Mini copy only when", daily)
-        self.assertIn("No live MBP→Mini", daily)
+        self.assertIn("No live copy from MBP to Mini", daily)
         helper = HELPER.read_text(encoding="utf-8")
         self.assertIn("Rem-gated copy", helper)
         self.assertIn("No live MBP→Mini", helper)

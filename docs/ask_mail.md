@@ -9,7 +9,7 @@ model + host, never bodies.
 The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
 (`Path.home()`). No machine home hardcodes.
 
-Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve/ask recipes use
 `$HOME/MailArchive/mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`).
 Do not default Mini to `mailroom.sqlite`. Mini retrieve labels
 `db_mode=copy` and `copy_age`. Never imply live/SoR on a copy.
@@ -116,7 +116,7 @@ MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
 ```
 
 ```zsh
-# Mini — phase 1: retrieve only (copy DB until PR-5; Mini SoR is an empty stub)
+# Mini — phase 1: retrieve only (copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase retrieve --json 'SDGE bill'
 ```
@@ -190,7 +190,7 @@ Expected `--probe` PASS JSON:
 | Unreachable | `generate_mode=fail_open`, `generate_error=lm_studio_unreachable` | `warning: generate fail-open: lm_studio_unreachable; hits-only` |
 | Env unset | `generate_mode=hits_only` | (none) |
 
-Mocks in `tests/test_ask_mail.py`. Live MBP matrix is the operator gate.
+Mocks in `tests/test_ask_mail.py`. The MBP probe matrix is the operator gate.
 
 ## Definition of Done
 
@@ -218,7 +218,7 @@ MAILROOM_LM_STUDIO_URL=http://127.0.0.1:1234 \
 ```zsh
 # Mini — ask. Generate process is mlx_lm.server (same /v1/chat/completions).
 # If generate is not running: generate_mode=hits_only or fail_open (labeled).
-# Copy DB until PR-5; Mini SoR is an empty stub.
+# Copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```
@@ -306,7 +306,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 
 ```zsh
 # Mini — 3. MCP stdio (four tools; separate process from --serve)
-# Copy DB until PR-5; Mini SoR is an empty stub.
+# Copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --mcp
 ```

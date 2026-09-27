@@ -227,6 +227,10 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("$HOME/Desktop/Heavy-Bot/to-bot", text)
         self.assertIn("/workspace", text)
         self.assertIn("before box read", text)
+        self.assertIn(
+            "Every brief and fix round runs `git push --dry-run` at the start of the run and again right before the real push, and on an auth failure stops and reports the exact error without retrying.",
+            text,
+        )
         self.assertIn("ollama stop qwen3-embedding:8b", text)
         self.assertIn("--phase retrieve", text)
         self.assertIn("copy-only", text)

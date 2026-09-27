@@ -42,7 +42,12 @@ class MailroomDocsSyncTests(unittest.TestCase):
         self.assertIn("opt-in", text)
         self.assertIn("/opt/homebrew/opt/curl/bin/curl", text)
         self.assertIn("mailroom.imap.app-password", text)
-        self.assertIn("copy-only until pr-5", text.lower())
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            text,
+        )
+        self.assertNotIn("copy-only until pr-5", text.lower())
+        self.assertNotIn("mini copy-only", text.lower())
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("do not restart rem", text.lower())
         self.assertIn("quote-strip", text)

@@ -860,7 +860,7 @@ ollama stop qwen3-embedding:8b
 
 Canonical on the Mac Desktop: `$HOME/Desktop/Heavy-Bot/to-bot`.
 Before a box / cloud agent reads a packet, sync that directory into
-`/workspace`. A Desktop file that was never synced is not visible to
+`/workspace`. Every brief and fix round runs `git push --dry-run` at the start of the run and again right before the real push, and on an auth failure stops and reports the exact error without retrying. A Desktop file that was never synced is not visible to
 the box. Do not `git add` packet contents.
 
 Handoffs to a human use a named chat attachment with a download link.

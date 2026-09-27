@@ -26,7 +26,7 @@ to `mailroom.sqlite` would write the empty SoR or race the rem job.
 Copy-only keeps one writer on the live rem copy and leaves SoR promotion
 to PR-5 (out of scope here). Rem-gated copy: copy from live SoR only when
 rem-legacy is not writing, or after rem-legacy EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Do not mount
-the live SQLite over SMB/NFS and do not dual-write. No live MBP→Mini
+the live SQLite over SMB/NFS and do not dual-write. No live copy from MBP to Mini
 copy is required from this tree. Look-ahead calendar jobs: if rem/writer
 on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe
 before the clock. Do not run the MBP 8pm chain while
@@ -357,7 +357,7 @@ Prefer LaunchAgent. If you must use cron on the Mini:
 
 | | Mini (this job) | MBP |
 |---|---|---|
-| Role | Copy-only daily until PR-5 | Laptop; rem embed may still hold the copy |
+| Role | The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. | Laptop; rem embed may still hold the copy |
 | Scheduler | `com.mailroom.daily` | Do not also run a live writer on the same DB ([embed-backfill.md](../docs/embed-backfill.md)) |
 | Embed Python | `~/MailArchive/.venv/bin/python` | Homebrew `/opt/homebrew/bin/python3` on embed PRs |
 | Headers curl | Apple `/usr/bin/curl` | Same |
@@ -373,7 +373,7 @@ Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
 MAILROOM sync: **[MAILROOM.md](../docs/MAILROOM.md)**.
 
 ```zsh
-# Mini — ask_mail (copy DB until PR-5; Mini SoR is an empty stub)
+# Mini — ask_mail (copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```

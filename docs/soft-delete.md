@@ -82,5 +82,5 @@ only). Never dump Messages/Notes into `mailroom.sqlite`.
 ## §10 Out of scope
 
 No live IMAP. No Keychain read/write. No RunAtLoad change. No PR-5
-enable. No live MBP SoR writers. Rem-legacy untouched. No ATT
+enable. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Rem-legacy untouched. No ATT
 catalog/extract/chunk/embed/apply run.

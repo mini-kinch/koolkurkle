@@ -37,7 +37,7 @@ Body rem uses `message_embeddings` (PK `message_id`). Attachment chunks must **n
 5. Extracted text is untrusted **DATA** (same fence as bodies).
 6. Extract fail ≠ tombstone the parent message. Attachment has its own status/`skip_reason`.
 7. Bot box never holds SoR, live extracts, or attachment blobs.
-8. Mini **copy-only until PR-5**. Attachment jobs on Mini use copy DB + local extract dir.
+8. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. Attachment jobs on Mini use copy DB + local extract dir.
 9. No SMB/NFS sqlite. Stage extract trees locally.
 10. Do **not** rebuild/drop `message_embeddings` vec0 to “make room” for chunks.
 
@@ -45,7 +45,7 @@ Body rem uses `message_embeddings` (PK `message_id`). Attachment chunks must **n
 
 11. **Auth / 2FA hard-gate** — `lane=auth` (and equivalent) must not enter extract→FTS/chunk retrieve by default. Auth body-block and never-text-codes extend to attachment text unless an explicit human ask lifts the gate for that message.
 12. **History vs live for tombstoned parents** — Soft-delete Q1 DECIDED: ask_mail default = **history** (include `present_on_server=0`). Attachment hits for tombstoned parents follow the same mode: visible under history; hidden only under `--live` / live modes. Do **not** permanently hide attach hits solely because the parent is tombstoned.
-13. **No live SoR catalog/apply while rem holds the lock** — Stage A (catalog), D (apply text), F (apply vec) are SoR writers. While rem-legacy (or any embed writer) holds live MBP SoR, only **file-stage** work (B/C/E sidecars) or work against a **copy DB** is legal. Live SoR catalog/apply waits rem **EXIT 0** + `with_writer_lock`.
+13. **No live SoR catalog/apply while rem holds the lock** — Stage A (catalog), D (apply text), F (apply vec) are SoR writers. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). While rem-legacy (or any embed writer) holds the live lock, only **file-stage** work (B/C/E sidecars) or work against a **copy DB** is legal. Live SoR catalog/apply waits rem **EXIT 0** + `with_writer_lock`.
 14. **IMAP part-fetch rails** — Same as bodies-fts: Homebrew curl **≥ 8.17** for `BODY.PEEK`, Apple `/usr/bin/curl` fail-closed for streaming literals, Apple curl LS allow ≠ brew curl, `\Seen` restore is not delete, **never** `EXPUNGE` / `\Deleted` for hygiene.
 15. **Never-purge + disk caps** — Do not `DELETE` from `attachment_*` as cleanup (same never-purge spirit as `messages`). Define disk_path / extract-tree caps and MBP+Mini backup expectations; skip/`too_big` beats silent ballooning.
 
