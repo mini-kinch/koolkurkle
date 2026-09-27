@@ -21,7 +21,7 @@ host-kept foreground embed ops contract:
 Remote Shell vs LaunchAgent lifetime (a job started with `&` or `nohup ... &` inside a remote agent Shell dies when that call returns; a LaunchAgent survives): section below.
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
-MBP SoR vs Mini copy-only (MBP is the live Source of Record for `mailroom.sqlite`; Mini is copy-only; No Mini writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0): section below.
+Mini SoR (sole writer) vs MBP non-writer (Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; No MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4): section below.
 Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth; fail closed for classify/rules): section below.
 CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS orders Developer, collects status, issues user ARs only; Developer owns Mac process ownership and installs): section below.
 Discuss ≠ authorize (discussion and how questions are not authorization; implement only on do it / approved / implement or standing authorized process; in CoS Desk discussion/troubleshooting, do not act until explicit): section below.
@@ -185,7 +185,7 @@ card. Fail closed: if a card cannot follow this format, do not issue it.
 This gate is docs/tests only. It does not SSH a live machine, open
 MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
-## MBP SoR vs Mini copy-only
+## Mini SoR (sole writer) vs MBP non-writer
 
 Since the 2026-09-24 SoR flip.
 
