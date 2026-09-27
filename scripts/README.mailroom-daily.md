@@ -166,12 +166,15 @@ the venv once:
 
 ## Keychain
 
-Service **name only** (default): `mailroom.imap.app-password`.
+Service **name** is pinned: `mailroom.imap.app-password`.
 
-Override the item with `MAILROOM_KEYCHAIN_ITEM` (the LaunchAgent plist sets
-this to the default). The wrapper calls
+The wrapper does not read `MAILROOM_KEYCHAIN_ITEM`. The LaunchAgent plist
+still sets `MAILROOM_KEYCHAIN_ITEM` to that same pinned name; the wrapper
+ignores it. The wrapper calls
 `/usr/bin/security find-generic-password -s … -w` and exports
-`IMAP_APP_PASSWORD` for child IMAP scripts. Nothing in this repo stores
+`IMAP_APP_PASSWORD` for child IMAP scripts only after that read. An
+inherited `IMAP_APP_PASSWORD` is unset before the lookup, so a preset
+value is not used. Nothing in this repo stores
 the value. Never echo or log the secret.
 
 Keychain must work from **launchd** (`launchctl start com.mailroom.daily`
@@ -181,11 +184,10 @@ different. Prove the item from `launchctl start`, then read
 `~/MailArchive/logs/daily_rag.stderr.log` (length / IMAP success only;
 never paste the secret).
 
-One-time **read fallback**: if the default name is missing or empty, the
+One-time **read fallback**: if the pinned name is missing or empty, the
 wrapper tries legacy `mailroom.icloud.app-password` once and warns on
-stderr. It does not fail solely because only the old item exists. A
-`MAILROOM_KEYCHAIN_ITEM` set to any other name is used as-is (no
-legacy fallback). Prefer the new name; keep the legacy item until IMAP
+stderr. It does not fail solely because only the old item exists.
+Prefer the new name; keep the legacy item until IMAP
 smoke PASSes on `mailroom.imap.app-password`.
 
 Human Terminal cards (one machine, one command per fence):
@@ -316,7 +318,7 @@ Plist:
 - Label `com.mailroom.daily` (single existing driver)
 - `MAILROOM_DB=__HOME__/MailArchive/mailroom-copy.sqlite` (or
   `mailroom-daily-copy.sqlite` when rem embed still holds the copy)
-- `MAILROOM_KEYCHAIN_ITEM=mailroom.imap.app-password`
+- `MAILROOM_KEYCHAIN_ITEM=mailroom.imap.app-password` (plist still sets this; the wrapper ignores it and uses the pinned name)
 - `OLLAMA_HOST=http://127.0.0.1:11434`
 - `StartCalendarInterval` 20:05 local (precursor Minute 0; 8pm bills
   digest stays a separate agent)

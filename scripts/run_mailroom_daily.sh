@@ -5,7 +5,7 @@
 # Body/FTS scripts pick Homebrew curl themselves (CURL_BIN unset for that step).
 # Embed uses ~/MailArchive/.venv/bin/python — not Apple /usr/bin/python3.
 #
-# Keychain item name only (default): mailroom.imap.app-password
+# Keychain item name only (pinned): mailroom.imap.app-password
 # Legacy read-fallback: mailroom.icloud.app-password
 # Never echo, log, or commit the password.
 #
@@ -49,13 +49,15 @@ esac
 unset _db _base
 
 # Load IMAP app password from Keychain by service name only.
-# Override the item with MAILROOM_KEYCHAIN_ITEM. Do not print the value.
+# The item name is the pinned constant. MAILROOM_KEYCHAIN_ITEM is not read.
+# Inherited IMAP_APP_PASSWORD is unset before the lookup. Do not print the value.
 # Binary is pinned to /usr/bin/security (same argv as scripts/imap_keychain.py).
 KEYCHAIN_DEFAULT="mailroom.imap.app-password"
 KEYCHAIN_LEGACY="mailroom.icloud.app-password"
-KEYCHAIN_ITEM="${MAILROOM_KEYCHAIN_ITEM:-$KEYCHAIN_DEFAULT}"
+KEYCHAIN_ITEM="$KEYCHAIN_DEFAULT"
 SECURITY_BIN="/usr/bin/security"
-if [ -z "${IMAP_APP_PASSWORD:-}" ] && [ -x "$SECURITY_BIN" ]; then
+unset IMAP_APP_PASSWORD
+if [ -x "$SECURITY_BIN" ]; then
   set +e
   _pw="$("$SECURITY_BIN" find-generic-password -s "$KEYCHAIN_ITEM" -w 2>/dev/null)"
   _rc=$?

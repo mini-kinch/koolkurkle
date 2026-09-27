@@ -1059,7 +1059,12 @@ class ShellWrapperTests(unittest.TestCase):
         self.assertTrue(text.startswith("#!/bin/zsh"))
         self.assertIn("mailroom.imap.app-password", text)
         self.assertIn("mailroom.icloud.app-password", text)
-        self.assertIn("MAILROOM_KEYCHAIN_ITEM", text)
+        self.assertIn('KEYCHAIN_DEFAULT="mailroom.imap.app-password"', text)
+        self.assertIn('KEYCHAIN_ITEM="$KEYCHAIN_DEFAULT"', text)
+        self.assertNotIn("${MAILROOM_KEYCHAIN_ITEM", text)
+        self.assertIn("unset IMAP_APP_PASSWORD", text)
+        self.assertNotIn("${IMAP_APP_PASSWORD:-}", text)
+        self.assertIn('SECURITY_BIN="/usr/bin/security"', text)
         self.assertIn("falling back to", text)
         self.assertIn("Live Keychain cutover is not done yet", text)
         self.assertIn("find-generic-password", text)
@@ -1263,7 +1268,9 @@ class KeychainFallbackTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         logs.mkdir()
         (scripts / "mailroom_daily.py").write_text(DAILY_STUB, encoding="utf-8")
-        security = tmp / "fake-security"
+        stub_dir = tmp / "bin"
+        stub_dir.mkdir()
+        security = stub_dir / "security"
         security.write_text(FAKE_SECURITY, encoding="utf-8")
         security.chmod(security.stat().st_mode | stat.S_IEXEC)
         wrapper = tmp / "run_mailroom_daily.sh"
@@ -1272,6 +1279,7 @@ class KeychainFallbackTests(unittest.TestCase):
         packed = "|".join("%s=%s" % (k, v) for k, v in (items or {}).items())
         env = {
             **os.environ,
+            "PATH": str(stub_dir) + os.pathsep + os.environ.get("PATH", ""),
             "MAILARCHIVE": str(archive),
             "MAILARCHIVE_SCRIPTS": str(scripts),
             "MAILARCHIVE_LOGS": str(logs),
@@ -1362,7 +1370,29 @@ class KeychainFallbackTests(unittest.TestCase):
         self.assertEqual(proc.security_log.split(), [NEW_KEYCHAIN, LEGACY_KEYCHAIN])
         self._assert_no_secret_leak(proc)
 
-    def test_override_is_used_without_legacy_fallback(self):
+    def test_keychain_item_env_ignored_calls_pinned_name(self):
+        """MAILROOM_KEYCHAIN_ITEM is ignored; the stub is called with the pin."""
+        custom = "mailroom.custom.test-item"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                Path(tmp),
+                items={
+                    custom: CUSTOM_PW,
+                    NEW_KEYCHAIN: NEW_PW,
+                    LEGACY_KEYCHAIN: OLD_PW,
+                },
+                extra_env={"MAILROOM_KEYCHAIN_ITEM": custom},
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("password_loaded=1", proc.stdout)
+        self.assertIn("password_sha256=%s" % _sha256(NEW_PW), proc.stdout)
+        self.assertNotIn(_sha256(CUSTOM_PW), proc.stdout)
+        self.assertNotIn("falling back", proc.stderr)
+        self.assertEqual(proc.security_log.split(), [NEW_KEYCHAIN])
+        self.assertNotIn(custom, proc.security_log)
+        self._assert_no_secret_leak(proc)
+
+    def test_keychain_item_env_does_not_block_legacy_fallback(self):
         custom = "mailroom.custom.test-item"
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(
@@ -1372,27 +1402,15 @@ class KeychainFallbackTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("password_loaded=1", proc.stdout)
-        self.assertIn("password_sha256=%s" % _sha256(CUSTOM_PW), proc.stdout)
-        self.assertNotIn("falling back", proc.stderr)
-        self.assertEqual(proc.security_log.split(), [custom])
-        self._assert_no_secret_leak(proc)
-
-    def test_override_miss_does_not_use_legacy(self):
-        custom = "mailroom.custom.test-item"
-        with tempfile.TemporaryDirectory() as tmp:
-            proc = self._run(
-                Path(tmp),
-                items={LEGACY_KEYCHAIN: OLD_PW},
-                extra_env={"MAILROOM_KEYCHAIN_ITEM": custom},
-            )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("password_loaded=0", proc.stdout)
-        self.assertNotIn("falling back", proc.stderr)
-        self.assertEqual(proc.security_log.split(), [custom])
+        self.assertIn("password_sha256=%s" % _sha256(OLD_PW), proc.stdout)
+        self.assertNotIn(_sha256(CUSTOM_PW), proc.stdout)
+        self.assertIn("falling back", proc.stderr)
+        self.assertEqual(proc.security_log.split(), [NEW_KEYCHAIN, LEGACY_KEYCHAIN])
+        self.assertNotIn(custom, proc.security_log)
         self._assert_no_secret_leak(proc)
 
     def test_explicit_new_default_env_still_falls_back(self):
-        """Plist sets MAILROOM_KEYCHAIN_ITEM to the new default; fallback still applies."""
+        """An env value equal to the pin is ignored; legacy fallback still applies."""
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(
                 Path(tmp),
@@ -1452,7 +1470,8 @@ class KeychainFallbackTests(unittest.TestCase):
         self.assertIn("password_loaded=1", proc.stdout)
         self._assert_no_secret_leak(proc)
 
-    def test_preset_env_skips_keychain(self):
+    def test_preset_env_password_ignored_uses_stub(self):
+        """A preset IMAP_APP_PASSWORD is ignored; the stub value is used."""
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(
                 Path(tmp),
@@ -1461,39 +1480,52 @@ class KeychainFallbackTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("password_loaded=1", proc.stdout)
-        self.assertIn("password_sha256=%s" % _sha256(PRESET_PW), proc.stdout)
-        self.assertEqual(proc.security_log, "")
+        self.assertIn("password_sha256=%s" % _sha256(NEW_PW), proc.stdout)
+        self.assertNotIn(_sha256(PRESET_PW), proc.stdout)
+        self.assertEqual(proc.security_log.split(), [NEW_KEYCHAIN])
+        self._assert_no_secret_leak(proc)
+
+    def test_preset_env_password_ignored_when_keychain_misses(self):
+        """A preset password is not kept when the Keychain read misses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                Path(tmp),
+                items={},
+                extra_env={"IMAP_APP_PASSWORD": PRESET_PW},
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("password_loaded=0", proc.stdout)
+        self.assertNotIn(_sha256(PRESET_PW), proc.stdout)
+        self.assertEqual(proc.security_log.split(), [NEW_KEYCHAIN, LEGACY_KEYCHAIN])
         self._assert_no_secret_leak(proc)
 
     def test_security_bin_env_does_not_change_binary(self):
         """Pinned SECURITY_BIN ignores MAILROOM_SECURITY_BIN.
 
         The real wrapper line is SECURITY_BIN="/usr/bin/security".
-        This run executes a copy whose SECURITY_BIN line points at the stub.
-        The decoy at /tmp/fake is executable; an honored override would
-        run it. Primary item, then the legacy item.
+        This run executes a copy whose SECURITY_BIN line points at the
+        stub on PATH in a per-test temp dir. The decoy lives in that
+        same temp dir; an honored override would run it. Primary item,
+        then the legacy item.
         """
         self._assert_real_wrapper_pins_security_bin()
-        decoy = Path("/tmp/fake")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            decoy = root / "decoy-security"
             argv_log = root / "argv.log"
             decoy_log = root / "decoy.log"
             decoy_log.write_text("", encoding="utf-8")
             _write_executable(decoy, DECOY_SECURITY)
-            try:
-                proc = self._run(
-                    root,
-                    items={LEGACY_KEYCHAIN: OLD_PW},
-                    extra_env={
-                        "MAILROOM_SECURITY_BIN": "/tmp/fake",
-                        "MAILROOM_FAKE_SECURITY_ARGV_LOG": str(argv_log),
-                        "MAILROOM_DECOY_LOG": str(decoy_log),
-                    },
-                )
-                decoy_text = decoy_log.read_text(encoding="utf-8")
-            finally:
-                decoy.unlink(missing_ok=True)
+            proc = self._run(
+                root,
+                items={LEGACY_KEYCHAIN: OLD_PW},
+                extra_env={
+                    "MAILROOM_SECURITY_BIN": str(decoy),
+                    "MAILROOM_FAKE_SECURITY_ARGV_LOG": str(argv_log),
+                    "MAILROOM_DECOY_LOG": str(decoy_log),
+                },
+            )
+            decoy_text = decoy_log.read_text(encoding="utf-8")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(
             proc.argv_log.splitlines(),
@@ -1509,7 +1541,7 @@ class KeychainFallbackTests(unittest.TestCase):
         )
         self.assertEqual(decoy_text, "")
         self.assertNotIn("DECOY_SHOULD_NOT_RUN", proc.stdout)
-        self.assertNotIn("/tmp/fake", proc.argv_log)
+        self.assertNotIn(str(decoy), proc.argv_log)
         self.assertIn("password_loaded=1", proc.stdout)
         self.assertIn("password_sha256=%s" % _sha256(OLD_PW), proc.stdout)
         self.assertIn("falling back", proc.stderr)
