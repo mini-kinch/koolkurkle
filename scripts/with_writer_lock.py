@@ -236,6 +236,23 @@ def release_writer_lock(held: HeldLock) -> None:
         held.fd.close()
 
 
+def _drop_search_resume_plus_26() -> None:
+    # Isolated hook for the search-resume watchdog (PR #89).
+    # Rebase this block after PR #90 (identity handoff) merges.
+    # No-op unless MAILROOM_SEARCH_RESUME_RUN_ID is set.
+    run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
+    if not run_id:
+        return
+    try:
+        import search_resume_watchdog
+
+        search_resume_watchdog.drop_early_deadline(run_id)
+    except Exception as exc:
+        raise WriterLockError(
+            "search resume +26 drop failed; child not started: %s" % exc
+        ) from exc
+
+
 def run_with_lock(
     purpose: str,
     cmd: list[str],
@@ -259,6 +276,9 @@ def run_with_lock(
         now=now,
     )
     try:
+        # BEGIN search-resume +26 drop (PR #89 on PR #90).
+        _drop_search_resume_plus_26()
+        # END search-resume +26 drop.
         token = held.info.writer_token
         if not token:
             raise WriterLockError("writer lock token missing")

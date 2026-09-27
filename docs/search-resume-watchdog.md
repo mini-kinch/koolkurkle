@@ -2,25 +2,27 @@
 
 FAIL-OPEN FOR SEARCH AVAILABILITY, FAIL-CLOSED FOR THE SOR.
 
-CODE AND PLIST TEMPLATE ONLY, NO INSTALL. This checkout does not copy
-files into `$HOME`, does not write `~/Library/LaunchAgents`, and does
-not call `launchctl bootstrap`. Installing the template is a separate
-user approval.
+CODE AND PLIST TEMPLATE ONLY, NO INSTALL. CODE AND TEMPLATE ONLY, NO INSTALL.
+This checkout does not copy files into `$HOME`, does not write
+`~/Library/LaunchAgents`, and does not call `launchctl bootstrap`.
+Installing the template is a separate user approval.
 
 `ask-mail-serve` is the Mini's local search service, LaunchAgent label
-`com.mailroom.ask-mail-serve`. During a live L1 window, step S1 boots
-that job out and step S2 bootstraps it back. If the operator session
-dies between those steps, search can stay off. Waking an agent is not
-a control. This watchdog runs on the Mini.
+`com.mailroom.ask-mail-serve`. During a live L1 window, S1 takes that
+job out of the `gui/$UID` domain and S2 loads it again. If the operator
+session dies between those steps, search can stay off. Waking an agent
+is not a control. This watchdog runs on the Mini.
 
 Do not add `KeepAlive` to `ask-mail-serve`. That fights S1. This
 change does not edit the ask-mail-serve plist, any other LaunchAgent
-plist, an install script, or the daily job.
+plist, an install script, or the daily job. The watchdog does not
+assume a daily-job clock time.
 
 ## Deadline file
 
 S1 writes `$HOME/MailArchive/state/search_resume_after.epoch` (override
-`SEARCH_RESUME_DEADLINE_FILE`). The body is three lines:
+`SEARCH_RESUME_DEADLINE_FILE`) through the helper below. The body S1
+writes is three lines:
 
 ```text
 run_id=<run-id>
@@ -29,36 +31,100 @@ deadline_50=<unix epoch seconds>
 ```
 
 `deadline_26` is the write clock plus 26 minutes. `deadline_50` is the
-write clock plus 50 minutes. Both are the L1 checkpoints. The watchdog
-may restore once `now` is at or past the earlier of the two, which is
-the +26 mark when S1 used the helper below. It then retries every
-`StartInterval` (60 seconds), so the +50 mark is covered if the writer
-lock was still held at +26. S2 deletes the file after search is loaded.
-The watchdog does not delete it.
+write clock plus 50 minutes. While both are present, the watchdog may
+restore once `now` is at or past the earlier of the two. After `+26`
+is dropped, the file keeps only `+50` as the earliest restore:
+
+```text
+run_id=<run-id>
+deadline_50=<unix epoch seconds>
+```
+
+The pass then waits until `deadline_50`. It retries every
+`StartInterval` (60 seconds). S2 deletes the file after search is
+loaded. The watchdog does not delete it.
 
 No file: the pass does nothing and writes no log line. A malformed
 file: one log line, `search resume deadline file malformed`, and no
 `launchctl` call.
 
-## S1 write and S2 delete
+## +26 drop
 
-L1 procedure files are not edited here. S1 and S2 call these helpers.
+`+26` means the run was never confirmed. Once the run is committed,
+that checkpoint is moot. Drop it on the first successful writer-lock
+acquire for that run-id. Do not slide the deadline on each phase. Do
+not hold the lock across A2 and A3.
 
-S1, after `launchctl bootout` of `com.mailroom.ask-mail-serve`:
+`scripts/with_writer_lock.py` does the drop. The hook is the delimited
+block immediately after a successful acquire. It runs only when
+`MAILROOM_SEARCH_RESUME_RUN_ID` is set to the run-id. With that
+variable unset, the wrapper behaves as it does today.
+
+The drop calls `drop_early_deadline(run_id)` in
+`scripts/search_resume_watchdog.py`. That rewrites the deadline file
+atomically: a temp file in the same directory, `fsync`, then
+`os.replace`. The rewrite leaves `deadline_50` and removes
+`deadline_26`, so `+50` is the earliest restore. It is idempotent.
+It refuses a missing file or a mismatched run-id and does not change
+the file in those cases.
+
+If the variable is set and the drop fails, the wrapper does not run
+the child. It releases the lock and exits non-zero. That is
+fail-closed for the SoR. The message includes
+`search resume +26 drop failed; child not started`.
+
+Fallback, in the same scripted breath as the writer start:
+
+```zsh
+/usr/bin/python3 "$HOME/MailArchive/scripts/search_resume_watchdog.py" \
+  arm --run-id <run-id>
+```
+
+`arm --run-id` is that same drop. It is not a card to walk away from.
+
+PR #89 must be rebased after PR #90 merges. PR #90 changes
+`scripts/with_writer_lock.py` (identity handoff). The hook is a small
+delimited block so that rebase stays small.
+
+## +50 backstop
+
+`+50` stays after the drop. It is the committed-run backstop. It is
+not a writer kill, and it does not mean the writer must finish by
+`+50`.
+
+While the writer lock is held, a tick at `+50` is a no-op: search
+stays off, and the pass logs the held line. The watchdog restores on
+the first tick after the lock is free. It never kills the writer.
+S2 is what brings search back on a clean finish before `+50`. `+50`
+fires only if S2 never happens.
+
+## S1 commands
+
+TODO: the exact S1 command list comes from CoS before install. It is
+not specified in this document. Do not invent it. Restore does not add
+an enable subcommand unless that list shows S1 disabled the service.
+
+The helpers this script provides, which S1 and S2 may call, are:
 
 ```zsh
 /usr/bin/python3 "$HOME/MailArchive/scripts/search_resume_watchdog.py" \
   write --run-id <run-id>
 ```
 
-S2, after search is loaded:
-
 ```zsh
 /usr/bin/python3 "$HOME/MailArchive/scripts/search_resume_watchdog.py" clear
 ```
 
 `<run-id>` is a short id (`A-Za-z0-9`, `.`, `_`, `-`). It is not a
-lock token. The helpers read and write only the deadline file.
+lock token.
+
+## AR-R
+
+TODO: the AR-R step order, with the restore step marked, comes from
+CoS before install. It is not specified in this document. Do not
+invent it. The same class of bug applies: do not restore search while
+a later write step is still pending. The lock-held guard is not enough
+for a free-lock gap between two writes.
 
 ## What each fire does
 
@@ -68,59 +134,91 @@ runs `watch` on `StartInterval` 60. `RunAtLoad` is false. There is no
 
 Restore happens only when all three are true:
 
-1. `now` is at or past the earlier deadline.
-2. `launchctl print gui/$UID/com.mailroom.ask-mail-serve` exits non-zero
-   (the job is not loaded). Exit 0 means it is loaded, and the pass
-   does nothing.
-3. The writer lock is not held.
+1. `now` is at or past the earliest deadline (`+26` until it is
+   dropped, then `+50`).
+2. `ask-mail-serve` is not loaded, using the rule below.
+3. The writer lock is not held, using the detector table below.
 
-`launchctl kickstart` does not start a job that S1 has booted out. The
-job is gone from the gui domain, so kickstart has nothing to start.
-The restore that works on macOS is bootstrap of the installed plist,
-then kickstart without `-k`:
+Before the deadline the pass does not call `launchctl` or `lsof`.
+
+### Restore steps
+
+The domain is `gui/$UID`. Not the user domain. One bootstrap attempt
+per tick. No `-k`. No retry. No enable subcommand.
+
+1. `launchctl print gui/$UID/com.mailroom.ask-mail-serve`.
+2. Not loaded only when that command exits 113, or its output contains
+   `Could not find service`. Exit 0 means the job is loaded: the pass
+   does nothing and writes no log line. Any other print result is
+   logged (`search resume launchctl print skipped rc=<rc>`) and the
+   tick stops.
+3. Read the writer lock as in the detector table. A detection fault
+   logs the loud line and stops. A held lock logs the held line and
+   stops.
+4. `launchctl bootstrap gui/$UID` with the installed plist
+   (`SEARCH_RESUME_PLIST`, default
+   `$HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist`).
+5. If bootstrap does not return 0, print once. If that print exits 0,
+   the job is already loaded (the S2 race): log `search already loaded`
+   as info, not as an error, and stop. Do not bootstrap again. Do not
+   kickstart.
+6. If bootstrap returns 0, `launchctl kickstart gui/$UID/com.mailroom.ask-mail-serve`
+   with no `-k`.
+7. If kickstart says not found (exit 113, or output containing
+   `Could not find service`), print once. If that print exits 0, this
+   is a success no-op: `RunAtLoad` already started the job. Log
+   `search already loaded` as info. Do not bootstrap again.
 
 ```zsh
+launchctl print "gui/$UID/com.mailroom.ask-mail-serve"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist"
 launchctl kickstart "gui/$UID/com.mailroom.ask-mail-serve"
 ```
 
 `SEARCH_RESUME_PLIST` overrides the installed plist path. The default
-is `$HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist`, the
-rendered agent, not the repo template. Bootstrap loads that plist back
-into `gui/$UID`. The checked-in ask-mail-serve template has
-`RunAtLoad` true, so bootstrap may already start it. Kickstart is
-still issued, without `-k`. `-k` would kill the process bootstrap just
-started. Without `-k`, kickstart starts the job if it is loaded and
-not running, and it does not kill a running instance. If bootstrap
-fails, kickstart is not called; the next interval retries.
-
-Before the deadline the pass does not call `launchctl` or `lsof`.
+is the rendered agent, not the repo template. The checked-in
+ask-mail-serve template has `RunAtLoad` true, so bootstrap may already
+start it. Kickstart without `-k` starts the job when it is loaded and
+not running, and it does not kill a running instance.
 
 ## Writer lock, read-only
 
-Detection does not take `mailroom.write.lock`. There is no flock
-probe. The pass runs `lsof -t` on the lock path and, when the file
-records a pid, checks that pid with signal 0 (`os.kill(pid, 0)`),
-which does not deliver a signal and does not lock anything.
+Detection does not take `mailroom.write.lock`. There is no exclusive
+probe, including a non-blocking one. The pass uses read-only `lsof -t`
+on the lock path and `kill -0` (`os.kill(pid, 0)`) on the recorded
+pid. Signal 0 does not deliver a signal and does not lock anything.
 
-The lock counts as free only when `lsof` shows no holder and the
-recorded pid is not live (or the lock file is absent and `lsof` is
-clear). `lsof` exit 1 with empty output means no holder. That is the
-normal macOS result when nothing has the file open.
+A live recorded pid is held on its own. `lsof` is how a dead recorded
+pid, or a missing lock file, is told apart from a holder.
 
-The lock counts as held when any of these are true:
+| What you see | Treat as | Why |
+|---|---|---|
+| Live recorded pid (`kill -0` succeeds, including permission denied) | held | writer present |
+| Missing lock file, and `lsof` shows no holder | free | nothing is holding the path |
+| Recorded pid is dead, and `lsof` shows no holder | free | crashed wrapper; do not park search off |
+| `lsof` lists a pid | held | a process has the lock path open |
+| `lsof`, parse, or tool failure | held (detection fault) | doubt; do not start search on a possible writer |
 
-- `lsof` lists a pid
-- the recorded pid is live (signal 0 succeeds, including `EPERM`)
-- `lsof` or the pid check errors, times out, or returns something
-  that is not a pid list
-- the lock file exists but cannot be read, or has no usable pid
+`lsof` exit 1 with empty output means no holder. That is the normal
+macOS result when nothing has the file open. Non-pid output, a
+non-zero `lsof` status other than that empty exit 1, a timeout, an
+unreadable lock file, or a lock file with no usable pid is a detection
+fault.
 
-That last group is fail-closed for the SoR. The pass then does not
-bootstrap search.
+A detection fault does not restore. Every such tick appends and writes
+to stderr:
+
+```text
+detection-fault, search left off
+```
+
+There is no "start anyway after N faults" escape. The next 60-second
+tick tries again. A human S2 can also bring search back. Leaving
+search off is fail-closed for the SoR and fail-open for availability.
 
 If the deadline has passed, search is not loaded, and the lock is
-held, the pass does not restore. It appends and writes to stderr:
+held by a live pid or an `lsof` holder, the pass does not restore. It
+appends and writes to stderr:
 
 ```text
 search still off: writer lock held pid=<pid> purpose=<purpose>
@@ -128,17 +226,19 @@ search still off: writer lock held pid=<pid> purpose=<purpose>
 
 The next interval tries again. This process does not kill the writer.
 
-A `token=` field in the lock file is ignored. It is never written to
-the log or to stderr. The log line is built only from the pid and the
-purpose.
+Lock-file keys `token`, `lock_token`, and `writer_token` are ignored.
+They are never written to the log or to stderr. The held line is built
+only from the pid and the purpose.
 
 ## What it never does
 
 - It never opens a database and never writes the SoR.
 - It never takes `mailroom.write.lock` and never opens that file for
   writing.
-- It never calls `launchctl bootout`.
-- It never edits the ask-mail-serve plist.
+- It never kills a writer.
+- It never calls `launchctl` with `-k`, and it never uses the user
+  domain.
+- It never adds `KeepAlive` to `ask-mail-serve`.
 
 The log file is `$HOME/MailArchive/logs/search_resume_watchdog.log`
 (`SEARCH_RESUME_LOG`). Launchd's own stdout/stderr for the watchdog
@@ -148,9 +248,10 @@ not set it.
 
 ## Install is separate
 
-When an operator chooses to install, the steps are outside this
-change: copy `scripts/search_resume_watchdog.py` to
-`$HOME/MailArchive/scripts/`, substitute `__HOME__` in the template,
-copy the result to `$HOME/Library/LaunchAgents/`, and bootstrap label
+CODE AND TEMPLATE ONLY, NO INSTALL. When an operator chooses to
+install, the steps are outside this change: copy
+`scripts/search_resume_watchdog.py` to `$HOME/MailArchive/scripts/`,
+substitute `__HOME__` in the template, copy the result to
+`$HOME/Library/LaunchAgents/`, and bootstrap label
 `com.mailroom.search-resume-watchdog`. This repository change does not
 do that.

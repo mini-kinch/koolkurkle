@@ -3,31 +3,41 @@
 
 FAIL-OPEN FOR SEARCH AVAILABILITY, FAIL-CLOSED FOR THE SOR.
 
-Mini-local fallback for an L1 window. S1 boots search out and writes a
-deadline file. S2 deletes that file after search is loaded again. If the
-operator session dies in between, this process is what puts search back.
-It is not KeepAlive on ask-mail-serve.
+Mini-local fallback for an L1 window. S1 takes search out of the gui
+domain and writes a deadline file. S2 deletes that file after search is
+loaded again. If the operator session dies in between, this process is
+what puts search back. It is not KeepAlive on ask-mail-serve.
+
+The exact S1 command list and the AR-R step order are not in this
+file. Those come from CoS before install.
 
 CODE AND PLIST TEMPLATE ONLY, NO INSTALL. The LaunchAgent template is
 launchd/com.mailroom.search-resume-watchdog.plist.template. Nothing in
 this file bootstraps that template.
 
 On each fire the watchdog restores search only when all of these hold:
-now is at or past the earlier deadline, ask-mail-serve is not loaded,
-and the writer lock is not held. A booted-out job is not in the gui
-domain, so kickstart alone cannot start it. The restore is:
+now is at or past the earliest deadline, ask-mail-serve is not loaded,
+and the writer lock is not held. A job that is gone from the gui domain
+cannot be started by kickstart alone. The restore is:
 
+  launchctl print gui/$UID/com.mailroom.ask-mail-serve
   launchctl bootstrap gui/$UID $SEARCH_RESUME_PLIST
   launchctl kickstart gui/$UID/com.mailroom.ask-mail-serve
 
-kickstart is issued without -k after a successful bootstrap. -k would
-kill a process RunAtLoad already started. kickstart without -k starts
-the job when it is loaded but not running.
+Not loaded means print exits 113, or its output contains
+"Could not find service". Any other print result is logged and that
+tick is skipped. Exit 0 means the job is loaded. Kickstart is issued
+without -k, and only after bootstrap returns 0. There is at most one
+bootstrap attempt per tick. The domain is gui/$UID.
 
-The writer lock is observed read-only. This process does not take the
-lock (no exclusive probe, including a non-blocking one), does not open
-a database, and does not write the SoR. If lock detection errors or is
-ambiguous, the lock is treated as held.
+The writer lock is observed read-only with lsof and signal 0. This
+process does not take the lock (no exclusive probe, including a
+non-blocking one), does not open a database, and does not write the
+SoR. A detection fault is treated as held and logs
+"detection-fault, search left off" on every such tick.
+
++26 is dropped by drop_early_deadline on the first successful
+writer-lock acquire for MAILROOM_SEARCH_RESUME_RUN_ID. +50 stays.
 
 Defaults (override with the env vars):
   SEARCH_RESUME_DEADLINE_FILE  $HOME/MailArchive/state/search_resume_after.epoch
@@ -35,8 +45,10 @@ Defaults (override with the env vars):
   SEARCH_RESUME_PLIST          $HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist
   MAILROOM_WRITE_LOCK          $HOME/MailArchive/mailroom.write.lock
 
-S1 write and S2 delete:
+Commands:
+  search_resume_watchdog.py watch
   search_resume_watchdog.py write --run-id <run-id>
+  search_resume_watchdog.py arm --run-id <run-id>
   search_resume_watchdog.py clear
 
 Docs: docs/search-resume-watchdog.md
@@ -56,20 +68,33 @@ from typing import Callable, Optional, Sequence, Tuple
 LABEL = "com.mailroom.ask-mail-serve"
 OFFSET_26 = 26 * 60
 OFFSET_50 = 50 * 60
+NOT_LOADED_RC = 113
+NOT_LOADED_TEXT = "Could not find service"
 LOUD = "search still off: writer lock held pid=%s purpose=%s"
+DETECTION_FAULT = "detection-fault, search left off"
+ALREADY_LOADED = "search already loaded"
 MALFORMED = "search resume deadline file malformed"
+RUN_ID_ENV = "MAILROOM_SEARCH_RESUME_RUN_ID"
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TOKEN_RE = re.compile(r"(?i)\btoken=\S+")
 TOKEN_KEYS = frozenset(("token", "lock_token", "writer_token"))
 USAGE = (
     "usage: search_resume_watchdog.py watch\n"
     "       search_resume_watchdog.py write --run-id <run-id> [--now <epoch>]\n"
+    "       search_resume_watchdog.py arm --run-id <run-id>\n"
     "       search_resume_watchdog.py clear\n"
 )
 
 RunResult = Tuple[int, str, str]
 Runner = Callable[[Sequence[str]], RunResult]
-Deadline = Tuple[str, int, int]
+# run_id, deadline_26 or None once +26 has been dropped, deadline_50
+Deadline = Tuple[str, Optional[int], int]
+# free, held (a writer), or fault (detection failed; treat as held)
+LockState = Tuple[str, str, str]
+
+
+class DeadlineRefusal(Exception):
+    """drop_early_deadline refused. The deadline file is unchanged."""
 
 
 def _expand(raw: str) -> Path:
@@ -121,6 +146,14 @@ def _uid() -> str:
     return str(os.getuid())
 
 
+def _gui_domain(uid: str) -> str:
+    return "gui/%s" % (uid,)
+
+
+def _gui_target(uid: str) -> str:
+    return "gui/%s/%s" % (uid, LABEL)
+
+
 def _clock() -> int:
     raw = os.environ.get("SEARCH_RESUME_NOW", "").strip()
     if not raw:
@@ -160,6 +193,16 @@ def _run(argv: Sequence[str]) -> RunResult:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def _not_loaded_signal(rc: int, stdout: str, stderr: str) -> bool:
+    """True only for the not-loaded signals. Exit 0 is loaded."""
+    if rc == 0:
+        return False
+    if rc == NOT_LOADED_RC:
+        return True
+    blob = "%s\n%s" % (stdout or "", stderr or "")
+    return NOT_LOADED_TEXT in blob
+
+
 def render_deadline(run_id: str, now: int) -> str:
     if not RUN_ID_RE.fullmatch(run_id):
         raise ValueError("run_id")
@@ -170,6 +213,16 @@ def render_deadline(run_id: str, now: int) -> str:
         now + OFFSET_26,
         now + OFFSET_50,
     )
+
+
+def _atomic_write(path: Path, payload: str) -> None:
+    """Temp file in the same directory, fsync, then os.replace."""
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
 
 
 def write_deadline(path: Path, run_id: str, now: int) -> None:
@@ -204,14 +257,31 @@ def parse_deadline(text: str) -> Optional[Deadline]:
     run_id = fields.get("run_id", "")
     if not RUN_ID_RE.fullmatch(run_id):
         return None
+    if "deadline_50" not in fields:
+        return None
+    try:
+        deadline_50 = int(fields["deadline_50"])
+    except (TypeError, ValueError):
+        return None
+    if deadline_50 < 0:
+        return None
+    if "deadline_26" not in fields:
+        return run_id, None, deadline_50
     try:
         deadline_26 = int(fields["deadline_26"])
-        deadline_50 = int(fields["deadline_50"])
-    except (KeyError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
-    if deadline_26 < 0 or deadline_50 < 0:
+    if deadline_26 < 0:
         return None
     return run_id, deadline_26, deadline_50
+
+
+def earliest_deadline(parsed: Deadline) -> int:
+    """The soonest instant restore may start. After +26 is dropped, +50."""
+    _run_id, deadline_26, deadline_50 = parsed
+    if deadline_26 is None:
+        return deadline_50
+    return min(deadline_26, deadline_50)
 
 
 def load_deadline(path: Path) -> Tuple[str, Optional[Deadline]]:
@@ -225,6 +295,34 @@ def load_deadline(path: Path) -> Tuple[str, Optional[Deadline]]:
     if parsed is None:
         return "malformed", None
     return "ok", parsed
+
+
+def drop_early_deadline(run_id: str, path: Optional[Path] = None) -> None:
+    """Drop +26 so the earliest restore is +50.
+
+    Atomic rewrite in the same directory. Idempotent when +26 is already
+    gone. Refuses a missing file or a mismatched run-id and leaves the
+    file untouched in those cases. Does not take the writer lock.
+    """
+    if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+        raise DeadlineRefusal("run-id mismatch")
+    target = deadline_path() if path is None else path
+    if not target.is_file():
+        raise DeadlineRefusal("deadline file missing")
+    status, parsed = load_deadline(target)
+    if status == "absent":
+        raise DeadlineRefusal("deadline file missing")
+    if status != "ok" or parsed is None:
+        raise DeadlineRefusal("deadline file refused")
+    file_run, deadline_26, deadline_50 = parsed
+    if file_run != run_id:
+        raise DeadlineRefusal("run-id mismatch")
+    if deadline_26 is None:
+        return
+    _atomic_write(
+        target,
+        "run_id=%s\ndeadline_50=%d\n" % (file_run, deadline_50),
+    )
 
 
 def _parse_lock_text(text: str) -> Tuple[Optional[int], str, bool]:
@@ -313,48 +411,60 @@ def _first_pid(stdout: str) -> str:
     return "?"
 
 
-def lock_is_held(path: Path, runner: Runner) -> Tuple[bool, str, str]:
-    """Read-only holder check. Errors and ambiguity count as held.
+def _lsof_state(
+    path: Path,
+    runner: Runner,
+    pid_text: str,
+    purpose_text: str,
+    path_exists: bool,
+) -> LockState:
+    try:
+        rc, out, err = runner(["lsof", "-t", str(path)])
+    except Exception:
+        return "fault", pid_text, purpose_text
+    if not isinstance(rc, int):
+        return "fault", pid_text, purpose_text
+    if rc < 0:
+        return "fault", pid_text, purpose_text
+    state = _classify_lsof(rc, out or "", err or "", path_exists)
+    if state == "error":
+        return "fault", pid_text, purpose_text
+    if state == "held":
+        if pid_text == "?":
+            pid_text = _first_pid(out or "")
+        return "held", pid_text, purpose_text
+    return "free", pid_text, purpose_text
 
-    Returns (held, pid_for_log, purpose_for_log). The pid and purpose
-    are display fields only. A token from the lock file is never included.
+
+def inspect_lock(path: Path, runner: Runner) -> LockState:
+    """Read-only holder check. Returns (state, pid_for_log, purpose_for_log).
+
+    state is 'free', 'held', or 'fault'. A fault is held for the restore
+    decision and is logged separately. Token fields are never returned.
+    A live recorded pid is held without requiring lsof. lsof distinguishes
+    a dead pid, and a missing file, from a real holder.
     """
     pid_text = "?"
     purpose_text = "?"
-    file_pid: Optional[int] = None
-    well = False
-    exists = False
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        text = None
+        return _lsof_state(path, runner, pid_text, purpose_text, False)
     except OSError:
-        return True, pid_text, purpose_text
-    else:
-        exists = True
-        file_pid, purpose, well = _parse_lock_text(text)
-        if purpose:
-            purpose_text = purpose
-        if file_pid is not None:
-            pid_text = str(file_pid)
-    rc, out, err = runner(["lsof", "-t", str(path)])
-    if rc < 0:
-        return True, pid_text, purpose_text
-    state = _classify_lsof(rc, out, err, exists)
-    if state == "error":
-        return True, pid_text, purpose_text
-    if state == "held":
-        if pid_text == "?":
-            pid_text = _first_pid(out)
-        return True, pid_text, purpose_text
-    if not exists:
-        return False, pid_text, purpose_text
+        return "fault", pid_text, purpose_text
+    file_pid, purpose, well = _parse_lock_text(text)
+    if purpose:
+        purpose_text = purpose
+    if file_pid is not None:
+        pid_text = str(file_pid)
     if not well or file_pid is None:
-        return True, pid_text, purpose_text
+        return "fault", pid_text, purpose_text
     live = _pid_is_live(file_pid)
-    if live is None or live:
-        return True, pid_text, purpose_text
-    return False, pid_text, purpose_text
+    if live is None:
+        return "fault", pid_text, purpose_text
+    if live:
+        return "held", pid_text, purpose_text
+    return _lsof_state(path, runner, pid_text, purpose_text, True)
 
 
 def watch_once(runner: Optional[Runner] = None, now: Optional[int] = None) -> int:
@@ -375,40 +485,61 @@ def watch_once(runner: Optional[Runner] = None, now: Optional[int] = None) -> in
     if status != "ok" or parsed is None:
         _log(destination, MALFORMED)
         return 0
-    _run_id, deadline_26, deadline_50 = parsed
-    # S1 records both checkpoints. The earlier one is when restore may start.
-    # The later one is the second checkpoint; the 60s interval covers it.
-    if clock < min(deadline_26, deadline_50):
+    # +26 is the uncommitted checkpoint. After it is dropped, +50 is earliest.
+    if clock < earliest_deadline(parsed):
         return 0
     uid = _uid()
-    target = "gui/%s/%s" % (uid, LABEL)
-    print_rc, _print_out, _print_err = run(["launchctl", "print", target])
+    target = _gui_target(uid)
+    print_rc, print_out, print_err = run(["launchctl", "print", target])
     if print_rc == 0:
         return 0
-    if print_rc < 0:
-        _log(destination, "search resume launchctl print failed")
+    if not _not_loaded_signal(print_rc, print_out, print_err):
+        _log(
+            destination,
+            "search resume launchctl print skipped rc=%s" % print_rc,
+        )
         return 0
-    held, pid_text, purpose_text = lock_is_held(lock_path(), run)
-    if held:
+    state, pid_text, purpose_text = inspect_lock(lock_path(), run)
+    if state == "fault":
+        # Loud on every such tick. Repeated faults do not start search.
+        _log(destination, DETECTION_FAULT, loud=True)
+        return 0
+    if state == "held":
         _log(destination, LOUD % (pid_text, purpose_text), loud=True)
         return 0
-    domain = "gui/%s" % (uid,)
     plist = str(installed_plist_path())
+    # At most one bootstrap per tick. Never -k. Never a second attempt.
     boot_rc, _boot_out, _boot_err = run(
-        ["launchctl", "bootstrap", domain, plist]
+        ["launchctl", "bootstrap", _gui_domain(uid), plist]
     )
     if boot_rc != 0:
+        # S2 may have loaded the job between the first print and bootstrap.
+        follow_rc, _follow_out, _follow_err = run(
+            ["launchctl", "print", target]
+        )
+        if follow_rc == 0:
+            _log(destination, ALREADY_LOADED)
+            return 0
         _log(destination, "search restore failed bootstrap rc=%s" % boot_rc)
         return 0
-    kick_rc, _kick_out, _kick_err = run(["launchctl", "kickstart", target])
+    kick_rc, kick_out, kick_err = run(["launchctl", "kickstart", target])
     if kick_rc != 0:
+        if _not_loaded_signal(kick_rc, kick_out, kick_err):
+            # RunAtLoad may already have started it. Do not bootstrap again.
+            follow_rc, _follow_out, _follow_err = run(
+                ["launchctl", "print", target]
+            )
+            if follow_rc == 0:
+                _log(destination, ALREADY_LOADED)
+                return 0
         _log(destination, "search restore failed kickstart rc=%s" % kick_rc)
         return 0
     _log(destination, "search restored")
     return 0
 
 
-def _cmd_write(args: Sequence[str]) -> int:
+def _take_run_id(args: Sequence[str], allow_now: bool) -> Tuple[int, str, str]:
+    """Return (status, run_id, now_raw). Status 0 is ok; 2 is usage."""
     run_id = ""
     now_raw = ""
     index = 0
@@ -419,13 +550,19 @@ def _cmd_write(args: Sequence[str]) -> int:
             run_id = items[index + 1]
             index += 2
             continue
-        if item == "--now" and index + 1 < len(items):
+        if allow_now and item == "--now" and index + 1 < len(items):
             now_raw = items[index + 1]
             index += 2
             continue
-        sys.stderr.write(USAGE)
-        return 2
+        return 2, "", ""
     if not run_id:
+        return 2, "", ""
+    return 0, run_id, now_raw
+
+
+def _cmd_write(args: Sequence[str]) -> int:
+    status, run_id, now_raw = _take_run_id(args, True)
+    if status != 0:
         sys.stderr.write(USAGE)
         return 2
     if now_raw:
@@ -443,6 +580,22 @@ def _cmd_write(args: Sequence[str]) -> int:
     return 0
 
 
+def _cmd_arm(args: Sequence[str]) -> int:
+    status, run_id, _now_raw = _take_run_id(args, False)
+    if status != 0:
+        sys.stderr.write(USAGE)
+        return 2
+    try:
+        drop_early_deadline(run_id)
+    except DeadlineRefusal as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    except OSError:
+        sys.stderr.write("error: deadline rewrite failed\n")
+        return 1
+    return 0
+
+
 def _cmd_clear() -> int:
     clear_deadline(deadline_path())
     return 0
@@ -457,6 +610,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return watch_once()
     if args[0] == "write":
         return _cmd_write(args[1:])
+    if args[0] == "arm":
+        return _cmd_arm(args[1:])
     if args[0] == "clear":
         if len(args) != 1:
             sys.stderr.write(USAGE)
