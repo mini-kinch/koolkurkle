@@ -1,5 +1,14 @@
 # Heavy follow-up — S1 command list and AR-R step order
 
+## Questions for Heavy
+
+1. Approve or veto change (a): the read-only `print-disabled` check before the bootout. A disabled job is a STOP with search left up, because neither S2 nor the watchdog can bootstrap it back without `enable`.
+2. Approve or veto change (b): write the deadline file before `launchctl bootout`, so a session that dies just after the bootout still leaves a file. The watchdog ignores that file while search is loaded.
+3. Approve or veto change (c): A2 step 3c requires at least 120 seconds left before `deadline_26`, which moves the latest D confirm from S+26 to about S+24.
+4. Approve or veto the explicit-run-id drop trigger. The only input is `MAILROOM_SEARCH_RESUME_RUN_ID`. It drops `+26` only when that value equals the deadline file's `run_id`. A bare acquire, including an in-window rehearsal with no run-id passed, does not drop. A mismatch warns on stderr (`search resume +26 not dropped: run-id mismatch`), leaves `d26_live=yes`, and does not block the child. The callers are A2 step 4 and AR-R step 5.
+5. Open from the conformance table: AR-R step 8 is `launchctl bootstrap` only. The watchdog still runs `launchctl kickstart` with no `-k` after bootstrap returns 0. Which restore stands when the operator session is already dead?
+6. Open from the conformance table: the wrapper accepts purpose `att0-restore`. `WRITER_PURPOSE_ALLOWLIST` does not. AR-R step 5's child makes no gate call. Should #90 add the exact string `att0-restore`, with no alias to `att0-migrate`?
+
 Date: 2026-09-27 22:27 UTC
 From: implementation pass on PR #89
 Audience: Grok Heavy
@@ -73,19 +82,19 @@ Risk if vetoed: D can be confirmed with under 120 seconds left before `+26`. A l
 
 ## 4. Conformance
 
-Checked against this branch. No verb, path, or file-format mismatch. No code change in this pass.
+Checked against this branch. No verb, path, or file-format mismatch. The `status` lines and the explicit-run-id drop match the cards below.
 
 | Fact | What this branch does |
 |---|---|
 | CLI `write --run-id` | `search_resume_watchdog.py write --run-id <run-id>` writes the file and exits 0. S1 uses `att0-L1-$STAMP`. AR-R step 2b uses `att0-L1-$STAMP-R` and overwrites the S1 file. An optional `--now <epoch>` exists for tests. S1 and AR-R do not pass it. |
 | CLI `clear` | `search_resume_watchdog.py clear` deletes the deadline file. A missing file is success and prints nothing. A STOP before S1's bootout uses this. AR-R step 10 uses this only after health 200. The watchdog never deletes the file. |
-| CLI `status` | `search_resume_watchdog.py status` prints four lines and exits 0. It does not write, open sqlite, or take a lock. |
+| CLI `status` | `search_resume_watchdog.py status` prints exactly one `key=value` per line, in order: `run_id`, `deadline_26` (epoch or `none`), `deadline_50`, `d26_live` (`yes` or `no`). No other text on those lines. A human summary may follow only on lines that contain no `=`. This build prints none. A missing file prints `status=missing` and exits non-zero. An unparseable file prints `status=unparseable` and exits non-zero. It does not print a token, write, open sqlite, or take a lock. |
 | Deadline path | Default `$HOME/MailArchive/state/search_resume_after.epoch`. Override `SEARCH_RESUME_DEADLINE_FILE`. Same path S1 cats after `write`. |
 | File format | `write` body is three lines: `run_id=<id>`, `deadline_26=<epoch>`, `deadline_50=<epoch>`, with `deadline_26` = now + 26 minutes and `deadline_50` = now + 50 minutes. After the `+26` drop the file is `run_id=` and `deadline_50=` only. |
 | Narrow not-loaded check | Not loaded only when `launchctl print` exits 113, or the output contains `Could not find service`. Exit 0 is loaded. Any other result is unclear: S1 prints `SEARCH_STATE_UNCLEAR`, and the watchdog logs `search resume launchctl print skipped rc=<rc>` and does not bootstrap. |
 | Bootstrap, no enable, no kickstart `-k` | The watchdog's bootstrap argv is `launchctl bootstrap gui/$UID <plist>`. There is no `enable`. Kickstart, when the watchdog issues it, is `launchctl kickstart gui/$UID/com.mailroom.ask-mail-serve` with no `-k`, and only after bootstrap returns 0. See the open question: AR-R step 8 itself does not kickstart. |
-| `+26` drop on the first `att0-restore` acquire for the `-R` run-id | The wrapper drops on the first successful acquire whose `MAILROOM_SEARCH_RESUME_RUN_ID` equals the `run_id` in the file. AR-R must export that variable as `att0-L1-$STAMP-R` before `with_writer_lock.py --purpose att0-restore`. Purpose alone does not select the run-id. Unset does not drop. A mismatch refuses the child and leaves the file unchanged. The wrapper accepts purpose `att0-restore`. The gate allowlist still does not. Step 5's child makes no gate call, so that allowlist does not block the child. The gap remains for any later opener that presents the lock token to the gate. |
-| Step 5a served by `status` | Yes. After a successful drop, `status` prints `deadline_26=absent` and `plus_26_live=no` and exits 0. If `+26` is still live it still exits 0 and prints `plus_26_live=yes`. That matches "logged, not a STOP": the operator logs the four lines and does not treat a live `+26` as a failed command. A missing file prints `deadline file missing` and exits non-zero. An unparseable file prints `deadline file unreadable` and exits non-zero. |
+| `+26` drop on the first `att0-restore` acquire for the `-R` run-id | The only input is `MAILROOM_SEARCH_RESUME_RUN_ID`. AR-R step 5 and A2 step 4 export it. AR-R sets it to `att0-L1-$STAMP-R` before `with_writer_lock.py --purpose att0-restore`. The wrapper does not derive a run-id from the deadline file and does not drop on a bare acquire. A match drops `+26`. A mismatch warns and leaves `d26_live=yes` and still runs the child. The wrapper accepts purpose `att0-restore`. The gate allowlist still does not. Step 5's child makes no gate call, so that allowlist does not block the child. The gap remains for any later opener that presents the lock token to the gate. |
+| Step 5a served by `status` | Yes. Grep the fixed lines. After a successful drop, `deadline_26=none` and `d26_live=no`, and the command exits 0. If `+26` is still live it still exits 0 and prints `d26_live=yes`. That is logged, not a STOP. A missing file prints `status=missing` and exits non-zero. An unparseable file prints `status=unparseable` and exits non-zero. |
 
 Sample after step 2b, before the drop (epochs are illustrative):
 
@@ -93,16 +102,16 @@ Sample after step 2b, before the drop (epochs are illustrative):
 run_id=att0-L1-EXAMPLE-R
 deadline_26=100
 deadline_50=200
-plus_26_live=yes
+d26_live=yes
 ```
 
 Sample for step 5a after the drop:
 
 ```text
 run_id=att0-L1-EXAMPLE-R
-deadline_26=absent
+deadline_26=none
 deadline_50=200
-plus_26_live=no
+d26_live=no
 ```
 
 The watchdog ignores a deadline file while search is loaded: `launchctl print` exit 0 returns immediately, with no log line and no bootstrap. That is the behavior change (b) relies on.
@@ -116,3 +125,17 @@ AR-R step 8 restores search with `launchctl bootstrap` only. No kickstart, and n
 Heavy should say which restore stands when the operator session is already dead: keep the watchdog kickstart (no `-k`), or make the dead-session path match step 8 (bootstrap only).
 
 The watchdog does not check health. Step 8's "bootstrap failed, then narrow check shows loaded, and health is 200" success rule, and step 9's health 200, are operator checks. They are not a second watchdog verb.
+
+## Facts Heavy asked for before S1
+
+Presented from the operator notes. Not redesigned here.
+
+(a) The live `--db` is `$HOME/MailArchive/mailroom.sqlite`, the same as the installed daily job's `MAILROOM_DB`. That was verified read-only from the installed plist on 2026-09-27.
+
+(b) No operator card uses an alias path. A new step 1c STOPs unless the path is a regular file (not a symlink) with link count 1 and a realpath ending in `/MailArchive/mailroom.sqlite`.
+
+(c) A2 and A3 run through `with_writer_lock.py` with purposes `att0-migrate` (A2) and `att0 meta fill` (A3), plus `--allow-mailroom-sqlite`.
+
+(d) A card defect was fixed: A3 had used purpose `att0-fill`, which is not in `WRITER_PURPOSE_ALLOWLIST`. It now uses `att0 meta fill`.
+
+(b) is the operator-side mitigation for the symlink-alias fail-open in the PR #90 R2 narrative, `docs/heavy/20260927-2207-pr90-caller-live-only-guards.md` on the #90 branch. Section 3, direction 1: a symlink whose own name is not `mailroom.sqlite` and whose target is `mailroom.sqlite` passes the basename guards, and `is_live_sor()` is true. Step 1c refuses that path before the write. This note does not change those guards.

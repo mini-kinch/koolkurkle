@@ -57,28 +57,38 @@ slide the deadline on each phase. Do not hold the lock across A2
 and A3.
 
 Caller input: `MAILROOM_SEARCH_RESUME_RUN_ID`. That is the only extra
-input. Set it to the `run_id` line in the deadline file. There is no
-second argument. If the variable is unset, the wrapper does not drop.
+input. There is no second argument. The callers are A2 step 4 and
+AR-R step 5. Set it to the `run_id` line in the deadline file. The
+wrapper never reads a run-id out of the deadline file on its own, and
+it never drops on a bare acquire. An in-window rehearsal acquire under
+the same wrapper, with this variable unset, does not drop.
 
 `scripts/with_writer_lock.py` does the drop. The hook is the delimited
 block immediately after a successful acquire, before the child and
 before the identity-token handoff. The first successful acquire whose
-`MAILROOM_SEARCH_RESUME_RUN_ID` matches the file drops `+26`. A later
-acquire with the same run-id is a no-op drop. A value that does not
-match the file refuses the child and leaves the file unchanged.
+`MAILROOM_SEARCH_RESUME_RUN_ID` equals the file's `run_id` drops
+`+26`. A later acquire with the same run-id is a no-op drop. A value
+that does not equal the file warns on stderr,
+`search resume +26 not dropped: run-id mismatch`, leaves `+26` live,
+and still runs the child. Heavy §4 names the drop, not a second lock:
+a non-matching acquire is not the acquire that drops, so it must not
+block the writer. `arm --run-id` still refuses a mismatch, because
+that command's only job is the drop.
 
 The drop calls `drop_early_deadline(run_id)` in
 `scripts/search_resume_watchdog.py`. That rewrites the deadline file
 atomically: a temp file in the same directory, `fsync`, then
 `os.replace`. The rewrite leaves `deadline_50` and removes
 `deadline_26`, so `+50` is the earliest restore. It is idempotent.
-It refuses a missing file or a mismatched run-id and does not change
-the file in those cases.
+It refuses a missing or unparseable file and does not change the file
+in those cases.
 
-If the variable is set and the drop fails, the wrapper does not run
-the child. It releases the lock and exits non-zero. That is
+If the variable is set and the drop cannot be completed (the file is
+missing or unparseable, or the rewrite fails), the wrapper does not
+run the child. It releases the lock and exits non-zero. That is
 fail-closed for the SoR. The message includes
-`search resume +26 drop failed; child not started`.
+`search resume +26 drop failed; child not started`. A mismatch is not
+that failure.
 
 Fallback, in the same scripted breath as the writer start:
 
@@ -151,20 +161,26 @@ whether `+26` is still live:
 /usr/bin/python3 "$HOME/MailArchive/scripts/search_resume_watchdog.py" status
 ```
 
-A live file prints four lines and exits 0:
+A live file prints exactly these four lines, in this order, and exits 0.
+Each line is one `key=value` and has no other text. A human summary
+may follow only on lines that contain no `=`. This build prints no
+summary.
 
 ```text
 run_id=att0-L1-EXAMPLE
 deadline_26=100
 deadline_50=200
-plus_26_live=yes
+d26_live=yes
 ```
 
-After `+26` is dropped, `deadline_26=absent` and `plus_26_live=no`.
-A missing file prints `deadline file missing` and exits non-zero. An
-unparseable file prints `deadline file unreadable` and exits
+After `+26` is dropped, `deadline_26=none` and `d26_live=no`.
+`d26_live=yes` only when `deadline_26` is an epoch earlier than
+`deadline_50`. A missing file prints `status=missing` and exits
+non-zero. An unparseable file prints `status=unparseable` and exits
 non-zero. `status` does not print a token, does not write, does not
-open sqlite, and does not take the writer lock.
+open sqlite, and does not take the writer lock. AR-R step 5a greps
+these lines. `d26_live=no` means the drop happened. `d26_live=yes`
+still exits 0, so the check is logged and is not a STOP.
 
 ## AR-R
 

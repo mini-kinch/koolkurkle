@@ -47,7 +47,9 @@ Defaults (override with the env vars):
 
 The wrapper drops +26 only when the caller sets
 MAILROOM_SEARCH_RESUME_RUN_ID to the run_id in the deadline file.
-That is the only extra input. Unset means do not drop.
+That is the only extra input. Unset means do not drop and the
+deadline file is not read for a drop. A mismatch warns and does
+not drop and does not block the child.
 
 Commands:
   search_resume_watchdog.py watch
@@ -101,6 +103,10 @@ LockState = Tuple[str, str, str]
 
 class DeadlineRefusal(Exception):
     """drop_early_deadline refused. The deadline file is unchanged."""
+
+
+class DeadlineMismatch(DeadlineRefusal):
+    """The explicit run-id does not match the deadline file."""
 
 
 def _expand(raw: str) -> Path:
@@ -283,10 +289,10 @@ def parse_deadline(text: str) -> Optional[Deadline]:
 
 
 def format_status(parsed: Deadline) -> str:
-    """Read-only status lines. No token, no file body."""
+    """Fixed key=value lines. No token, no other text on those lines."""
     run_id, deadline_26, deadline_50 = parsed
     if deadline_26 is None:
-        shown = "absent"
+        shown = "none"
         live = "no"
     else:
         shown = str(deadline_26)
@@ -295,7 +301,7 @@ def format_status(parsed: Deadline) -> str:
         "run_id=%s\n"
         "deadline_26=%s\n"
         "deadline_50=%d\n"
-        "plus_26_live=%s\n" % (run_id, shown, deadline_50, live)
+        "d26_live=%s\n" % (run_id, shown, deadline_50, live)
     )
 
 
@@ -324,11 +330,13 @@ def drop_early_deadline(run_id: str, path: Optional[Path] = None) -> None:
     """Drop +26 so the earliest restore is +50.
 
     Atomic rewrite in the same directory. Idempotent when +26 is already
-    gone. Refuses a missing file or a mismatched run-id and leaves the
-    file untouched in those cases. Does not take the writer lock.
+    gone. Refuses a missing or unparseable file and leaves it untouched.
+    A mismatched run-id raises DeadlineMismatch and leaves the file
+    untouched. Does not take the writer lock. Does not read a run-id
+    from the file unless the caller passed one.
     """
     if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
-        raise DeadlineRefusal("run-id mismatch")
+        raise DeadlineMismatch("run-id mismatch")
     target = deadline_path() if path is None else path
     if not target.is_file():
         raise DeadlineRefusal("deadline file missing")
@@ -339,7 +347,7 @@ def drop_early_deadline(run_id: str, path: Optional[Path] = None) -> None:
         raise DeadlineRefusal("deadline file refused")
     file_run, deadline_26, deadline_50 = parsed
     if file_run != run_id:
-        raise DeadlineRefusal("run-id mismatch")
+        raise DeadlineMismatch("run-id mismatch")
     if deadline_26 is None:
         return
     _atomic_write(
@@ -628,10 +636,10 @@ def _cmd_status() -> int:
     """Print deadline checkpoints. Does not write, lock, or open sqlite."""
     status, parsed = load_deadline(deadline_path())
     if status == "absent":
-        sys.stderr.write("deadline file missing\n")
+        sys.stdout.write("status=missing\n")
         return 1
     if status != "ok" or parsed is None:
-        sys.stderr.write("deadline file unreadable\n")
+        sys.stdout.write("status=unparseable\n")
         return 1
     sys.stdout.write(format_status(parsed))
     return 0

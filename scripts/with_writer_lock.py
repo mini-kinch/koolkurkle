@@ -237,10 +237,12 @@ def release_writer_lock(held: HeldLock) -> None:
 
 
 def _drop_search_resume_plus_26() -> None:
-    # Caller input: MAILROOM_SEARCH_RESUME_RUN_ID, or none.
-    # Set it to the deadline file's run_id. The first successful
-    # acquire whose value matches drops +26. Unset does not drop.
-    # A mismatch refuses the child. No other argument is read.
+    # Caller input: MAILROOM_SEARCH_RESUME_RUN_ID only.
+    # Callers: A2 step 4 and AR-R step 5. Set it to the deadline
+    # file's run_id. Never read the deadline file when this is unset,
+    # and never drop on a bare acquire. A rehearsal acquire passes
+    # no run-id and must not drop. A match drops +26. A mismatch
+    # warns and does not drop and does not block the child.
     run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
     if not run_id:
         return
@@ -248,6 +250,9 @@ def _drop_search_resume_plus_26() -> None:
         import search_resume_watchdog
 
         search_resume_watchdog.drop_early_deadline(run_id)
+    except search_resume_watchdog.DeadlineMismatch as exc:
+        sys.stderr.write("search resume +26 not dropped: %s\n" % exc)
+        return
     except Exception as exc:
         raise WriterLockError(
             "search resume +26 drop failed; child not started: %s" % exc
