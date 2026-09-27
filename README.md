@@ -39,7 +39,7 @@ SWITCH TO Mini/MBP before a machine-specific Terminal AR
 detect machine only from prompt hostname / Sent-from-machine / pasted proof;
 loud SWITCH TO MBP/Mini callout when last input mismatches the target;
 agents cannot see which Terminal window is focused),
-MBP SoR vs Mini copy-only (Mini is the only SoR writer for `mailroom.sqlite` under the daily only; the MBP is a non-writer; no MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4),
+Mini SoR (sole writer) vs MBP non-writer (Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; no MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
 generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
 IMAP live checks via `/usr/bin/curl imaps://` (never Python sockets

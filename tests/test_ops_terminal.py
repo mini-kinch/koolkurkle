@@ -234,11 +234,14 @@ class OpsTerminalDocTests(unittest.TestCase):
         index = next(
             line
             for line in text.splitlines()
-            if line.startswith("MBP SoR vs Mini copy-only")
+            if line.startswith("Mini SoR (sole writer) vs MBP non-writer")
         )
+        self.assertIn("Mini SoR (sole writer) vs MBP non-writer", index)
+        self.assertNotIn("MBP SoR vs Mini copy-only", index)
         self.assertIn("Mini is the only SoR writer", index)
         self.assertIn("`mailroom.sqlite`", index)
-        self.assertIn("under the daily only", index)
+        self.assertIn("via the daily job only", index)
+        self.assertNotIn("under the daily only", index)
         self.assertIn("the MBP is a non-writer", index)
         self.assertIn("No MBP writers against SoR", index)
         self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", index)
