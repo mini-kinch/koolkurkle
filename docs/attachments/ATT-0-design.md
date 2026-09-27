@@ -32,7 +32,7 @@ Scope B means attachment writes target an **explicit copy database**, set beside
 
 The copy basenames the daily pipeline already allows are `mailroom-copy.sqlite` and `mailroom-daily-copy.sqlite`.
 
-Heavy 05 already forbade live SoR catalog/apply while a writer held the lock, and it allowed file-stage work against a copy DB. The gate alone still **allows** basename `mailroom.sqlite` when no rem process is running and the writer lock is free. That is the wrong default now that the mini is the sole SoR writer: a quiet lock is not permission to DDL the system of record. The ATT-0 migration therefore **refuses a database named `mailroom.sqlite` unless `--allow-mailroom-sqlite` is passed**, and it still calls the writer gate after that flag so a held lock or a rem process remains a CONFLICT. Destructive CLI verbs (`purge`, `expunge`, and the rest of the existing set) refuse before any connection is opened.
+Heavy 05 already forbade live SoR catalog/apply while a writer held the lock, and it allowed file-stage work against a copy DB. The gate alone still **allows** basename `mailroom.sqlite` when no rem process is running and the writer lock is free. That is the wrong default now that the mini is the sole SoR writer: a quiet lock is not permission to DDL the system of record. The ATT-0 migration therefore **refuses a resolved path that is the live SoR unless `--allow-mailroom-sqlite` is passed**, and it still calls the writer gate after that flag so a held lock or a rem process remains a CONFLICT. Destructive CLI verbs (`purge`, `expunge`, and the rest of the existing set) refuse before any connection is opened.
 
 This change does not run the migration. Tests use temporary files only.
 
@@ -216,7 +216,7 @@ A parse error, a missing UID, or a bad offset is an error and is not marked scan
 Both options are writers, including dry-run:
 
 - `refuse_destructive.refuse_destructive_cli` runs first.
-- Basename `mailroom.sqlite` is refused unless `--allow-mailroom-sqlite`, **before** a connection, including dry-run. The writer gate still runs after that flag.
+- A resolved path that is the live SoR is refused unless `--allow-mailroom-sqlite`, **before** a connection, including dry-run. The flag means the caller knows that resolved path is the live SoR. The writer gate still runs after that flag. Residual: `is_live_sor` uses the resolved basename, not the inode, so an APFS hard link with a different name to the SoR inode still looks not-live.
 - The database file must already exist. A missing path exits 2 and does not create a file.
 - Default is dry-run (counts only). `--apply` writes. Passing both exits 2.
 - Dry-run opens the file `mode=ro` with `query_only`, so it cannot write. The report prints counts only: `dry_run`, `source`, `db_basename` (not a full path), `messages`, `parts`, `has_attachments`, `filenames`, `bytes_stored=0`, `scanned`, `eligible`, `stopped`, `capped`, `skipped`, `errors`, `partial`, `parts_truncated`, `uidvalidity_mismatch`, and its own line `capped: N`. When `partial` is true the first line is the `PARTIAL:` banner. The same object is printed as one JSON object on the `summary_json=` line.

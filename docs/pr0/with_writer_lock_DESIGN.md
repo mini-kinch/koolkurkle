@@ -76,16 +76,18 @@ The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB
 
 `SOR_FORCE_LIVE_CHECKS=1` turns the live checks on for a path that is not the live SoR. No value turns those checks off on the live path. Do not set the variable in a LaunchAgent.
 
-## Caller-side basename guards (inventory)
+## Caller-side live SoR guards
 
-These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each compares `Path.name` to `SOR_BASENAME`. They do not call `is_live_sor`. This table records them. It does not change them. Alias directions have no test. See `docs/heavy/20260927-2207-pr90-caller-live-only-guards.md`.
+These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each calls `sor_writer_gate.is_live_sor`. `--allow-mailroom-sqlite` bypasses that caller refuse and means the caller knows the resolved path is the live SoR. The writer gate still runs after the flag. Option A from `docs/heavy/20260927-2207-pr90-caller-live-only-guards.md` is implemented in the follow-up stacked on PR #90.
 
-| Guard | Exact code | Test |
-|---|---|---|
-| `scripts/attachments/migrate_att0_schema.py:364` in `migrate_database` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_refuses_mailroom_sqlite_without_flag_and_does_not_open_it`. Alias directions: no test |
-| `scripts/attachments/migrate_att0_schema.py:434` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_cli_refuse_and_copy_success`. Alias directions: no test |
-| `scripts/attachments/meta_fill.py:931` in `fill_metadata` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `FillTests.test_refuses_mailroom_sqlite_without_creating_it`. Alias directions: no test |
-| `scripts/attachments/meta_fill.py:1284` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `CliTests.test_negative_smoke_and_mailroom_refuse`. Alias directions: no test |
+| Guard | Predicate |
+|---|---|
+| `migrate_database` in `scripts/attachments/migrate_att0_schema.py` | `sor_writer_gate.is_live_sor(path)` |
+| `main` in `scripts/attachments/migrate_att0_schema.py` | `sor_writer_gate.is_live_sor(db_path)` |
+| `fill_metadata` in `scripts/attachments/meta_fill.py` | `sor_writer_gate.is_live_sor(path)` |
+| `main` in `scripts/attachments/meta_fill.py` | `sor_writer_gate.is_live_sor(db_path)` |
+
+Residual, inventory only: `is_live_sor()` compares the resolved basename, not the inode. An APFS hard link with a different name to the SoR inode still looks not-live. This follow-up does not change the gate.
 
 ## Same-file embed_backfill (HARD DECK)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ATT-0 attachment schema migration (idempotent). Code and tests only.
 
-Refuses a database named mailroom.sqlite unless --allow-mailroom-sqlite
+Refuses a resolved path that is the live SoR unless --allow-mailroom-sqlite
 is passed, then still calls sor_writer_gate.refuse_if_sor_writer_conflict
 and refuse_destructive.refuse_destructive_cli. Does not touch
 message_embeddings. Does not apply itself to a system of record.
@@ -46,11 +46,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli  # noqa: E402
-from sor_writer_gate import (  # noqa: E402
-    SOR_BASENAME,
-    SorWriterRefuse,
-    refuse_if_sor_writer_conflict,
-)
+import sor_writer_gate  # noqa: E402
+from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict  # noqa: E402
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "schema.sql"
 
@@ -361,10 +358,10 @@ def migrate_database(
     """Apply ATT-0 DDL. Opens the database only after the refuses pass."""
     path = Path(db)
     refuse_destructive_cli([] if argv is None else list(argv))
-    if path.name == SOR_BASENAME and not allow_mailroom_sqlite:
+    if sor_writer_gate.is_live_sor(path) and not allow_mailroom_sqlite:
         raise MigrateRefuse(
-            "refuse: basename mailroom.sqlite "
-            "(pass --allow-mailroom-sqlite to override)"
+            "refuse: resolved path is the live SoR "
+            "(pass --allow-mailroom-sqlite if you know this resolved path is the live SoR)"
         )
     refuse_if_sor_writer_conflict(
         path,
@@ -409,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "ATT-0 attachment schema (idempotent). "
-            "Refuses basename mailroom.sqlite unless --allow-mailroom-sqlite. "
+            "Refuses a resolved path that is the live SoR unless --allow-mailroom-sqlite. "
             "Reuses sor_writer_gate and refuse_destructive. Does not apply itself."
         )
     )
@@ -417,7 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-mailroom-sqlite",
         action="store_true",
-        help="Permit basename mailroom.sqlite. The writer gate still applies.",
+        help="I know this resolved path is the live SoR. The writer gate still applies.",
     )
     return parser
 
@@ -431,10 +428,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     args = build_parser().parse_args(raw)
     db_path = Path(args.db)
-    if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:
+    if sor_writer_gate.is_live_sor(db_path) and not args.allow_mailroom_sqlite:
         sys.stderr.write(
-            "error: refuse: basename mailroom.sqlite "
-            "(pass --allow-mailroom-sqlite to override)\n"
+            "error: refuse: resolved path is the live SoR "
+            "(pass --allow-mailroom-sqlite if you know this resolved path is the live SoR)\n"
         )
         return 2
     if not db_path.is_file():

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import fcntl
 import io
 import json
 import os
@@ -39,8 +41,21 @@ import imap_bodystructure_double as imap_double  # noqa: E402
 import attachments.migrate_att0_schema as mig  # noqa: E402
 import attachments.mime_meta as mime_meta  # noqa: E402
 import imap_keychain  # noqa: E402
+import sor_writer_gate as gate  # noqa: E402
 from refuse_destructive import DestructiveRefuse  # noqa: E402
 from sor_writer_gate import SorWriterRefuse  # noqa: E402
+
+LIVE_CALLER_REFUSE = (
+    "refuse: resolved path is the live SoR "
+    "(pass --allow-mailroom-sqlite if you know this resolved path is the live SoR)"
+)
+_QUIET_ENV = (
+    "MAILROOM_WRITE_LOCK",
+    "SOR_FORCE_LIVE_CHECKS",
+    "MAILROOM_WRITER_LOCK_TOKEN",
+    "MAILROOM_WRITER_LOCK_PID",
+    "MAILROOM_WRITER_LOCK_PURPOSE",
+)
 
 DESIGN = ROOT / "docs" / "attachments" / "ATT-0-design.md"
 PKG = SCRIPTS / "attachments"
@@ -900,7 +915,7 @@ class FillTests(unittest.TestCase):
                     cmdlines=[],
                     lock_held=False,
                 )
-            self.assertIn("mailroom.sqlite", str(ctx.exception))
+            self.assertEqual(str(ctx.exception), LIVE_CALLER_REFUSE)
             self.assertFalse(missing.exists())
             existing = Path(tmp) / "nested" / "mailroom.sqlite"
             existing.parent.mkdir()
@@ -2049,7 +2064,8 @@ class CliTests(unittest.TestCase):
             with mock.patch("sys.stderr", err):
                 rc = meta.main(["--db", str(sor), "--source", "imap", "--dry-run"])
             self.assertEqual(rc, 2)
-            self.assertIn("mailroom.sqlite", err.getvalue())
+            self.assertIn(LIVE_CALLER_REFUSE, err.getvalue())
+            self.assertNotIn("basename mailroom.sqlite", err.getvalue())
             self.assertEqual(sor.read_bytes(), digest)
             err = io.StringIO()
             with mock.patch("sys.stderr", err):
@@ -2270,6 +2286,457 @@ class CliTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(flags["ex-archive"], 1)
             self.assertEqual(flags["ex-inbox"], 0)
+
+
+@contextlib.contextmanager
+def _chdir(path):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
+
+
+@contextlib.contextmanager
+def _quiet_writer_env(lock):
+    saved = {key: os.environ.get(key) for key in _QUIET_ENV}
+    os.environ["MAILROOM_WRITE_LOCK"] = str(lock)
+    for key in _QUIET_ENV:
+        if key != "MAILROOM_WRITE_LOCK":
+            os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@contextlib.contextmanager
+def _held_empty_lock(path):
+    path.write_text("")
+    handle = path.open("r+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+@contextlib.contextmanager
+def _without_force_live_checks():
+    saved = os.environ.pop("SOR_FORCE_LIVE_CHECKS", None)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("SOR_FORCE_LIVE_CHECKS", None)
+        else:
+            os.environ["SOR_FORCE_LIVE_CHECKS"] = saved
+
+
+def _scrub_text(text):
+    home = os.path.expanduser("~")
+    if home:
+        text = text.replace(home, "$HOME")
+    host = socket.gethostname()
+    if host:
+        text = text.replace(host, "host")
+    return text
+
+
+class LiveSoRCallerGuardTests(unittest.TestCase):
+    def test_help_says_the_flag_means_the_resolved_path_is_live(self):
+        text = " ".join(meta.build_parser().format_help().split())
+        self.assertIn("I know this resolved path is the live SoR", text)
+        self.assertIn("resolved path that is the live SoR", text)
+        self.assertNotIn("basename mailroom.sqlite", text)
+
+    def _assert_caller_refuse(self, db):
+        err = io.StringIO()
+        with mock.patch.object(
+            sqlite3, "connect", side_effect=AssertionError("sqlite connect")
+        ):
+            with self.assertRaises(meta.FillRefuse) as ctx:
+                meta.fill_metadata(
+                    db,
+                    source="jsonl",
+                    cmdlines=[(4242, "rem-legacy")],
+                    lock_held=True,
+                )
+            with mock.patch("sys.stderr", err):
+                rc = meta.main(["--db", str(db), "--source", "jsonl"])
+        self.assertEqual(str(ctx.exception), LIVE_CALLER_REFUSE)
+        self.assertNotIn("CONFLICT", str(ctx.exception))
+        self.assertEqual(rc, 2)
+        self.assertEqual(err.getvalue(), "error: " + LIVE_CALLER_REFUSE + "\n")
+
+    def test_regular_file_and_resolving_shapes_refuse_at_caller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "mailroom.sqlite"
+            sqlite3.connect(str(live)).close()
+            digest = live.read_bytes()
+            alias = root / "mailroom-copy.sqlite"
+            alias.symlink_to(live.name)
+            self._assert_caller_refuse(live)
+            self._assert_caller_refuse(alias)
+            self._assert_caller_refuse(str(alias) + "/")
+            self._assert_caller_refuse(root / "down" / ".." / "mailroom.sqlite")
+            with _chdir(root):
+                self._assert_caller_refuse("mailroom.sqlite")
+            self.assertEqual(live.read_bytes(), digest)
+            self.assertTrue(alias.is_symlink())
+
+    def test_direction2_live_name_to_a_copy_passes_caller_and_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            copy = root / "mailroom-copy.sqlite"
+            _seed(copy, [])
+            dump = root / "archive.jsonl"
+            dump.write_bytes(b"\n")
+            nested = root / "nested"
+            nested.mkdir()
+            link = nested / "mailroom.sqlite"
+            link.symlink_to(copy)
+            self.assertEqual(link.name, "mailroom.sqlite")
+            self.assertFalse(gate.is_live_sor(link))
+            with _without_force_live_checks():
+                report = meta.fill_metadata(
+                    link,
+                    source="jsonl",
+                    jsonl_path=dump,
+                    cmdlines=[(4242, "rem-legacy")],
+                    lock_held=True,
+                )
+            self.assertEqual(report["bytes_stored"], 0)
+            self.assertEqual(report["db_basename"], "mailroom.sqlite")
+            lock = root / "mailroom.write.lock"
+            out = io.StringIO()
+            err = io.StringIO()
+            with _held_empty_lock(lock):
+                with _quiet_writer_env(lock):
+                    with mock.patch(
+                        "sor_writer_gate.rem_process_hits",
+                        return_value=[(4242, "rem-legacy")],
+                    ):
+                        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                            rc = meta.main(
+                                [
+                                    "--db",
+                                    str(link),
+                                    "--source",
+                                    "jsonl",
+                                    "--jsonl",
+                                    str(dump),
+                                    "--dry-run",
+                                    "--max-messages",
+                                    "0",
+                                    "--timeout",
+                                    "0",
+                                ]
+                            )
+            self.assertEqual(rc, 0, err.getvalue())
+            self.assertIn("att0 meta fill", out.getvalue())
+            self.assertNotIn(LIVE_CALLER_REFUSE, err.getvalue())
+            self.assertNotIn("CONFLICT", err.getvalue())
+
+    def test_broken_symlink_and_missing_target_do_not_open_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            link = root / "mailroom-copy.sqlite"
+            link.symlink_to("mailroom.sqlite")
+            missing = root / "mailroom.sqlite"
+            dotted = root / "down" / ".." / "mailroom.sqlite"
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(missing.exists())
+            self._assert_caller_refuse(link)
+            self._assert_caller_refuse(missing)
+            self._assert_caller_refuse(dotted)
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(missing.exists())
+            self.assertFalse(dotted.exists())
+            self.assertFalse((root / "down").exists())
+            copy_link = root / "nested"
+            copy_link.mkdir()
+            named = copy_link / "mailroom.sqlite"
+            target = root / "mailroom-daily-copy.sqlite"
+            named.symlink_to(target)
+            err = io.StringIO()
+            with mock.patch.object(
+                sqlite3, "connect", side_effect=AssertionError("sqlite connect")
+            ):
+                with mock.patch("sys.stderr", err):
+                    rc = meta.main(["--db", str(named), "--source", "jsonl"])
+            self.assertEqual(rc, 2)
+            self.assertIn("database not found", err.getvalue())
+            self.assertFalse(target.exists())
+            self.assertTrue(named.is_symlink())
+
+    def _schema_db(self, root):
+        live = root / "mailroom.sqlite"
+        mig.migrate_database(
+            live,
+            allow_mailroom_sqlite=True,
+            cmdlines=[],
+            lock_held=False,
+        )
+        conn = sqlite3.connect(str(live))
+        try:
+            conn.execute(
+                "CREATE TABLE messages ("
+                "id TEXT PRIMARY KEY, source TEXT NOT NULL, folder TEXT, uid TEXT, "
+                "jsonl_offset INTEGER, jsonl_len INTEGER, "
+                "has_attachments INTEGER DEFAULT 0)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        dump = root / "archive.jsonl"
+        dump.write_bytes(b"\n")
+        return live, dump
+
+    def test_cli_flag_skips_caller_refuse_and_reaches_the_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live, dump = self._schema_db(root)
+            lock = root / "mailroom.write.lock"
+            argv = [
+                "--db",
+                str(live),
+                "--source",
+                "jsonl",
+                "--jsonl",
+                str(dump),
+                "--dry-run",
+                "--max-messages",
+                "0",
+                "--timeout",
+                "0",
+            ]
+            with _quiet_writer_env(lock):
+                err = io.StringIO()
+                with mock.patch.object(
+                    meta,
+                    "refuse_if_sor_writer_conflict",
+                    wraps=meta.refuse_if_sor_writer_conflict,
+                ) as gate_call:
+                    with mock.patch("sys.stderr", err):
+                        refused = meta.main(argv)
+                self.assertEqual(refused, 2)
+                self.assertIn(LIVE_CALLER_REFUSE, err.getvalue())
+                self.assertFalse(gate_call.called)
+                err = io.StringIO()
+                out = io.StringIO()
+                with mock.patch.object(
+                    meta,
+                    "refuse_if_sor_writer_conflict",
+                    wraps=meta.refuse_if_sor_writer_conflict,
+                ) as gate_call:
+                    with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                        allowed = meta.main(argv + ["--allow-mailroom-sqlite"])
+            self.assertEqual(allowed, 0, err.getvalue())
+            self.assertTrue(gate_call.called)
+            self.assertIn("att0 meta fill", out.getvalue())
+            self.assertNotIn(LIVE_CALLER_REFUSE, err.getvalue())
+            with mock.patch.object(
+                meta,
+                "refuse_if_sor_writer_conflict",
+                wraps=meta.refuse_if_sor_writer_conflict,
+            ) as gate_call:
+                report = meta.fill_metadata(
+                    live,
+                    source="jsonl",
+                    jsonl_path=dump,
+                    allow_mailroom_sqlite=True,
+                    cmdlines=[],
+                    lock_held=False,
+                )
+            self.assertTrue(gate_call.called)
+            self.assertEqual(report["bytes_stored"], 0)
+
+    def test_flag_with_rem_or_held_lock_is_a_gate_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "mailroom.sqlite"
+            sqlite3.connect(str(live)).close()
+            digest = live.read_bytes()
+            dump = root / "archive.jsonl"
+            dump.write_bytes(b"\n")
+            with mock.patch.object(
+                meta,
+                "refuse_if_sor_writer_conflict",
+                wraps=meta.refuse_if_sor_writer_conflict,
+            ) as gate_call:
+                with self.assertRaises(SorWriterRefuse) as ctx:
+                    meta.fill_metadata(
+                        live,
+                        source="jsonl",
+                        jsonl_path=dump,
+                        allow_mailroom_sqlite=True,
+                        lock_held=False,
+                        cmdlines=[(4242, "rem-legacy")],
+                    )
+            self.assertTrue(gate_call.called)
+            self.assertIn("rem process pid=4242", str(ctx.exception))
+            self.assertNotIn(LIVE_CALLER_REFUSE, str(ctx.exception))
+            with mock.patch.object(
+                meta,
+                "refuse_if_sor_writer_conflict",
+                wraps=meta.refuse_if_sor_writer_conflict,
+            ) as gate_call:
+                with self.assertRaises(SorWriterRefuse) as ctx:
+                    meta.fill_metadata(
+                        live,
+                        source="jsonl",
+                        jsonl_path=dump,
+                        allow_mailroom_sqlite=True,
+                        lock_held=True,
+                        cmdlines=[],
+                    )
+            self.assertTrue(gate_call.called)
+            self.assertIn("writer lock held", str(ctx.exception))
+            self.assertEqual(live.read_bytes(), digest)
+            err = io.StringIO()
+            cli = [
+                "--db",
+                str(live),
+                "--allow-mailroom-sqlite",
+                "--source",
+                "jsonl",
+                "--jsonl",
+                str(dump),
+                "--dry-run",
+            ]
+            with _quiet_writer_env(root / "absent.write.lock"):
+                with mock.patch(
+                    "sor_writer_gate.rem_process_hits",
+                    return_value=[(4242, "rem-legacy")],
+                ):
+                    with mock.patch("sys.stderr", err):
+                        rc = meta.main(cli)
+            self.assertEqual(rc, 2)
+            self.assertIn("rem process pid=4242", err.getvalue())
+            self.assertNotIn(LIVE_CALLER_REFUSE, err.getvalue())
+            self.assertEqual(live.read_bytes(), digest)
+            err = io.StringIO()
+            lock = root / "mailroom.write.lock"
+            with _held_empty_lock(lock):
+                with _quiet_writer_env(lock):
+                    with mock.patch("sys.stderr", err):
+                        rc = meta.main(cli)
+            self.assertEqual(rc, 2)
+            self.assertIn("CONFLICT", err.getvalue())
+            self.assertIn("writer lock held", err.getvalue())
+            self.assertNotIn(LIVE_CALLER_REFUSE, err.getvalue())
+            self.assertEqual(live.read_bytes(), digest)
+
+
+class WriterWrapperCliTests(unittest.TestCase):
+    def _env(self, lock):
+        env = os.environ.copy()
+        for key in _QUIET_ENV:
+            env.pop(key, None)
+        env["MAILROOM_WRITE_LOCK"] = str(lock)
+        self.assertNotIn("SOR_FORCE_LIVE_CHECKS", env)
+        return env
+
+    def _run(self, env, lock, action, purpose, script, extra):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "with_writer_lock.py"),
+                "--purpose",
+                purpose,
+                "--lock-file",
+                str(lock),
+                "--action-required-file",
+                str(action),
+                "--",
+                sys.executable,
+                str(script),
+            ]
+            + extra,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+    def test_allowlisted_purposes_are_allowed_and_att0_fill_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mailroom.sqlite"
+            sqlite3.connect(str(db)).close()
+            digest = db.read_bytes()
+            lock = root / "mailroom.write.lock"
+            action = root / "ACTION_REQUIRED"
+            env = self._env(lock)
+            migrate = SCRIPTS / "attachments" / "migrate_att0_schema.py"
+            fill = SCRIPTS / "attachments" / "meta_fill.py"
+            db_args = ["--db", str(db), "--allow-mailroom-sqlite"]
+            refused = self._run(
+                env, lock, action, "att0-fill", migrate, db_args
+            )
+            self.assertEqual(
+                refused.returncode,
+                2,
+                _scrub_text(refused.stderr),
+            )
+            self.assertIn("purpose not allowed", refused.stderr)
+            self.assertNotIn("att0 schema migrate", refused.stdout)
+            self.assertEqual(db.read_bytes(), digest)
+            migrated = self._run(
+                env, lock, action, "att0-migrate", migrate, db_args
+            )
+            self.assertEqual(
+                migrated.returncode,
+                0,
+                _scrub_text(migrated.stderr),
+            )
+            self.assertIn("att0 schema migrate", migrated.stdout)
+            self.assertNotIn("CONFLICT", migrated.stderr)
+            self.assertNotIn(LIVE_CALLER_REFUSE, migrated.stderr)
+            conn = sqlite3.connect(str(db))
+            try:
+                conn.execute(
+                    "CREATE TABLE messages ("
+                    "id TEXT PRIMARY KEY, source TEXT NOT NULL, folder TEXT, "
+                    "uid TEXT, jsonl_offset INTEGER, jsonl_len INTEGER, "
+                    "has_attachments INTEGER DEFAULT 0)"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            dump = root / "archive.jsonl"
+            dump.write_bytes(b"\n")
+            filled = self._run(
+                env,
+                lock,
+                action,
+                "att0 meta fill",
+                fill,
+                db_args
+                + [
+                    "--source",
+                    "jsonl",
+                    "--jsonl",
+                    str(dump),
+                    "--dry-run",
+                    "--max-messages",
+                    "0",
+                    "--timeout",
+                    "0",
+                ],
+            )
+            self.assertEqual(filled.returncode, 0, _scrub_text(filled.stderr))
+            self.assertIn("att0 meta fill", filled.stdout)
+            self.assertNotIn("CONFLICT", filled.stderr)
+            self.assertNotIn(LIVE_CALLER_REFUSE, filled.stderr)
 
 
 class DesignAndBoundaryTests(unittest.TestCase):
