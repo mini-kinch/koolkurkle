@@ -720,7 +720,8 @@ def resolve_chunk_id(
 ) -> str | None:
     """chunk_id from live chunk_vec_map (message_id, else optional vec_rowid).
 
-    Live MBP SoR ``chunk_vec_map`` is empty; vec0 has no usable ``rowid``.
+    The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
+    Live SoR ``chunk_vec_map`` is empty; vec0 has no usable ``rowid``.
     Prefer ``message_id``. ``vec_rowid`` is only a fallback when the map
     actually stores it. No invented columns.
     """
