@@ -565,9 +565,11 @@ class ImapPartClient:
 
     Production transport is pinned ``/usr/bin/curl`` ``imaps://`` port 993
     with readonly EXAMINE. The mailbox is not in the URL. Plain IMAP is
-    refused. The password comes from ``password_fn`` (default Keychain via
-    ``read_imap_app_password``). Each chunk is written to ``dest`` and
-    dropped so peak memory stays one chunk. Tests inject ``imap_factory``.
+    refused. ``transport="imaplib"`` uses the in-process client in
+    ``imaplib_part`` instead of curl. The password comes from
+    ``password_fn`` (default Keychain via ``read_imap_app_password``).
+    Each chunk is written to ``dest`` and dropped so peak memory stays
+    one chunk. Tests inject ``imap_factory``.
 
     ``port`` and ``ca_file`` are test hooks for a loopback TLS stub.
     Production callers leave both unset: the port stays 993 and curl uses
@@ -585,9 +587,16 @@ class ImapPartClient:
         password_fn: Callable[[], str] | None = None,
         port: int | None = None,
         ca_file: str | None = None,
+        transport: str | None = None,
     ) -> None:
         if not host:
             raise FetchRefuse("imap host is required")
+        if transport in (None, "", "curl"):
+            self._transport = "curl"
+        elif transport == "imaplib":
+            self._transport = "imaplib"
+        else:
+            raise FetchRefuse("imap transport refused")
         if imap_factory is not None and getattr(imap_factory, "__name__", "") == "IMAP4":
             raise FetchRefuse("plain IMAP is refused")
         self.host = host
@@ -614,7 +623,17 @@ class ImapPartClient:
             except KeychainError:
                 raise FetchRefuse("imap keychain password is missing") from None
             try:
-                if self._factory is None:
+                if self._factory is None and self._transport == "imaplib":
+                    from attachments.imaplib_part import ImaplibPartConn
+
+                    self._conn = ImaplibPartConn(
+                        self.host,
+                        self.port,
+                        self.timeout,
+                        ca_file=self._ca_file or None,
+                    )
+                    self._conn.login(self.user, password)
+                elif self._factory is None:
                     self._conn = _CurlPartConn(
                         self.host,
                         self.port,
@@ -682,6 +701,9 @@ class ImapPartClient:
         Requests ``BODY.PEEK[part]<offset.chunk>`` (still PEEK, still
         readonly EXAMINE). Stops and raises PayloadTooBig as soon as the
         cumulative size would exceed ``cap``, and does not leave ``dest``.
+        A declared ``{n}`` that does not match the literal, a parse
+        failure, or an empty literal at offset 0 refuses and stores
+        nothing. An empty literal after a prior byte is the end of the part.
         """
         if not _PART_RE.match(str(part_id)):
             raise FetchRefuse("part id refused")
@@ -715,16 +737,15 @@ class ImapPartClient:
                 try:
                     blob = parse_fetch_literal(data)
                 except FetchRefuse:
-                    if offset == 0:
-                        raise
-                    blob = b""
+                    raise
                 except Exception:
                     raise FetchRefuse("part fetch failed") from None
                 n = len(blob)
-                counted = n
-                if declared is not None and declared > counted:
-                    counted = declared
-                if total + counted > cap:
+                if declared is not None and declared != n:
+                    raise FetchRefuse("part fetch failed")
+                if offset == 0 and n == 0:
+                    raise FetchRefuse("part fetch failed")
+                if total + n > cap:
                     raise PayloadTooBig()
                 if n:
                     handle.write(blob)

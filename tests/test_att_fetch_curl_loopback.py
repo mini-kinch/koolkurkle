@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -109,9 +110,11 @@ def _trio(commands: list) -> bool:
 class _LoopbackImap:
     """One-shot IMAPS stub. Speaks just enough for curl's LOGIN/EXAMINE/FETCH."""
 
-    def __init__(self, certfile: str, keyfile: str) -> None:
+    def __init__(self, certfile: str, keyfile: str, fetch_handler=None, greet: bool = True) -> None:
         self._certfile = certfile
         self._keyfile = keyfile
+        self._fetch_handler = fetch_handler
+        self._greet = greet
         self.connections: list = []
         self.served: bytes | None = None
         self.errors: list = []
@@ -163,6 +166,26 @@ class _LoopbackImap:
             with self._lock:
                 self.errors.append("tls: %s" % exc.__class__.__name__)
             raw.close()
+            return
+        if not self._greet:
+            try:
+                tls.settimeout(0.2)
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not self._stop.is_set():
+                    try:
+                        chunk = tls.recv(1)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        break
+            except (ssl.SSLError, OSError, ConnectionError) as exc:
+                with self._lock:
+                    self.errors.append("stall: %s" % exc.__class__.__name__)
+            finally:
+                try:
+                    tls.close()
+                except OSError:
+                    pass
             return
         try:
             tls.settimeout(8.0)
@@ -220,6 +243,9 @@ class _LoopbackImap:
         if verb == "UID FETCH":
             if not examined:
                 tls.sendall(tag.encode("ascii") + b" NO not examined\r\n")
+                return examined
+            if self._fetch_handler is not None:
+                self._fetch_handler(self, tls, tag, body)
                 return examined
             payload = _literal_payload(tag)
             with self._lock:
