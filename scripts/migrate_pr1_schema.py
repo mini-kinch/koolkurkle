@@ -37,7 +37,7 @@ from sor_writer_gate import SorWriterRefuse, refuse_if_sor_writer_conflict  # no
 DEFAULT_DB = Path.home() / "MailArchive" / "mailroom.sqlite"
 TARGET_USER_VERSION = 1
 
-# Mini is the sole SoR writer; the MBP is search-only, not a writer.
+# The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 # Live columns already present — never ALTER these (duplicate-column skip
 # is also safe if a clone is missing them).
 MESSAGES_SKIP_EXISTING = ("in_reply_to", "content_hash")
