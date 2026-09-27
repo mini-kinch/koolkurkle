@@ -176,11 +176,12 @@ def _backup_pages(src_conn: sqlite3.Connection, dst_conn: sqlite3.Connection) ->
 
 
 def _quick_check(path: Path):
+    conn = None
     try:
-        conn = sqlite3.connect(_ro_uri(path), uri=True, isolation_level=None)
-    except sqlite3.Error:
-        raise BackupRefuse("refuse: quick_check failed", code=1) from None
-    try:
+        try:
+            conn = sqlite3.connect(_ro_uri(path), uri=True, isolation_level=None)
+        except sqlite3.Error:
+            raise BackupRefuse("refuse: quick_check failed", code=1) from None
         try:
             conn.execute("PRAGMA query_only=ON")
             rows = conn.execute("PRAGMA quick_check").fetchall()
@@ -188,7 +189,11 @@ def _quick_check(path: Path):
         except sqlite3.Error:
             raise BackupRefuse("refuse: quick_check failed", code=1) from None
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
     text = ",".join(str(row[0]) for row in rows if row)
     text = " ".join(text.split())
     if len(text) > 200:

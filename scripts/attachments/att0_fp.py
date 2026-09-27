@@ -195,42 +195,48 @@ def connect_without_sidecars(
     """
     label = path.name
     if not _wal_nonempty(path):
+        conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(
-                _immutable_uri(path), uri=True, isolation_level=None
-            )
+            try:
+                conn = sqlite3.connect(
+                    _immutable_uri(path), uri=True, isolation_level=None
+                )
+            except sqlite3.Error:
+                raise FpRefuse(
+                    "refuse: database is not readable (%s)" % label, code=1
+                ) from None
+            _apply_query_only(conn, label)
+            opened = conn
+            conn = None
+            return opened, None
+        finally:
+            release_readonly(conn, None)
+    private: Path | None = None
+    conn = None
+    try:
+        try:
+            _require_stage_space(path)
+            private = Path(tempfile.mkdtemp(prefix=temp_prefix, dir=str(path.parent)))
+            staged = private / "db.sqlite"
+            _copy_bytes(path, staged)
+            _copy_bytes(_wal_path(path), Path(str(staged) + "-wal"))
+            conn = sqlite3.connect(_ro_uri(staged), uri=True, isolation_level=None)
+            _apply_query_only(conn, label)
+        except FpRefuse:
+            raise
         except sqlite3.Error:
             raise FpRefuse(
                 "refuse: database is not readable (%s)" % label, code=1
             ) from None
-        try:
-            _apply_query_only(conn, label)
-        except FpRefuse:
-            conn.close()
-            raise
-        return conn, None
-    private: Path | None = None
-    conn: sqlite3.Connection | None = None
-    try:
-        _require_stage_space(path)
-        private = Path(tempfile.mkdtemp(prefix=temp_prefix, dir=str(path.parent)))
-        staged = private / "db.sqlite"
-        _copy_bytes(path, staged)
-        _copy_bytes(_wal_path(path), Path(str(staged) + "-wal"))
-        conn = sqlite3.connect(_ro_uri(staged), uri=True, isolation_level=None)
-        _apply_query_only(conn, label)
-    except FpRefuse:
+        except OSError:
+            raise FpRefuse("refuse: cannot stage source wal", code=2) from None
+        opened = conn
+        staged_dir = private
+        conn = None
+        private = None
+        return opened, staged_dir
+    finally:
         release_readonly(conn, private)
-        raise
-    except sqlite3.Error:
-        release_readonly(conn, private)
-        raise FpRefuse(
-            "refuse: database is not readable (%s)" % label, code=1
-        ) from None
-    except OSError:
-        release_readonly(conn, private)
-        raise FpRefuse("refuse: cannot stage source wal", code=2) from None
-    return conn, private
 
 
 def _format_versions(path: Path) -> tuple[int, int] | None:
@@ -337,8 +343,12 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     connection with :func:`close_readonly` so the directory is removed.
     """
     conn, private = connect_without_sidecars(path)
-    if private is not None:
-        _STAGED[id(conn)] = private
+    try:
+        if private is not None:
+            _STAGED[id(conn)] = private
+    except BaseException:
+        release_readonly(conn, private)
+        raise
     return conn
 
 

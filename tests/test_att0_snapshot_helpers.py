@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextlib import closing, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 from urllib.parse import unquote, urlparse
@@ -194,27 +194,31 @@ def _open_uncheckpointed(path: Path) -> sqlite3.Connection | None:
     stays open so close does not fold the ``-wal`` into the main file.
     """
     conn = sqlite3.connect(str(path))
-    can_close = hasattr(conn, "setconfig") and hasattr(
-        sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"
-    )
-    if can_close:
-        conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA wal_autocheckpoint=0")
-    conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
-    conn.execute("INSERT INTO bills (amount) VALUES (1)")
-    conn.commit()
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.execute("INSERT INTO bills (amount) VALUES (2)")
-    conn.commit()
-    wal = Path(str(path) + "-wal")
-    if not (wal.is_file() and wal.stat().st_size > 0):
-        conn.close()
-        raise AssertionError("expected a non-empty wal")
-    if can_close:
-        conn.close()
-        return None
-    return conn
+    try:
+        can_close = hasattr(conn, "setconfig") and hasattr(
+            sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"
+        )
+        if can_close:
+            conn.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
+        conn.execute("INSERT INTO bills (amount) VALUES (1)")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("INSERT INTO bills (amount) VALUES (2)")
+        conn.commit()
+        wal = Path(str(path) + "-wal")
+        if not (wal.is_file() and wal.stat().st_size > 0):
+            raise AssertionError("expected a non-empty wal")
+        if can_close:
+            return None
+        kept = conn
+        conn = None
+        return kept
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _family_hashes(path: Path) -> dict:
@@ -350,11 +354,13 @@ class FingerprintTests(_DbCase):
         right = self.root / "right.sqlite"
         for path, order in ((left, (1, 2, 3)), (right, (3, 1, 2))):
             conn = sqlite3.connect(str(path))
-            conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
-            for number in order:
-                conn.execute("INSERT INTO bills (id, amount) VALUES (?, ?)", (number, number))
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
+                for number in order:
+                    conn.execute("INSERT INTO bills (id, amount) VALUES (?, ?)", (number, number))
+                conn.commit()
+            finally:
+                conn.close()
         self.assertEqual(
             fp.fingerprint(left)["tables"]["bills"],
             fp.fingerprint(right)["tables"]["bills"],
@@ -365,11 +371,13 @@ class FingerprintTests(_DbCase):
         right = self.root / "loose-b.sqlite"
         for path, order in ((left, ("a", "b")), (right, ("b", "a"))):
             conn = sqlite3.connect(str(path))
-            conn.execute("CREATE TABLE loose (body TEXT)")
-            for body in order:
-                conn.execute("INSERT INTO loose (body) VALUES (?)", (body,))
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute("CREATE TABLE loose (body TEXT)")
+                for body in order:
+                    conn.execute("INSERT INTO loose (body) VALUES (?)", (body,))
+                conn.commit()
+            finally:
+                conn.close()
         self.assertNotEqual(
             fp.fingerprint(left)["tables"]["loose"]["sha256"],
             fp.fingerprint(right)["tables"]["loose"]["sha256"],
@@ -378,16 +386,18 @@ class FingerprintTests(_DbCase):
     def test_without_rowid_and_skips_sqlite_sequence(self):
         path = self.root / "special.sqlite"
         conn = sqlite3.connect(str(path))
-        conn.execute(
-            "CREATE TABLE keyed (id TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID"
-        )
-        conn.execute("INSERT INTO keyed VALUES ('k', 'v')")
-        conn.execute(
-            "CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
-        )
-        conn.execute("INSERT INTO seq (v) VALUES ('x')")
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "CREATE TABLE keyed (id TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID"
+            )
+            conn.execute("INSERT INTO keyed VALUES ('k', 'v')")
+            conn.execute(
+                "CREATE TABLE seq (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
+            )
+            conn.execute("INSERT INTO seq (v) VALUES ('x')")
+            conn.commit()
+        finally:
+            conn.close()
         doc = fp.fingerprint(path)
         self.assertIn("keyed", doc["tables"])
         self.assertIn("seq", doc["tables"])
@@ -397,9 +407,11 @@ class FingerprintTests(_DbCase):
     def test_empty_table_hashes_empty_bytes(self):
         path = self.root / "empty.sqlite"
         conn = sqlite3.connect(str(path))
-        conn.execute("CREATE TABLE empty_notes (id INTEGER PRIMARY KEY, body TEXT)")
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("CREATE TABLE empty_notes (id INTEGER PRIMARY KEY, body TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
         doc = fp.fingerprint(path)
         self.assertEqual(doc["tables"]["empty_notes"]["count"], 0)
         self.assertEqual(doc["tables"]["empty_notes"]["sha256"], EMPTY_SHA)
@@ -407,10 +419,12 @@ class FingerprintTests(_DbCase):
     def test_messages_without_source_has_null_imap_counts(self):
         path = self.root / "bare.sqlite"
         conn = sqlite3.connect(str(path))
-        conn.execute("CREATE TABLE messages (id TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO messages VALUES ('only')")
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("CREATE TABLE messages (id TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO messages VALUES ('only')")
+            conn.commit()
+        finally:
+            conn.close()
         doc = fp.fingerprint(path)
         self.assertIsNone(doc["imap_live_total"])
         self.assertIsNone(doc["imap_live_null_folder"])
@@ -441,7 +455,7 @@ class FingerprintTests(_DbCase):
             with self.assertRaises(sqlite3.OperationalError):
                 conn.execute("CREATE TABLE hack (id INTEGER)")
         finally:
-            conn.close()
+            fp.close_readonly(conn)
         self.assertEqual(_sha(self.db), before)
         uri = fp._ro_uri(self.db)
         self.assertTrue(uri.startswith("file:"))
@@ -477,11 +491,13 @@ class FingerprintTests(_DbCase):
     def test_wal_reader_leaves_main_bytes_and_creates_no_sidecar(self):
         path = self.root / "wal.sqlite"
         conn = sqlite3.connect(str(path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
-        conn.execute("INSERT INTO bills (amount) VALUES (1)")
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
+            conn.execute("INSERT INTO bills (amount) VALUES (1)")
+            conn.commit()
+        finally:
+            conn.close()
         _drop_sidecars(path)
         self.assertEqual(_format_versions(path), (2, 2))
         before_bytes = _sha(path)
@@ -581,38 +597,39 @@ class FingerprintTests(_DbCase):
         """
         path = self.root / "wal.sqlite"
         setup = _open_uncheckpointed(path)
-        if setup is not None:
-            self.addCleanup(setup.close)
         holder = sqlite3.connect(str(path))
-        self.addCleanup(holder.close)
-        before = _family_hashes(path)
-        names_before = sorted(item.name for item in path.parent.iterdir())
-        seen: list[str] = []
-        staged_inodes: list[tuple[int, int]] = []
-        with _sqlite351_ro_guard(seen, staged_inodes):
-            doc = fp.fingerprint(path)
-        self.assertEqual(doc["journal_mode"], "wal")
-        self.assertEqual(doc["tables"]["bills"]["count"], 2)
-        imm = sqlite3.connect(fp._immutable_uri(path), uri=True)
         try:
-            visible = imm.execute("SELECT amount FROM bills").fetchall()
-        finally:
-            imm.close()
-        self.assertEqual(visible, [(1,)])
-        self.assertEqual(_family_hashes(path), before)
-        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), names_before)
-        self.assertFalse(
-            any(name.startswith(".att0-fp-") for name in os.listdir(path.parent))
-        )
-        self.assertFalse(
-            any(
-                _path_from_uri(item) is not None
-                and _path_from_uri(item).resolve() == path.resolve()
-                for item in seen
+            before = _family_hashes(path)
+            names_before = sorted(item.name for item in path.parent.iterdir())
+            seen: list[str] = []
+            staged_inodes: list[tuple[int, int]] = []
+            with _sqlite351_ro_guard(seen, staged_inodes):
+                doc = fp.fingerprint(path)
+            self.assertEqual(doc["journal_mode"], "wal")
+            self.assertEqual(doc["tables"]["bills"]["count"], 2)
+            with closing(sqlite3.connect(fp._immutable_uri(path), uri=True)) as imm:
+                visible = imm.execute("SELECT amount FROM bills").fetchall()
+            self.assertEqual(visible, [(1,)])
+            self.assertEqual(_family_hashes(path), before)
+            self.assertEqual(sorted(item.name for item in path.parent.iterdir()), names_before)
+            self.assertFalse(
+                any(name.startswith(".att0-fp-") for name in os.listdir(path.parent))
             )
-        )
-        self.assertTrue(staged_inodes)
-        self.assertNotEqual(staged_inodes[0], (path.stat().st_dev, path.stat().st_ino))
+            self.assertFalse(
+                any(
+                    _path_from_uri(item) is not None
+                    and _path_from_uri(item).resolve() == path.resolve()
+                    for item in seen
+                )
+            )
+            self.assertTrue(staged_inodes)
+            self.assertNotEqual(staged_inodes[0], (path.stat().st_dev, path.stat().st_ino))
+        finally:
+            try:
+                holder.close()
+            finally:
+                if setup is not None:
+                    setup.close()
 
     def test_stage_space_is_main_plus_wal_plus_margin(self):
         path = self.root / "wal.sqlite"
@@ -987,11 +1004,13 @@ class BackupTests(_DbCase):
     def test_wal_source_round_trip(self):
         src = self.root / "wal-src.sqlite"
         conn = sqlite3.connect(str(src))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
-        conn.execute("INSERT INTO bills (amount) VALUES (7)")
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE bills (id INTEGER PRIMARY KEY, amount INTEGER)")
+            conn.execute("INSERT INTO bills (amount) VALUES (7)")
+            conn.commit()
+        finally:
+            conn.close()
         _drop_sidecars(src)
         self.assertEqual(_format_versions(src), (2, 2))
         before = _family_hashes(src)
@@ -1083,48 +1102,51 @@ class BackupTests(_DbCase):
         """A connection that already has the source open must not share -shm."""
         src = self.root / "wal-src.sqlite"
         setup = _open_uncheckpointed(src)
-        if setup is not None:
-            self.addCleanup(setup.close)
         holder = sqlite3.connect(str(src))
-        self.addCleanup(holder.close)
-        before = _family_hashes(src)
-        names_before = sorted(item.name for item in src.parent.iterdir())
-        dest = self.root / "wal-copy.sqlite"
-        seen: list[str] = []
-        staged_inodes: list[tuple[int, int]] = []
-        with _sqlite351_ro_guard(seen, staged_inodes):
-            line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
-        self.assertIn("quick_check=ok", line)
-        self.assertIn("journal_mode=delete", line)
-        self.assertEqual(_format_versions(dest), (1, 1))
-        self.assertEqual(_family_hashes(src), before)
-        self.assertEqual(
-            sorted(
-                item.name
-                for item in src.parent.iterdir()
-                if item.name != dest.name
-            ),
-            names_before,
-        )
-        self.assertFalse(
-            any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
-        )
-        self.assertFalse(
-            any(
-                _path_from_uri(item) is not None
-                and _path_from_uri(item).resolve() == src.resolve()
-                for item in seen
-            )
-        )
-        self.assertTrue(staged_inodes)
-        self.assertNotEqual(staged_inodes[0], (src.stat().st_dev, src.stat().st_ino))
-        check = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            rows = check.execute("SELECT amount FROM bills ORDER BY id").fetchall()
-            self.assertEqual(check.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            before = _family_hashes(src)
+            names_before = sorted(item.name for item in src.parent.iterdir())
+            dest = self.root / "wal-copy.sqlite"
+            seen: list[str] = []
+            staged_inodes: list[tuple[int, int]] = []
+            with _sqlite351_ro_guard(seen, staged_inodes):
+                line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+            self.assertIn("quick_check=ok", line)
+            self.assertIn("journal_mode=delete", line)
+            self.assertEqual(_format_versions(dest), (1, 1))
+            self.assertEqual(_family_hashes(src), before)
+            self.assertEqual(
+                sorted(
+                    item.name
+                    for item in src.parent.iterdir()
+                    if item.name != dest.name
+                ),
+                names_before,
+            )
+            self.assertFalse(
+                any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
+            )
+            self.assertFalse(
+                any(
+                    _path_from_uri(item) is not None
+                    and _path_from_uri(item).resolve() == src.resolve()
+                    for item in seen
+                )
+            )
+            self.assertTrue(staged_inodes)
+            self.assertNotEqual(staged_inodes[0], (src.stat().st_dev, src.stat().st_ino))
+            with closing(
+                sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+            ) as check:
+                rows = check.execute("SELECT amount FROM bills ORDER BY id").fetchall()
+                self.assertEqual(check.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(rows, [(1,), (2,)])
         finally:
-            check.close()
-        self.assertEqual(rows, [(1,), (2,)])
+            try:
+                holder.close()
+            finally:
+                if setup is not None:
+                    setup.close()
 
     def test_stage_space_refusal_leaves_no_dest(self):
         src = self.root / "wal-src.sqlite"
