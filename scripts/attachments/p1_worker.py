@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -148,14 +149,70 @@ def _html_to_text(raw: str) -> str:
     return "\n".join(part.strip() for part in parser.parts if part.strip())
 
 
+def _mkdir_private(path: Path) -> None:
+    """Create ``path`` and force mode 0700. mkdir applies umask, so chmod after."""
+    if path.is_symlink():
+        raise OSError("stage path is not a directory")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise OSError("stage path is not a directory")
+    os.chmod(path, 0o700)
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def _publish_bytes(final: Path, data: bytes) -> None:
+    """Write via O_EXCL|O_NOFOLLOW temp, fsync, then replace.
+
+    A symlink at ``final`` is replaced and never followed. A crash before
+    replace leaves no partial final file.
+    """
+    _mkdir_private(final.parent)
+    tmp = final.with_name(
+        ".%s.%d.%s.partial" % (final.name, os.getpid(), os.urandom(4).hex())
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        try:
+            while view:
+                wrote = os.write(fd, view)
+                if wrote <= 0:
+                    raise OSError("stage write failed")
+                view = view[wrote:]
+        finally:
+            view.release()
+        os.fsync(fd)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _unlink_quiet(tmp)
+        raise
+    os.close(fd)
+    try:
+        os.replace(str(tmp), str(final))
+    except Exception:
+        _unlink_quiet(tmp)
+        raise
+
+
 def _write_text(dest: Path, text: str, *, extractor: str) -> int:
     clipped = att0.truncate_extract_text(text)
     body = clipped["text"]
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(body, encoding="utf-8")
+    data = body.encode("utf-8")
+    _publish_bytes(dest, data)
     return _emit(
         {
-            "bytes_out": dest.stat().st_size,
+            "bytes_out": len(data),
             "error": None,
             "extractor": extractor,
             "status": "ok",
@@ -195,16 +252,17 @@ def _extract_pdf(src: Path, dest: Path, *, timeout_s: float) -> int:
                 "truncated": False,
             }
         )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(dest.parent)
+    tmp_out = dest.with_name(".%s.pdftotext.%d.tmp" % (dest.name, os.getpid()))
     try:
         proc = subprocess.run(
-            [binary, "-q", "-enc", "UTF-8", str(src), str(dest)],
+            [binary, "-q", "-enc", "UTF-8", str(src), str(tmp_out)],
             timeout=timeout_s,
             capture_output=True,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        dest.unlink(missing_ok=True)
+        _unlink_quiet(tmp_out)
         return _emit(
             {
                 "bytes_out": 0,
@@ -214,14 +272,15 @@ def _extract_pdf(src: Path, dest: Path, *, timeout_s: float) -> int:
                 "truncated": False,
             }
         )
-    if proc.returncode != 0 or not dest.is_file():
-        dest.unlink(missing_ok=True)
+    if proc.returncode != 0 or not tmp_out.is_file():
+        _unlink_quiet(tmp_out)
         return _fail("pdftotext_failed", extractor="pdftotext")
     try:
-        text = dest.read_text(encoding="utf-8")
+        text = tmp_out.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        dest.unlink(missing_ok=True)
+        _unlink_quiet(tmp_out)
         return _fail("pdftotext_output", extractor="pdftotext")
+    _unlink_quiet(tmp_out)
     return _write_text(dest, text, extractor="pdftotext")
 
 

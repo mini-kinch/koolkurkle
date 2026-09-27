@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import sqlite3
 import ssl
-import subprocess
+import stat
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -540,24 +542,31 @@ class ImapPartClientTests(unittest.TestCase):
         def boom(*_args, **_kwargs):
             raise AssertionError("network is forbidden")
 
-        with mock.patch("socket.create_connection", boom), mock.patch(
-            "attachments.fetch_p1.imaplib.IMAP4", side_effect=AssertionError("plain IMAP")
-        ):
-            client = fetch_p1.ImapPartClient(
-                "imap.example.com",
-                "user@example.com",
-                timeout=5,
-                imap_factory=FakeSSL,
-                password_fn=lambda: SECRET,
-            )
-            with client:
-                blob = client.fetch_part("INBOX", "9", "2")
-        self.assertEqual(blob, b"hello")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "part"
+            with mock.patch("socket.create_connection", boom), mock.patch(
+                "attachments.fetch_p1.imaplib.IMAP4", side_effect=AssertionError("plain IMAP")
+            ):
+                client = fetch_p1.ImapPartClient(
+                    "imap.example.com",
+                    "user@example.com",
+                    timeout=5,
+                    imap_factory=FakeSSL,
+                    password_fn=lambda: SECRET,
+                )
+                with client:
+                    nbytes = client.fetch_part("INBOX", "9", "2", dest)
+            self.assertEqual(nbytes, 5)
+            self.assertEqual(dest.read_bytes(), b"hello")
+            blob = dest.read_bytes()
         self.assertEqual(seen["init"][:3], ("imap.example.com", 993, 5))
         self.assertEqual(seen["init"][3].verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(seen["init"][3].check_hostname)
         self.assertEqual(seen["select"], ('"INBOX"', True))
-        self.assertEqual(seen["uid"], ("FETCH", "9", "(BODY.PEEK[2])"))
+        self.assertEqual(
+            seen["uid"],
+            ("FETCH", "9", "(BODY.PEEK[2]<0.%d>)" % fetch_p1.CHUNK_BYTES),
+        )
         self.assertNotIn(SECRET, blob.decode("ascii"))
         self.assertTrue(seen["logout"])
         with self.assertRaises(fetch_p1.FetchRefuse):
@@ -567,6 +576,280 @@ class ImapPartClientTests(unittest.TestCase):
                 imap_factory=fetch_p1.imaplib.IMAP4,
                 password_fn=lambda: SECRET,
             )
+
+
+def _assert_pid_gone(testcase: unittest.TestCase, pid: int) -> None:
+    """Portable liveness check. ProcessLookupError means the pid is gone."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        if time.monotonic() >= deadline:
+            testcase.fail("pid %s is still running" % pid)
+        time.sleep(0.05)
+
+
+class PartialFetchCapTests(unittest.TestCase):
+    def test_catalog_small_body_over_cap_is_chunked_and_not_stored(self):
+        cap = 250
+        chunk = 100
+        body = b"B" * 5000
+        fetches = []
+
+        class FakeSSL:
+            def __init__(self, host, port, timeout=None, ssl_context=None):
+                del host, port, timeout, ssl_context
+
+            def login(self, user, password):
+                del user, password
+                return "OK", [b""]
+
+            def select(self, mailbox, readonly=False):
+                fetches.append(("SELECT", mailbox, readonly))
+                return "OK", [b"1"]
+
+            def uid(self, cmd, uid, item):
+                fetches.append((cmd, uid, item))
+                marker = "<"
+                start = item.find(marker)
+                end = item.find(">", start)
+                if start < 0 or end < 0 or "." not in item[start:end]:
+                    chunk_bytes = body
+                    offset = 0
+                else:
+                    spec = item[start + 1:end]
+                    offset_text, count_text = spec.split(".", 1)
+                    offset = int(offset_text)
+                    count = int(count_text)
+                    chunk_bytes = body[offset:offset + count]
+                meta = ("1 (BODY[1]<%d> {%d}" % (offset, len(chunk_bytes))).encode("ascii")
+                return "OK", [(meta, chunk_bytes), b")"]
+
+            def logout(self):
+                return "BYE", [b""]
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("network is forbidden")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "mailroom-copy.sqlite"
+            stage = root / "stage"
+            _seed(
+                db,
+                [
+                    ("msg-lie", "imap-live", "INBOX", "bills", "21"),
+                    ("msg-catalog", "imap-live", "INBOX", "bills", "22"),
+                ],
+                [
+                    (1, "msg-lie", "1", "note.txt", "text/plain", 10, "attachment"),
+                    (2, "msg-catalog", "1", "huge.txt", "text/plain", cap + 1, "attachment"),
+                ],
+            )
+            with mock.patch("socket.create_connection", boom):
+                client = fetch_p1.ImapPartClient(
+                    "imap.example.com",
+                    "user@example.com",
+                    timeout=5,
+                    imap_factory=FakeSSL,
+                    password_fn=lambda: SECRET,
+                )
+                with client:
+                    report = fetch_p1.run_fetch_extract(
+                        db,
+                        stage,
+                        dry_run=False,
+                        part_client=client,
+                        max_bytes=cap,
+                        chunk_size=chunk,
+                    )
+            self.assertEqual(_by_id(report, 1)["status"], "too_big")
+            self.assertEqual(_by_id(report, 1)["fetched_bytes"], 0)
+            self.assertEqual(_by_id(report, 2)["status"], "too_big")
+            self.assertFalse((stage / "bytes" / "1").exists())
+            self.assertFalse((stage / "bytes" / "2").exists())
+            self.assertFalse((stage / "text" / "1.txt").exists())
+            self.assertEqual(list((stage / "bytes").iterdir()), [])
+            commands = [item for item in fetches if item[0] == "FETCH"]
+            full_fetches = (len(body) + chunk - 1) // chunk
+            self.assertEqual(len(commands), (cap // chunk) + 1)
+            self.assertGreater(len(commands), 1)
+            self.assertLess(len(commands), full_fetches)
+            self.assertEqual(
+                [item[2] for item in commands],
+                [
+                    "(BODY.PEEK[1]<0.100>)",
+                    "(BODY.PEEK[1]<100.100>)",
+                    "(BODY.PEEK[1]<200.51>)",
+                ],
+            )
+            self.assertEqual([item[1] for item in commands], ["21", "21", "21"])
+            self.assertIn(("SELECT", '"INBOX"', True), fetches)
+            for path in stage.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(SECRET.encode("ascii"), path.read_bytes())
+
+
+class WorkerKillTests(unittest.TestCase):
+    def test_timeout_kills_grandchild(self):
+        script = (
+            "import os, subprocess, sys, time\n"
+            "pidfile = sys.argv[1]\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "handle = open(pidfile, 'w', encoding='ascii')\n"
+            "handle.write(str(child.pid))\n"
+            "handle.flush()\n"
+            "os.fsync(handle.fileno())\n"
+            "handle.close()\n"
+            "time.sleep(60)\n"
+        )
+
+        def fetch(folder, uid, part):
+            del folder, uid, part
+            return b"note"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pidfile = root / "grand.pid"
+            db = root / "mailroom-copy.sqlite"
+            stage = root / "stage"
+            _seed(
+                db,
+                [("msg-sleep", "imap-live", "INBOX", "bills", "31")],
+                [(1, "msg-sleep", "1", "note.txt", "text/plain", 4, "attachment")],
+            )
+
+            def worker_argv(kind, src, dest, timeout_s):
+                del kind, src, dest, timeout_s
+                return [sys.executable, "-c", script, str(pidfile)]
+
+            started = time.monotonic()
+            report = fetch_p1.run_fetch_extract(
+                db,
+                stage,
+                dry_run=False,
+                fetch_part=fetch,
+                timeout_s=2.0,
+                worker_argv=worker_argv,
+            )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10.0)
+            self.assertEqual(_by_id(report, 1)["status"], "timeout")
+            self.assertTrue(pidfile.is_file())
+            pid = int(pidfile.read_text(encoding="ascii"))
+            _assert_pid_gone(self, pid)
+            self.assertFalse((stage / "text" / "1.txt").exists())
+
+    def test_output_flood_is_bounded_error(self):
+        script = (
+            "import os, sys, time\n"
+            "handle = open(sys.argv[1], 'w', encoding='ascii')\n"
+            "handle.write(str(os.getpid()))\n"
+            "handle.flush()\n"
+            "os.fsync(handle.fileno())\n"
+            "handle.close()\n"
+            "chunk = b'x' * 65536\n"
+            "for _ in range(32):\n"
+            "    sys.stdout.buffer.write(chunk)\n"
+            "    sys.stderr.buffer.write(chunk)\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.stderr.buffer.flush()\n"
+            "time.sleep(60)\n"
+        )
+        self.assertEqual(fetch_p1.OUTPUT_CAP, 64 * 1024)
+
+        def fetch(folder, uid, part):
+            del folder, uid, part
+            return b"note"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pidfile = root / "flood.pid"
+            db = root / "mailroom-copy.sqlite"
+            stage = root / "stage"
+            _seed(
+                db,
+                [("msg-flood", "imap-live", "INBOX", "bills", "32")],
+                [(1, "msg-flood", "1", "note.txt", "text/plain", 4, "attachment")],
+            )
+
+            def worker_argv(kind, src, dest, timeout_s):
+                del kind, src, dest, timeout_s
+                return [sys.executable, "-c", script, str(pidfile)]
+
+            started = time.monotonic()
+            report = fetch_p1.run_fetch_extract(
+                db,
+                stage,
+                dry_run=False,
+                fetch_part=fetch,
+                timeout_s=8.0,
+                worker_argv=worker_argv,
+            )
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 4.0)
+            row = _by_id(report, 1)
+            self.assertEqual(row["status"], "error")
+            self.assertEqual(row["error"], "output_overflow")
+            self.assertTrue(pidfile.is_file())
+            _assert_pid_gone(self, int(pidfile.read_text(encoding="ascii")))
+            self.assertFalse((stage / "text" / "1.txt").exists())
+            for path in stage.rglob("*"):
+                if path.is_file():
+                    self.assertLess(path.stat().st_size, fetch_p1.OUTPUT_CAP)
+
+
+class StagePermTests(unittest.TestCase):
+    def test_dirs_0700_files_0600_and_symlink_not_followed(self):
+        def fetch(folder, uid, part):
+            del folder, uid, part
+            return b"hello-bytes"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside.txt"
+            outside.write_bytes(b"OUTSIDE_ORIGINAL")
+            db = root / "mailroom-copy.sqlite"
+            stage = root / "stage"
+            _seed(
+                db,
+                [("msg-ok", "imap-live", "INBOX", "bills", "41")],
+                [(1, "msg-ok", "1", "note.txt", "text/plain", 11, "attachment")],
+            )
+            old_mask = os.umask(0)
+            try:
+                bytes_dir = stage / "bytes"
+                bytes_dir.mkdir(parents=True)
+                link = bytes_dir / "1"
+                link.symlink_to(outside)
+                report = fetch_p1.run_fetch_extract(
+                    db,
+                    stage,
+                    dry_run=False,
+                    fetch_part=fetch,
+                )
+            finally:
+                os.umask(old_mask)
+            self.assertEqual(_by_id(report, 1)["status"], "ok")
+            self.assertEqual(outside.read_bytes(), b"OUTSIDE_ORIGINAL")
+            stored = stage / "bytes" / "1"
+            self.assertTrue(stored.is_file())
+            self.assertFalse(stored.is_symlink())
+            self.assertEqual(stored.read_bytes(), b"hello-bytes")
+            text = stage / "text" / "1.txt"
+            status = stage / "status" / "1.json"
+            self.assertEqual(text.read_text(encoding="utf-8"), "hello-bytes")
+            self.assertIn('"status": "ok"', status.read_text(encoding="utf-8"))
+            for directory in (stage, stage / "bytes", stage / "text", stage / "status"):
+                mode = stat.S_IMODE(directory.stat().st_mode)
+                self.assertEqual(mode, 0o700, directory.name)
+            for path in (stored, text, status):
+                mode = stat.S_IMODE(path.stat().st_mode)
+                self.assertEqual(mode, 0o600, path.name)
 
 
 class AskMailUntouchedTests(unittest.TestCase):

@@ -6,9 +6,12 @@ Reads an attachment catalog from a copy database and, unless
 extracts P1 text in a child process.
 
 Refuses basename ``mailroom.sqlite``. There is no override flag.
-``lane=auth`` rows are not fetched and not extracted. A part over
-50 MB is ``too_big`` and is not fetched. Archives are recorded as
-skipped and are never unpacked. Extracted text is truncated at 2 MB.
+``lane=auth`` rows are not fetched and not extracted. A catalog size
+over 50 MB is ``too_big`` and is not fetched. Apply still downloads
+other parts as ``BODY.PEEK[part]<offset.count>`` chunks so a wrong
+catalog size cannot pull the whole literal into memory. Archives are
+recorded as skipped and are never unpacked. Extracted text is
+truncated at 2 MB.
 """
 
 from __future__ import annotations
@@ -18,10 +21,13 @@ import imaplib
 import json
 import os
 import re
+import selectors
+import signal
 import sqlite3
 import ssl
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +50,11 @@ from sor_writer_gate import (  # noqa: E402
 
 WORKER = HERE / "p1_worker.py"
 BLOB_CAP = att0.BLOB_TOO_BIG_BYTES
+CHUNK_BYTES = 1024 * 1024
+OUTPUT_CAP = 64 * 1024
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+_OPEN_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 DEFAULT_TIMEOUT_S = 30.0
 _IMAP_SSL_PORT = 993
 
@@ -113,6 +124,10 @@ class FetchRefuse(RuntimeError):
 
 class PayloadTooBig(Exception):
     """Fetched literal is over the byte cap. Internal; status is too_big."""
+
+
+class WorkerOutputOverflow(Exception):
+    """Worker stdout or stderr exceeded the capture cap."""
 
 
 def quote_imap_mailbox(name: str) -> str:
@@ -228,11 +243,122 @@ def declared_literal_size(data: Any) -> int | None:
     return None
 
 
-class ImapPartClient:
-    """UID FETCH of ``BODY.PEEK[part]`` over imaplib.IMAP4_SSL port 993.
+def _mkdir_private(path: Path) -> None:
+    """Create ``path`` and force mode 0700. mkdir applies umask, so chmod after."""
+    if path.is_symlink():
+        raise FetchRefuse("stage path is not a directory")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise FetchRefuse("stage path is not a directory")
+    os.chmod(path, _DIR_MODE)
 
-    Readonly EXAMINE. The password comes from ``password_fn`` (default
-    Keychain via ``read_imap_app_password``). Plain IMAP is refused.
+
+def _ensure_stage_dirs(stage: Path) -> None:
+    for path in (stage, stage / "bytes", stage / "text", stage / "status"):
+        _mkdir_private(path)
+
+
+def _partial_path(final: Path) -> Path:
+    token = os.urandom(4).hex()
+    return final.with_name(".%s.%d.%s.partial" % (final.name, os.getpid(), token))
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def _discard_partials(final: Path) -> None:
+    parent = final.parent
+    if parent.is_symlink() or not parent.is_dir():
+        return
+    prefix = ".%s." % final.name
+    try:
+        names = list(parent.iterdir())
+    except OSError:
+        return
+    for entry in names:
+        if entry.name.startswith(prefix) and (
+            entry.name.endswith(".partial") or entry.name.endswith(".tmp")
+        ):
+            _unlink_quiet(entry)
+
+
+class _PrivateFile:
+    """Temp file next to ``final``, published with replace so a symlink is not followed."""
+
+    def __init__(self, final: Path) -> None:
+        _mkdir_private(final.parent)
+        self.final = final
+        self.tmp = _partial_path(final)
+        self.fd = -1
+        self.published = False
+        self.fd = os.open(self.tmp, _OPEN_FLAGS, _FILE_MODE)
+        try:
+            os.fchmod(self.fd, _FILE_MODE)
+        except OSError:
+            self.abort()
+            raise
+
+    def write(self, data: bytes) -> None:
+        view = memoryview(data)
+        try:
+            while view:
+                wrote = os.write(self.fd, view)
+                if wrote <= 0:
+                    raise FetchRefuse("stage write failed")
+                view = view[wrote:]
+        finally:
+            view.release()
+
+    def finish(self) -> None:
+        fd = self.fd
+        self.fd = -1
+        try:
+            os.fsync(fd)
+            os.close(fd)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        os.replace(self.tmp, self.final)
+        self.published = True
+
+    def abort(self) -> None:
+        fd = self.fd
+        self.fd = -1
+        if isinstance(fd, int) and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not self.published:
+            tmp = getattr(self, "tmp", None)
+            if tmp is not None:
+                _unlink_quiet(tmp)
+
+
+def _publish_bytes(final: Path, data: bytes) -> None:
+    handle = _PrivateFile(final)
+    try:
+        handle.write(data)
+        handle.finish()
+    except Exception:
+        handle.abort()
+        raise
+
+
+class ImapPartClient:
+    """UID FETCH of partial ``BODY.PEEK[part]<offset.count>`` ranges.
+
+    Readonly EXAMINE on imaplib.IMAP4_SSL port 993. The password comes
+    from ``password_fn`` (default Keychain via ``read_imap_app_password``).
+    Plain IMAP is refused. Each chunk is written to ``dest`` and dropped
+    so peak memory stays one chunk.
     """
 
     def __init__(
@@ -310,34 +436,78 @@ class ImapPartClient:
             raise FetchRefuse("imap select failed")
         self.mailbox = str(folder)
 
-    def fetch_part(self, folder: str, uid: str, part_id: str) -> bytes:
+    def fetch_part(
+        self,
+        folder: str,
+        uid: str,
+        part_id: str,
+        dest: Path,
+        *,
+        cap: int = BLOB_CAP,
+        chunk_size: int = CHUNK_BYTES,
+    ) -> int:
+        """Stream one part into ``dest``. Return the stored size.
+
+        Requests ``BODY.PEEK[part]<offset.chunk>`` (still PEEK, still
+        readonly EXAMINE). Stops and raises PayloadTooBig as soon as the
+        cumulative size would exceed ``cap``, and does not leave ``dest``.
+        """
         if not _PART_RE.match(str(part_id)):
             raise FetchRefuse("part id refused")
         if not _UID_RE.match(str(uid)):
             raise FetchRefuse("uid refused")
+        if cap < 1 or cap > BLOB_CAP:
+            raise FetchRefuse("byte cap refuses above 50 MB")
+        if chunk_size < 1:
+            raise FetchRefuse("chunk size refused")
         if self._conn is None:
             raise FetchRefuse("imap select failed")
         if self.mailbox != str(folder):
             self._examine(str(folder))
-        item = "(BODY.PEEK[%s])" % part_id
+        handle = _PrivateFile(Path(dest))
+        total = 0
+        offset = 0
         try:
-            typ, data = self._conn.uid("FETCH", str(uid), item)
+            while True:
+                room = cap - total
+                span = chunk_size if chunk_size <= room else room + 1
+                if span < 1:
+                    break
+                item = "(BODY.PEEK[%s]<%d.%d>)" % (part_id, offset, span)
+                try:
+                    typ, data = self._conn.uid("FETCH", str(uid), item)
+                except Exception:
+                    raise FetchRefuse("part fetch failed") from None
+                if typ != "OK":
+                    raise FetchRefuse("part fetch failed")
+                declared = declared_literal_size(data)
+                try:
+                    blob = parse_fetch_literal(data)
+                except FetchRefuse:
+                    if offset == 0:
+                        raise
+                    blob = b""
+                except Exception:
+                    raise FetchRefuse("part fetch failed") from None
+                n = len(blob)
+                counted = n
+                if declared is not None and declared > counted:
+                    counted = declared
+                if total + counted > cap:
+                    raise PayloadTooBig()
+                if n:
+                    handle.write(blob)
+                total += n
+                del blob
+                del data
+                if n != span:
+                    break
+                offset += n
+            handle.finish()
         except Exception:
-            raise FetchRefuse("part fetch failed") from None
-        if typ != "OK":
-            raise FetchRefuse("part fetch failed")
-        declared = declared_literal_size(data)
-        if declared is not None and declared > BLOB_CAP:
-            raise PayloadTooBig()
-        try:
-            blob = parse_fetch_literal(data)
-        except FetchRefuse:
+            handle.abort()
             raise
-        except Exception:
-            raise FetchRefuse("part fetch failed") from None
-        if len(blob) > BLOB_CAP:
-            raise PayloadTooBig()
-        return blob
+        return total
 
 
 def _connect_ro(path: Path) -> sqlite3.Connection:
@@ -497,23 +667,170 @@ def _default_worker_argv(kind: str, src: Path, dest: Path, timeout_s: float) -> 
     ]
 
 
+def _close_pipes(proc: subprocess.Popen) -> None:
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGKILL the worker session, then wait so grandchildren are gone too."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+
+
+def _pipe_extra(fd: int) -> bool:
+    """True when another byte is already buffered. That byte is consumed."""
+    try:
+        extra = os.read(fd, 1)
+    except (BlockingIOError, OSError):
+        return False
+    return extra != b""
+
+
+def _communicate_capped(
+    proc: subprocess.Popen,
+    timeout: float,
+    cap: int,
+) -> tuple:
+    """Read at most ``cap`` bytes from stdout and from stderr.
+
+    On timeout or overflow, kill the process group and wait.
+    The third value is None, ``timeout``, or ``overflow``.
+    """
+    out_parts: list = []
+    err_parts: list = []
+    counts = {"out": 0, "err": 0}
+    problem = None
+    sel = selectors.DefaultSelector()
+    open_streams: dict = {}
+    try:
+        for stream, name in ((proc.stdout, "out"), (proc.stderr, "err")):
+            if stream is None:
+                continue
+            os.set_blocking(stream.fileno(), False)
+            sel.register(stream, selectors.EVENT_READ, name)
+            open_streams[stream] = name
+        deadline = time.monotonic() + timeout
+        while open_streams and problem is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                problem = "timeout"
+                break
+            events = sel.select(timeout=remaining)
+            if not events:
+                if time.monotonic() >= deadline:
+                    problem = "timeout"
+                    break
+                continue
+            for key, _mask in events:
+                stream = key.fileobj
+                name = key.data
+                if stream not in open_streams:
+                    continue
+                room = cap - counts[name]
+                if room <= 0:
+                    problem = "overflow"
+                    break
+                try:
+                    chunk = os.read(stream.fileno(), room)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    sel.unregister(stream)
+                    del open_streams[stream]
+                    continue
+                if chunk == b"":
+                    sel.unregister(stream)
+                    del open_streams[stream]
+                    continue
+                if name == "out":
+                    out_parts.append(chunk)
+                else:
+                    err_parts.append(chunk)
+                counts[name] += len(chunk)
+                if counts[name] >= cap and _pipe_extra(stream.fileno()):
+                    problem = "overflow"
+                    break
+        if problem is None and proc.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                problem = "timeout"
+            else:
+                try:
+                    proc.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    problem = "timeout"
+    finally:
+        sel.close()
+    stdout = b"".join(out_parts)
+    stderr = b"".join(err_parts)
+    if problem is not None:
+        _kill_group(proc)
+        _close_pipes(proc)
+        return stdout, stderr, problem
+    proc.wait()
+    _close_pipes(proc)
+    return stdout, stderr, None
+
+
 def _default_runner(
     argv: list[str],
     timeout: float,
     env: dict[str, str],
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        argv,
-        timeout=timeout,
-        capture_output=True,
+    """Run p1_worker in its own session and bound its output.
+
+    No shell. On timeout or an output flood, SIGKILL the process group
+    so pdftotext grandchildren die too, then wait.
+    """
+    if isinstance(argv, (str, bytes)) or not isinstance(argv, (list, tuple)):
+        raise FetchRefuse("worker argv must be a list")
+    command = [str(part) for part in argv]
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=env,
-        check=False,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr, problem = _communicate_capped(proc, float(timeout), OUTPUT_CAP)
+    except BaseException:
+        _kill_group(proc)
+        _close_pipes(proc)
+        raise
+    if problem == "timeout":
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+    if problem == "overflow":
+        raise WorkerOutputOverflow()
+    code = proc.returncode
+    if code is None:
+        code = 1
+    return subprocess.CompletedProcess(command, int(code), stdout, stderr)
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    raw = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    _publish_bytes(path, raw)
 
 
 def _status_payload(record: dict[str, Any]) -> dict[str, Any]:
@@ -567,6 +884,7 @@ def _run_worker(
     try:
         proc = runner(argv, timeout_s, _child_env(env))
     except subprocess.TimeoutExpired:
+        _discard_partials(dest)
         dest.unlink(missing_ok=True)
         return {
             "status": "timeout",
@@ -574,9 +892,19 @@ def _run_worker(
             "error": "timeout",
             "extractor": "p1-worker",
         }
+    except WorkerOutputOverflow:
+        _discard_partials(dest)
+        dest.unlink(missing_ok=True)
+        return {
+            "status": "error",
+            "truncated": False,
+            "error": "output_overflow",
+            "extractor": "p1-worker",
+        }
     stdout = getattr(proc, "stdout", b"") or b""
     code = int(getattr(proc, "returncode", 1))
     if code != 0:
+        _discard_partials(dest)
         dest.unlink(missing_ok=True)
         return {
             "status": "error",
@@ -586,6 +914,7 @@ def _run_worker(
         }
     payload = _parse_worker_stdout(stdout if isinstance(stdout, (bytes, bytearray)) else str(stdout).encode("utf-8"))
     if payload is None:
+        _discard_partials(dest)
         dest.unlink(missing_ok=True)
         return {
             "status": "error",
@@ -597,6 +926,7 @@ def _run_worker(
     if status not in {"ok", "extractor_missing", "skipped_archive", "error", "too_big", "timeout"}:
         status = "error"
     if status != "ok":
+        _discard_partials(dest)
         dest.unlink(missing_ok=True)
     return {
         "status": status,
@@ -660,8 +990,10 @@ def run_fetch_extract(
     *,
     dry_run: bool = True,
     fetch_part: Callable[[str, str, str], bytes] | None = None,
+    part_client: Any = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     max_bytes: int = BLOB_CAP,
+    chunk_size: int = CHUNK_BYTES,
     runner: Callable | None = None,
     worker_argv: Callable | None = None,
     env: dict[str, str] | None = None,
@@ -673,7 +1005,9 @@ def run_fetch_extract(
     """Plan or run byte fetch plus P1 extract. Dry-run writes nothing.
 
     ``max_bytes`` cannot exceed the 50 MB cap. A smaller value is only
-    for tests of the same boundary check.
+    for tests of the same boundary check. ``part_client`` streams partial
+    BODY.PEEK ranges into the stage; ``fetch_part`` is the in-memory
+    callback used by tests.
     """
     path = Path(db)
     stage_path = Path(stage)
@@ -682,6 +1016,8 @@ def run_fetch_extract(
     refuse_copy_basename(path)
     if max_bytes < 1 or max_bytes > BLOB_CAP:
         raise FetchRefuse("byte cap refuses above 50 MB")
+    if chunk_size < 1:
+        raise FetchRefuse("chunk size refused")
     stage_text = str(stage_path)
     if "://" in stage_text or stage_text.startswith("//"):
         raise FetchRefuse("stage dir must be local")
@@ -693,7 +1029,7 @@ def run_fetch_extract(
         lock_path=lock_path,
         lock_held=lock_held,
     )
-    if not dry_run and fetch_part is None:
+    if not dry_run and fetch_part is None and part_client is None:
         raise FetchRefuse("fetch client required")
     if not dry_run and stage_path.exists() and not stage_path.is_dir():
         raise FetchRefuse("stage path is not a directory")
@@ -709,6 +1045,7 @@ def run_fetch_extract(
     if dry_run:
         return _report(path, stage_path, planned, dry_run=True)
 
+    _ensure_stage_dirs(stage_path)
     call_runner = _default_runner if runner is None else runner
     call_argv = _default_worker_argv if worker_argv is None else worker_argv
     by_id = {row["attachment_id"]: row for row in rows}
@@ -727,9 +1064,35 @@ def run_fetch_extract(
         token = _token(record["attachment_id"])
         assert token is not None
         kind = str(record["extractor"])
+        bytes_path = stage_path / "bytes" / token
+        text_rel = "text/%s.txt" % token
+        bytes_rel = "bytes/%s" % token
+        dest = stage_path / "text" / ("%s.txt" % token)
         try:
-            blob = fetch_part(str(row["folder"]), str(row["uid"]), str(row["part_id"]))
+            if part_client is not None:
+                fetched_len = int(
+                    part_client.fetch_part(
+                        str(row["folder"]),
+                        str(row["uid"]),
+                        str(row["part_id"]),
+                        bytes_path,
+                        cap=max_bytes,
+                        chunk_size=chunk_size,
+                    )
+                )
+            else:
+                blob = fetch_part(str(row["folder"]), str(row["uid"]), str(row["part_id"]))
+                if not isinstance(blob, (bytes, bytearray)):
+                    raise FetchRefuse("part fetch failed")
+                kept = accept_payload(bytes(blob), max_bytes)
+                del blob
+                if kept is None:
+                    raise PayloadTooBig()
+                _publish_bytes(bytes_path, kept)
+                fetched_len = len(kept)
+                del kept
         except PayloadTooBig:
+            _discard_partials(bytes_path)
             record = _record(
                 attachment_id=record["attachment_id"],
                 message_id=record["message_id"],
@@ -744,6 +1107,7 @@ def run_fetch_extract(
             records.append(record)
             continue
         except Exception:
+            _discard_partials(bytes_path)
             record = _record(
                 attachment_id=record["attachment_id"],
                 message_id=record["message_id"],
@@ -757,42 +1121,6 @@ def run_fetch_extract(
             _write_json(stage_path / "status" / ("%s.json" % token), _status_payload(record))
             records.append(record)
             continue
-        if not isinstance(blob, (bytes, bytearray)):
-            record = _record(
-                attachment_id=record["attachment_id"],
-                message_id=record["message_id"],
-                part_id=record["part_id"],
-                mime=record["mime"],
-                size=record["size"],
-                lane=record["lane"],
-                status="error",
-                error="fetch_failed",
-            )
-            _write_json(stage_path / "status" / ("%s.json" % token), _status_payload(record))
-            records.append(record)
-            continue
-        kept = accept_payload(bytes(blob), max_bytes)
-        del blob
-        if kept is None:
-            record = _record(
-                attachment_id=record["attachment_id"],
-                message_id=record["message_id"],
-                part_id=record["part_id"],
-                mime=record["mime"],
-                size=record["size"],
-                lane=record["lane"],
-                status="too_big",
-                error="too_big",
-            )
-            _write_json(stage_path / "status" / ("%s.json" % token), _status_payload(record))
-            records.append(record)
-            continue
-        bytes_path = stage_path / "bytes" / token
-        text_rel = "text/%s.txt" % token
-        bytes_rel = "bytes/%s" % token
-        dest = stage_path / "text" / ("%s.txt" % token)
-        bytes_path.parent.mkdir(parents=True, exist_ok=True)
-        bytes_path.write_bytes(kept)
         outcome = _run_worker(
             kind=kind,
             src=bytes_path,
@@ -807,7 +1135,7 @@ def run_fetch_extract(
             bytes_rel = None
             fetched = 0
         else:
-            fetched = len(kept)
+            fetched = fetched_len
         if outcome["status"] != "ok":
             text_rel = None
         record = _record(
@@ -974,12 +1302,12 @@ def main(
                 password_fn=password_fn,
             )
             client.__enter__()
-            part_fn = client.fetch_part
         report = run_fetch_extract(
             args.db,
             args.stage,
             dry_run=dry_run,
             fetch_part=part_fn,
+            part_client=client,
             timeout_s=args.timeout,
             runner=runner,
             worker_argv=worker_argv,

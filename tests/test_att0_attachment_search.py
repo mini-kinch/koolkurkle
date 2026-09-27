@@ -1195,7 +1195,14 @@ class HermeticBoundaryTests(unittest.TestCase):
                 self.assertNotIn("import subprocess", text, path.name)
             self.assertNotIn("os.system", text, path.name)
             self.assertNotIn("os.popen", text, path.name)
-            self.assertNotIn("Popen(", text, path.name)
+            if path.name == "fetch_p1.py":
+                # The worker supervisor uses Popen in a new session so a
+                # timeout can SIGKILL the extractor and its grandchildren.
+                self.assertIn("Popen(", text)
+                self.assertIn("start_new_session=True", text)
+                self.assertNotIn("shell=True", text)
+            else:
+                self.assertNotIn("Popen(", text, path.name)
             self.assertNotIn("ollama", text.lower(), path.name)
             self.assertNotIn("embed_lib", text, path.name)
             self.assertNotIn("11434", text, path.name)
