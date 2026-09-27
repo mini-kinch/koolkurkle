@@ -187,17 +187,15 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 ## MBP SoR vs Mini copy-only
 
-Standing ops contract: **MBP** is the live Source of Record for `mailroom.sqlite`. **Mini** is copy-only until PR-5. No Mini writers against SoR while rem-legacy holds the live file. PR-5 cutover is still gated on rem-legacy **EXIT 0**.
+Since the 2026-09-24 SoR flip.
 
-- MBP holds the live SoR DB (`$HOME/MailArchive/mailroom.sqlite` as
-  a path class).
-- Mini writers use `mailroom-copy.sqlite` or
-  `mailroom-daily-copy.sqlite`, or an explicit `mailroom.sqlite`
-  (`db_mode=sor`) only when that basename is named and rem-legacy is
-  absent. Unset or an unknown basename is a hard refuse
-  (`db_mode=refused`). No silent default to `mailroom.sqlite`.
-- Do not start a Mini writer against SoR while rem-legacy is live. Do not promote Mini
-  `mailroom.sqlite` while rem-legacy is live.
+**Mini** is the SoR writer under the daily only. The nightly daily LaunchAgent writes the SoR `mailroom.sqlite` on the Mini. `db_mode=sor` only when `mailroom.sqlite` is explicitly named and rem-legacy is absent. An unset or unknown basename is a hard refuse (`db_mode=refused`). There is no silent default to `mailroom.sqlite`.
+
+No MBP writers against SoR.
+
+- The MBP is a non-writer. The MBP SoR is a rollback/read target. No MBP daily runs against it, and nothing on the MBP writes the SoR.
+- Copy DBs remain `mailroom-copy.sqlite` and `mailroom-daily-copy.sqlite`.
+- One writer holds the writer lock (flock). Do not start a second writer against SoR. Do not start a Mini writer against SoR while rem-legacy is live. Do not promote Mini (or any other writer) while rem-legacy is live; promotion stays gated on rem-legacy EXIT 0.
 
 This gate is docs/tests only. It does not open MailArchive or live
 sqlite, write embed/SoR data, read Keychain, SSH a live machine, or
