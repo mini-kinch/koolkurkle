@@ -18,8 +18,8 @@ running rem-legacy job.
 
 Same-sqlite dual-writer HARD DECK: never two-wide writers on one
 `.sqlite`. Look-ahead calendar jobs: while rem-legacy is the sole
-writer on live basename `mailroom.sqlite`, do not run the classic
-MBP SoR 8pm chain; use Mini/copy until rem EXIT 0. if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
+writer on live basename `mailroom.sqlite`, do not run the MBP
+8pm chain; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
 
 `scripts/sor_writer_gate.py` fail-closes SoR writers when rem-legacy /
 `embed_backfill --reembed-legacy` / a foreign writer lock is present
@@ -162,7 +162,7 @@ Example names only:
 
 | Role | File |
 |---|---|
-| Copy host (Mini copy-only until PR-5) | `mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`) |
+| Copy host (The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated.) | `mailroom-copy.sqlite` (or `mailroom-daily-copy.sqlite`) |
 | SoR host | SoR-named `mailroom.sqlite` |
 
 1. One writer per file (char-band or `id-mod` / `id-rem` shard).

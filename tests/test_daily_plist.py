@@ -80,6 +80,16 @@ class ReadmeTests(unittest.TestCase):
             "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
             text,
         )
+        self.assertIn(
+            "The copy-only guard still applies to retrieve until cutover.",
+            text,
+        )
+        self.assertIn(
+            "# Mini, ask_mail on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
+            text,
+        )
+        self.assertNotIn("would write the empty SoR", text)
+        self.assertNotIn("Copy-only keeps one writer", text)
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("mailroom-daily-copy.sqlite", text)
         self.assertIn("SoR cutover is PR-5", text)

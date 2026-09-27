@@ -156,8 +156,7 @@ Different `embed_document_version`: `mail:body`, `mail:att`, `imsg`,
 10. ZERO PII on GitHub (no handles, no sample snippets from real chats).
 11. Same 1024-d family or a declared new generation. Do not mix dims
     across corpora in one RRF.
-12. Mail HARD DECKs unchanged (drafts, Keychain name-only, Mini
-    copy-only until PR-5).
+12. Mail HARD DECKs unchanged (drafts, Keychain name-only). The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve stays on a copy until PR-5 (cutover stays gated).
 
 ---
 
@@ -374,7 +373,7 @@ NoteStore.
 | Job | Where |
 |---|---|
 | Snapshot chat.db / NoteStore | MBP (FDA) |
-| Mail IMAP / rem / att apply | MBP SoR until PR-5 |
+| Mail IMAP / rem / att apply | Mini, via its daily job. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. |
 | Embed year-band / small notes | Mini on **copies of our SoRs**, not Apple files |
 | Generate | MBP `127.0.0.1:1234` |
 | `ask_all` | Reads local files. After PR-5, Mini can host retrieve if generate still gets snippets over localhost |

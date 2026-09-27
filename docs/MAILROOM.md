@@ -68,12 +68,14 @@ PRAGMAs: `scripts/sqlite_pragmas.py`. Exclusive writer lock:
 [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md).
 ask_mail does not take the writer lock.
 
-## Mini copy-only until PR-5
+## Mini daily job is the sole SoR writer
+
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated.
 
 Mini unset / unknown basename is a hard-fail (`db_mode=refused`).
 Explicit `mailroom.sqlite` is allowed only when named (`db_mode=sor`),
 and rem-legacy must be absent. No silent default to `mailroom.sqlite`.
-Daily LaunchAgent `MAILROOM_DB` stays copy-only
+Daily LaunchAgent `MAILROOM_DB` stays on the copy basename
 (`mailroom-copy.sqlite` or `mailroom-daily-copy.sqlite`) until an
 operator sets the explicit SoR basename. ask_mail
 Mini recipes must set `MAILROOM_DB` to that copy:
@@ -84,7 +86,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```
 
-Do not default Mini to the empty SoR stub. No RunAtLoad change. No
+Do not default Mini to `mailroom.sqlite`. No RunAtLoad change. No
 PR-5 cutover here.
 
 ## imap_tombstone IMAP verbs (local present_on_server only)
@@ -104,8 +106,8 @@ rem-legacy. See [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md)
 Same-sqlite dual-writer HARD DECK: never two-wide writers on one
 `.sqlite`. While rem-legacy is the sole writer on live basename
 `mailroom.sqlite`, classic SoR writers CONFLICT. Look-ahead calendar
-jobs: do not run the classic MBP SoR 8pm chain while rem-legacy is
-alive; use Mini/copy until rem EXIT 0.
+jobs: do not run the MBP 8pm chain while rem-legacy is
+alive; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 Wording: if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
 
@@ -135,7 +137,7 @@ ALLOW: ask_mail/semantic_search/sor_health read-only; Mini daily copy-only; file
 ## mailroom_copy_db rem-gated copy
 
 Mini copy only when rem-legacy is not writing, or after rem-legacy
-**EXIT 0**. No SMB/NFS dual-write. No live MBP→Mini copy in this
+**EXIT 0**. No SMB/NFS dual-write. No live copy from MBP to Mini in this
 change. See [README.mailroom-daily.md](../scripts/README.mailroom-daily.md).
 
 ## bind_copy_db / daily children honor MAILROOM_DB
@@ -159,10 +161,8 @@ CoS GO each. Order: EXIT → gate ALLOW → catch-up → later
 copy+integrity → then checklist; not enable with catch-up. Post-rem
 gates before anyone considers enable: rem EXIT (`17223/17223`), #40
 gate live, catch-up Done, single-writer HARD DECK, flock free.
-stale dead-PID lock ≠ false CONFLICT. Mini copy-only until promote GO;
-refuse SoR stub unless it is explicitly named and rem-legacy is absent.
-One cutover + one rollback. Topology: SoR=MBP until
-CoS says; mlx generate localhost; MBP and Mini names only.
+stale dead-PID lock ≠ false CONFLICT. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated; refuse SoR stub unless it is explicitly named and rem-legacy is absent.
+One cutover + one rollback. Topology: The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated; mlx generate localhost; MBP and Mini names only.
 
 ## sor_health_pack read-only / Mini-copy OK
 

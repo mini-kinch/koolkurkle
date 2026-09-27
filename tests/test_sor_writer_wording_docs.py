@@ -77,6 +77,22 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         self.assertNotIn("Must not write the live SoR", text)
         self.assertNotIn("empty stub", mbp)
         self.assertNotIn("empty stub", mini)
+        self.assertNotIn("empty stub", text)
+        self.assertNotIn("MBP (live SoR)", text)
+        self.assertNotIn("copy-only until a future cutover", text)
+        self.assertIn(
+            "Daily refresh on the Mini. " + CANONICAL,
+            text,
+        )
+        self.assertIn(
+            "**MBP (non-writer, rollback, read-only).** " + CANONICAL,
+            text,
+        )
+        self.assertIn(
+            "A Mini retrieve recipe must point at a **copy** path, not `mailroom.sqlite`",
+            text,
+        )
+        self.assertIn("wrong until PR-5 cutover", text)
         self.assertNotIn("host", mbp.lower())
         self.assertNotIn("host", mini.lower())
         self.assertNotIn("cutover is done", text.lower())
@@ -88,6 +104,12 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         text = RERANK.read_text(encoding="utf-8")
         self.assertIn(CANONICAL, text)
         self.assertNotIn("MBP-SoR-only", text)
+        self.assertNotIn("empty stub", text)
+        self.assertIn(
+            "# Mini, hybrid retrieve on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
+            text,
+        )
+        self.assertNotIn("copy DB until PR-5; " + CANONICAL, text)
         for comment in RERANK_COMMENTS:
             self.assertIn("# %s — %s" % (MBP_LABEL, comment), text)
         for command in RERANK_COMMANDS:
@@ -102,6 +124,19 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         text = ASK.read_text(encoding="utf-8")
         self.assertIn(CANONICAL, text)
         self.assertNotIn("MBP-SoR-only", text)
+        self.assertNotIn("empty stub", text)
+        self.assertNotIn("Live MBP", text)
+        self.assertIn("The MBP live matrix is the operator gate.", text)
+        self.assertNotIn("MBP probe matrix", text)
+        self.assertIn(
+            "# Mini, phase 1: retrieve only on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
+            text,
+        )
+        self.assertIn(
+            "# Copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
+            text,
+        )
+        self.assertNotIn("copy DB until PR-5; " + CANONICAL, text)
         self.assertIn(
             "%s SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`"
             % (CANONICAL,),

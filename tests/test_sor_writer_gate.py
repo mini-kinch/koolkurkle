@@ -59,8 +59,9 @@ WIRED_NEEDLES = (
 
 DOC_PATHS = (MAILROOM, OPS, EMBED)
 
-# MAILROOM.md, ops-terminal.md, and embed-backfill.md are outside this
-# wording pass and still cite the previous MBP 8pm refuse label.
+# The numbered refuse list in MAILROOM.md, ops-terminal.md, and
+# embed-backfill.md still cites the previous MBP 8pm label. The prose
+# "classic MBP SoR 8pm" chain remains only in ops-terminal.md.
 HISTORICAL_DOC_REFUSE = {
     (
         "MBP 8pm (`imap_newmail`+`classify`+`notify_bills`); "
@@ -349,7 +350,15 @@ class LookAheadDocTests(unittest.TestCase):
             text = " ".join(raw.split())
             self.assertIn(gate.LOOKAHEAD_NEEDLE, text, msg=path.name)
             self.assertIn("look-ahead calendar jobs", text.lower(), msg=path.name)
-            self.assertIn("classic mbp sor 8pm", text.lower(), msg=path.name)
+            if path == OPS:
+                self.assertIn("classic mbp sor 8pm", text.lower(), msg=path.name)
+            else:
+                self.assertNotIn("classic mbp sor 8pm", text.lower(), msg=path.name)
+                self.assertIn(
+                    "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+                    raw,
+                    msg=path.name,
+                )
             self.assertIn("same-sqlite dual-writer hard deck", text.lower(), msg=path.name)
             self.assertIn("MAILROOM_DB=copy", raw, msg=path.name)
             self.assertIn("CONFLICT", raw, msg=path.name)

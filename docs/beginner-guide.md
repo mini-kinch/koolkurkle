@@ -28,7 +28,7 @@ Three layers:
 
 - “Find that bill / apology / conversation about X” with citations back to the message
 - Keeping **history** after you delete mail in Apple Mail (soft-delete / never-purge)
-- Daily refresh on the Mini without putting the live database at risk (copy-only until a future cutover)
+- Daily refresh on the Mini. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated.
 
 ### Not
 
@@ -47,7 +47,7 @@ Three layers:
 | **MBP** | Non-writer (rollback, read-only) for `mailroom.sqlite`. A long rem-legacy embed backfill may be running here; PR-5 cutover stays gated. |
 | **Mini** | The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Until PR-5, that job and Mini retrieve stay on a **copy** (cutover stays gated). |
 
-If a recipe says Mini and points at `mailroom.sqlite`, it is wrong until cutover. Mini uses a **copy** path.
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). If a recipe says Mini and points at `mailroom.sqlite`, it is wrong until PR-5 cutover. A Mini retrieve recipe must point at a **copy** path, not `mailroom.sqlite` (cutover stays gated).
 
 ---
 
@@ -74,7 +74,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python scripts/ask_mail.py 'your question here'
 ```
 
-**MBP (live SoR):**
+**MBP (non-writer, rollback, read-only).** The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 ```zsh
 $HOME/MailArchive/.venv/bin/python scripts/ask_mail.py 'your question here'

@@ -422,6 +422,19 @@ class UnifiedSearchInterfaceProofTests(unittest.TestCase):
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, text)
 
+    def test_mail_placement_names_mini_daily_job(self):
+        text = DESIGN.read_text(encoding="utf-8")
+        self.assertIn(
+            "| Mail IMAP / rem / att apply | Mini, via its daily job. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. |",
+            text,
+        )
+        self.assertIn(
+            "Mini retrieve stays on a copy until PR-5 (cutover stays gated).",
+            text,
+        )
+        self.assertNotIn("Mini copy-only until PR-5", text)
+        self.assertNotIn("MBP SoR until PR-5", text)
+
     def test_ready_neq_msg_note_enable(self):
         for path in (OPS, README, MAILROOM, DESIGN):
             text = path.read_text(encoding="utf-8")

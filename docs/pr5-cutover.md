@@ -32,8 +32,7 @@ Operator standing (cite in this checklist; **not** an enable):
 - HOLD still: PR-5 enable / RunAtLoad / SoR host flip / ATT implement
   / money / external send
 
-Citing these facts is not permission to enable. Topology stays
-**SoR=MBP until CoS says** otherwise. Generate stays localhost
+Citing these facts is not permission to enable. Topology: The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated. Generate stays localhost
 `mlx_lm.server`. Name the machines as MBP and Mini only.
 
 ## Order (after rem EXIT, before any enable)
@@ -96,8 +95,8 @@ never opens live IMAP.
    DBs allowed.
 4. **Read-only integrity / freshness / embed key** — labels only
    (`PRAGMA integrity_check`, `copy_age`, quote-strip generation
-   key). No live SoR write. No live MBP→Mini copy.
-5. **Mini copy-only until promote GO** — unset / unknown basename
+   key). No live SoR write. No live copy from MBP to Mini.
+5. **The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).** PR-5 cutover / RunAtLoad enable stays gated. Unset / unknown basename
    remains `db_mode=refused`. Explicit `mailroom.sqlite` is `db_mode=sor`
    only when named and rem-legacy is absent.
 6. **ask_mail** default is **history**; live is opt-in. No
@@ -121,9 +120,9 @@ After rem-legacy EXIT 0:
    plist. The checked-in template is not an enable of cutover.
 3. Do not change rem-legacy LaunchAgents.
 
-Mini stays copy-only until **promote GO**. Refuse the SoR stub unless
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated. Refuse the SoR stub unless
 it is explicitly named and rem-legacy is absent.
-Topology: **SoR=MBP until CoS says**; mlx generate localhost; MBP and
+Topology: The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated; mlx generate localhost; MBP and
 Mini names only.
 
 ## Integrity checks before cutover
@@ -172,7 +171,7 @@ RunAtLoad.
 - Does not promote Mini `mailroom.sqlite`
 - Does not flip SoR host
 - Does not implement ATT / MSG / NOTE
-- Docs/tests only. No live IMAP, no live MBP→Mini copy, no Keychain
+- Docs/tests only. No live IMAP, no live copy from MBP to Mini, no Keychain
   read/write.
 
 Name the machines as MBP and Mini only. Never a login, home path, or
