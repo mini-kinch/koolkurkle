@@ -91,7 +91,15 @@ class ImapBodystructureClient:
         self.uidvalidity: int | None = None
 
     def __enter__(self) -> "ImapBodystructureClient":
-        fn = self._password_fn or read_imap_app_password
+        if not str(self.user or "").strip():
+            raise FillRefuse("imap user is required")
+        if self._password_fn is None:
+            account = self.user
+
+            def fn():
+                return read_imap_app_password(account=account)
+        else:
+            fn = self._password_fn
         try:
             password = fn()
         except KeychainError:

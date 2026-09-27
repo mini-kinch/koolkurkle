@@ -5,6 +5,8 @@ processes do not see ``unittest.mock`` patches. Putting ``tests`` on
 PYTHONPATH makes this file run at startup in the parent and in those children.
 """
 
+import hermetic_binaries
 import ollama_guard
 
+hermetic_binaries.install()
 ollama_guard.install()

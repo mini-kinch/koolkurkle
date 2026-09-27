@@ -34,6 +34,7 @@ if str(TESTS) not in sys.path:
 
 import attachments.bodystructure as bodystructure  # noqa: E402
 import attachments.meta_fill as meta  # noqa: E402
+import hermetic_binaries  # noqa: E402
 import imap_bodystructure_double as imap_double  # noqa: E402
 import attachments.migrate_att0_schema as mig  # noqa: E402
 import attachments.mime_meta as mime_meta  # noqa: E402
@@ -431,6 +432,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed[0].mime, "text/plain")
         self.assertEqual(parsed[0].part_id, "1")
         self.assertEqual(parsed[0].size, 3)
+
+    def test_present_literal_octets_parse_to_note_pdf(self):
+        """NOT a curl capture.
+
+        Hand-built RFC 3501 response with the literal octets present:
+        BODYSTRUCTURE (... {8}\\r\\nnote.pdf ...). Curl 8.5.x omits those
+        octets; this fixture keeps them so a curl that returns the octets
+        still parses to the filename note.pdf.
+        """
+        import imap_curl as imap_curl
+
+        self.assertIn(
+            "NOT a curl capture",
+            self.test_present_literal_octets_parse_to_note_pdf.__doc__,
+        )
+        raw = (
+            '* 1 FETCH (UID 9 BODYSTRUCTURE ("APPLICATION" "PDF" NIL NIL NIL '
+            '"BASE64" 4 NIL ("ATTACHMENT" ("FILENAME" {8}\r\nnote.pdf)) NIL NIL))\r\n'
+        )
+        self.assertIn("BODYSTRUCTURE (", raw)
+        self.assertIn("{8}\r\nnote.pdf", raw)
+        found, issues = imap_curl.parse_fetch_structures(raw)
+        self.assertEqual(issues, {})
+        self.assertIn("9", found)
+        parts = bodystructure.parts_from_bodystructure(found["9"])
+        self.assertEqual(parts[0].filename, "note.pdf")
 
     def test_truncated_literal_is_a_parse_error(self):
         short = '("NAME" {8}\r\nnote'
@@ -1881,8 +1908,8 @@ class FillTests(unittest.TestCase):
     def test_keychain_env_cannot_redirect_the_password_fetch(self):
         calls = []
 
-        def runner(binary, service):
-            calls.append((binary, service))
+        def runner(binary, service, account):
+            calls.append((binary, service, account))
             if service == "mailroom.imap.app-password":
                 return 1, ""
             if service == "mailroom.icloud.app-password":
@@ -1890,18 +1917,27 @@ class FillTests(unittest.TestCase):
             return 0, "redirected-secret"
 
         env = {
-            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
             "MAILROOM_KEYCHAIN_ITEM": "other-item",
             "IMAP_APP_PASSWORD": "env-secret",
             "MAILROOM_IMAP_PASSWORD": "env-secret",
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            password = imap_keychain.read_imap_app_password(runner=runner)
+            password = imap_keychain.read_imap_app_password(
+                runner=runner, account="user@example.com"
+            )
         self.assertEqual(
             calls,
             [
-                ("/usr/bin/security", "mailroom.imap.app-password"),
-                ("/usr/bin/security", "mailroom.icloud.app-password"),
+                (
+                    "/usr/bin/security",
+                    "mailroom.imap.app-password",
+                    "user@example.com",
+                ),
+                (
+                    "/usr/bin/security",
+                    "mailroom.icloud.app-password",
+                    "user@example.com",
+                ),
             ],
         )
         self.assertEqual(password, "legacy-secret")
@@ -1909,6 +1945,51 @@ class FillTests(unittest.TestCase):
         self.assertNotIn("MAILROOM_SECURITY_BIN", source)
         self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", source)
         self.assertNotIn("os.environ", source)
+
+    def test_mailroom_security_bin_env_does_not_change_argv(self):
+        """MAILROOM_SECURITY_BIN is not a binary override. Argv stays absolute."""
+        seen = []
+
+        def fake_run(args, check=False, capture_output=False, text=False):
+            seen.append(list(args))
+            proc = mock.Mock()
+            proc.returncode = 0
+            proc.stdout = "keychain-secret\n"
+            proc.stderr = ""
+            return proc
+
+        env = {"MAILROOM_SECURITY_BIN": "/tmp/not-security"}
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch(
+            "imap_keychain.subprocess.run", fake_run
+        ):
+            password = imap_keychain.read_imap_app_password(account="user@example.com")
+        self.assertEqual(password, "keychain-secret")
+        self.assertTrue(seen)
+        self.assertEqual(seen[0][0], "/usr/bin/security")
+        self.assertNotIn("/tmp/not-security", seen[0])
+        self.assertEqual(
+            seen[0],
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                "mailroom.imap.app-password",
+                "-a",
+                "user@example.com",
+                "-w",
+            ],
+        )
+
+    def test_empty_imap_user_does_not_call_security(self):
+        def boom(*_args, **_kwargs):
+            raise AssertionError("security was called")
+
+        with mock.patch("imap_keychain.subprocess.run", boom):
+            for account in ("", None, "   "):
+                with self.assertRaises(imap_keychain.KeychainError) as ctx:
+                    imap_keychain.read_imap_app_password(account=account)
+                self.assertIn("imap user is required", str(ctx.exception))
+                self.assertNotIn("secret", str(ctx.exception))
 
 
 class CliTests(unittest.TestCase):
@@ -2128,6 +2209,8 @@ class CliTests(unittest.TestCase):
                     "find-generic-password",
                     "-s",
                     "mailroom.imap.app-password",
+                    "-a",
+                    "user@example.com",
                     "-w",
                 ],
             )
@@ -2382,6 +2465,7 @@ class CurlTransportTests(unittest.TestCase):
         fetch = imap_curl.fetch_command("9")
         self.assertEqual(fetch, "UID FETCH 9 (BODYSTRUCTURE)")
 
+    @hermetic_binaries.allow_real_curl("127.0.0.1")
     def test_real_curl_parses_uidvalidity_and_bodystructure(self):
         """fill_metadata EXAMINEs, reads UIDVALIDITY, and UID FETCHes via real curl."""
         import imap_curl as imap_curl
@@ -2966,6 +3050,7 @@ class CurlTransportTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(scans, 0)
 
+    @hermetic_binaries.allow_real_curl("127.0.0.1")
     def test_real_curl_connection_refused_fails_closed_without_retry(self):
         """Real /usr/bin/curl to a closed local port. One attempt, no fallback."""
         import imap_curl as imap_curl
@@ -3028,23 +3113,21 @@ class CurlTransportTests(unittest.TestCase):
             self.assertEqual(scans, 0)
 
     def test_real_security_binary_missing_fails_closed_before_curl(self):
-        """Shipped /usr/bin/security read. A miss does not start curl or imaplib."""
-        import imap_curl as imap_curl
-
+        """A missing security path fails closed. The real binary is never called."""
         calls = []
-        real_run = imap_curl.run_subprocess
 
         def spy(argv, config_text, env, timeout):
             calls.append(list(argv))
-            return real_run(argv, config_text, env, timeout)
+            raise AssertionError("curl started")
 
         def boom(*_args, **_kwargs):
             raise AssertionError("fill fell back to imaplib or a python socket")
 
+        missing = "/tmp/mailroom-missing-security"
+        self.assertNotEqual(missing, "/usr/bin/security")
         env = {
             "IMAP_APP_PASSWORD": "env-secret",
             "MAILROOM_IMAP_PASSWORD": "env-secret",
-            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
         }
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "mailroom-copy.sqlite"
@@ -3053,10 +3136,10 @@ class CurlTransportTests(unittest.TestCase):
                 [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
             )
             with mock.patch.dict(os.environ, env, clear=False), mock.patch(
-                "imap_curl.run_subprocess", spy
-            ), mock.patch("imaplib.IMAP4_SSL", boom), mock.patch(
-                "socket.create_connection", boom
-            ):
+                "imap_keychain._SECURITY_BIN", missing
+            ), mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                "imaplib.IMAP4_SSL", boom
+            ), mock.patch("socket.create_connection", boom):
                 report = meta.fill_metadata(
                     db,
                     source="imap",
@@ -3068,6 +3151,11 @@ class CurlTransportTests(unittest.TestCase):
                     max_messages=0,
                     timeout_s=5,
                 )
+            rc, out = imap_keychain._run_security(
+                missing, "mailroom.imap.app-password", "user@example.invalid"
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(out, "")
             self.assertEqual(calls, [])
             self.assertEqual(report["errors"], 1)
             self.assertEqual(report["messages"], 0)
@@ -3546,12 +3634,16 @@ class CurlTransportTests(unittest.TestCase):
             self.assertEqual(scans, [("ex-ok",)])
             self.assertEqual(stored, 1)
 
+    @hermetic_binaries.allow_real_curl("127.0.0.1")
     def test_wire_harness_modes(self):
         """Real curl against a fake IMAPS server, one mode at a time.
 
         SELECT is answered ``[READ-WRITE]`` so a regression cannot look
-        read-only. Modes: normal, missing_uid, literal_mixed, trunc_literal,
-        login_no, rc 7, rc 21, rc 60.
+        read-only. Modes: normal, missing_uid, literal_behavior,
+        literal_mixed, trunc_literal, login_no, rc 7, rc 21, rc 60.
+        ``literal_behavior`` is a 127.0.0.1-only run with the fake password.
+        It prints ``literal_behavior=omitted`` or ``literal_behavior=present``
+        for whichever behavior this curl shows. It does not require one of them.
         """
         import imap_curl as imap_curl
 
@@ -3657,6 +3749,19 @@ class CurlTransportTests(unittest.TestCase):
                                     body = (
                                         b'* 1 FETCH (UID 1 BODYSTRUCTURE ("TEXT" "PLAIN" '
                                         b'NIL NIL NIL "7BIT" 4 1))\r\n'
+                                    )
+                                elif current == "literal_behavior":
+                                    name = b"note.pdf"
+                                    inner = (
+                                        b'("APPLICATION" "PDF" NIL NIL NIL "BASE64" 4 '
+                                        b'NIL ("ATTACHMENT" ("FILENAME" {8}\r\n'
+                                        + name
+                                        + b")) NIL NIL)"
+                                    )
+                                    body = (
+                                        b"* 1 FETCH (UID 9 BODYSTRUCTURE "
+                                        + inner
+                                        + b")\r\n"
                                     )
                                 elif current == "literal_mixed":
                                     name = b"note.pdf"
@@ -3878,6 +3983,38 @@ class CurlTransportTests(unittest.TestCase):
                 results.append(shot)
 
                 reset()
+                mode["name"] = "literal_behavior"
+                _db, report = run_fill(
+                    [("ex-probe", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=True,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("literal_behavior", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(shot["selects"], 0, shot)
+                stdout = calls[0]["stdout"]
+                config = calls[0]["config"]
+                self.assertIn("127.0.0.1", config)
+                self.assertNotIn("imap.example", config)
+                self.assertNotIn(password, calls[0]["argv"])
+                self.assertNotIn(password, calls[0]["env"].values())
+                if "note.pdf" in stdout:
+                    behavior = "present"
+                    self.assertEqual(report["messages"], 1, report)
+                    self.assertEqual(report["errors"], 0, report)
+                    self.assertEqual(report["literal_dropped"], 0, report)
+                else:
+                    behavior = "omitted"
+                    self.assertEqual(report["literal_dropped"], 1, report)
+                    self.assertEqual(report["messages"], 0, report)
+                    self.assertEqual(report["errors"], 1, report)
+                self.assertIn(behavior, ("omitted", "present"))
+                shot["literal_behavior"] = behavior
+                print("literal_behavior=%s" % behavior, flush=True)
+                results.append(shot)
+
+                reset()
                 mode["name"] = "missing_uid"
                 db, report = run_fill(
                     [
@@ -4073,8 +4210,9 @@ class CurlTransportTests(unittest.TestCase):
                     flush=True,
                 )
                 results.append(shot)
-                Path("/tmp/wire-harness-counts.txt").write_text(
-                    "\n".join(
+                lines = []
+                for item in results:
+                    line = (
                         "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s messages=%s errors=%s literal_dropped=%s literal_truncated=%s"
                         % (
                             item["mode"],
@@ -4088,9 +4226,12 @@ class CurlTransportTests(unittest.TestCase):
                             item["literal_dropped"],
                             item["literal_truncated"],
                         )
-                        for item in results
                     )
-                    + "\n",
+                    if item.get("literal_behavior"):
+                        line += " literal_behavior=%s" % item["literal_behavior"]
+                    lines.append(line)
+                Path("/tmp/wire-harness-counts.txt").write_text(
+                    "\n".join(lines) + "\n",
                     encoding="utf-8",
                 )
             finally:

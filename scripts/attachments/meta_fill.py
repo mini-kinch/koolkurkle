@@ -31,8 +31,13 @@ failure is marked scanned. A second connection fails closed. After
 each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
 no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
-``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
-with one legacy fallback. Curl receives it only on stdin (``-K -``,
+``/usr/bin/security``. The lookup is
+``find-generic-password -s <service> -a <account> -w``. ``account`` is
+the runtime IMAP user (``--user`` or ``MAILROOM_IMAP_USER``), the same
+value used for LOGIN, never a hardcoded address. The service is
+``mailroom.imap.app-password`` with one legacy fallback that uses the
+same ``-a``. An empty user fails closed before ``security`` or curl.
+Curl receives the password only on stdin (``-K -``,
 ``user = "..."``), never in argv, the environment, or a file. TLS
 verification stays on (no ``-k``). There is no password option and no
 password environment variable. This module does not import the Python
@@ -140,7 +145,13 @@ class _CurlProductionClient:
     def __init__(self, host, user, timeout, password_fn, port=993, cacert=None) -> None:
         mod = _load_imap_curl()
         self._mod = mod
-        fn = read_imap_app_password if password_fn is None else password_fn
+        if password_fn is None:
+            account = user
+
+            def fn():
+                return read_imap_app_password(account=account)
+        else:
+            fn = password_fn
         try:
             self._inner = mod.CurlImapsClient(
                 host,
@@ -1295,7 +1306,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     mailbox = _env_text(environ, args.mailbox, "MAILROOM_IMAP_MAILBOX")
 
     def _password_fn() -> str:
-        return read_imap_app_password()
+        return read_imap_app_password(account=user)
 
     try:
         report = fill_metadata(
