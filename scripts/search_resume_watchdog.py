@@ -240,9 +240,7 @@ def _atomic_write(path: Path, payload: str) -> None:
 def write_deadline(path: Path, run_id: str, now: int) -> None:
     payload = render_deadline(run_id, now)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write(path, payload)
 
 
 def clear_deadline(path: Path) -> None:

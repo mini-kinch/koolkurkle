@@ -521,6 +521,29 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertEqual(again.stdout, "")
         self.assertEqual(again.stderr, "")
 
+    def test_write_deadline_fsyncs_and_keeps_bytes(self) -> None:
+        fsynced = []
+        real_fsync = os.fsync
+
+        def spy_fsync(fd):
+            fsynced.append(fd)
+            return real_fsync(fd)
+
+        with mock.patch("search_resume_watchdog.os.fsync", spy_fsync):
+            watchdog.write_deadline(self.deadline, "run1", 1000000)
+        expected = watchdog.render_deadline("run1", 1000000)
+        self.assertEqual(
+            expected,
+            "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n"
+            % (1000000 + 26 * 60, 1000000 + 50 * 60),
+        )
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), expected)
+        self.assertEqual(self.deadline.read_bytes(), expected.encode("utf-8"))
+        self.assertTrue(fsynced)
+        self.assertFalse(
+            (self.deadline.parent / (self.deadline.name + ".tmp")).exists()
+        )
+
     def test_plist_template_and_docs(self) -> None:
         raw = PLIST.read_text(encoding="utf-8")
         script = SCRIPT.read_text(encoding="utf-8")
@@ -1411,6 +1434,76 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertNotIn("ran", proc.stdout)
         held = wwl.acquire_writer_lock(self.lock, "later")
         wwl.release_writer_lock(held)
+
+    def _isolated_lock_script(self) -> Path:
+        folder = self.home / "isolated-wrapper"
+        folder.mkdir(parents=True, exist_ok=True)
+        script = folder / "with_writer_lock.py"
+        script.write_text(
+            (SCRIPTS / "with_writer_lock.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        return script
+
+    def _run_isolated_lock(
+        self, marker: Path, run_id: str | None
+    ) -> tuple:
+        import with_writer_lock as wwl
+
+        env = os.environ.copy()
+        env["HOME"] = str(self.home)
+        env["PYTHONPATH"] = ""
+        if run_id is None:
+            env.pop("MAILROOM_SEARCH_RESUME_RUN_ID", None)
+        else:
+            env["MAILROOM_SEARCH_RESUME_RUN_ID"] = run_id
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(self._isolated_lock_script()),
+                "--purpose",
+                "cli-probe",
+                "--lock-file",
+                str(self.lock),
+                "--action-required-file",
+                str(self.home / "ACTION_REQUIRED"),
+                "--",
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path(%r).write_text('ran')" % str(marker),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return wwl, proc
+
+    def test_import_failure_with_run_id_exits_2_skips_child_and_frees_lock(
+        self,
+    ) -> None:
+        marker = self.home / "should-not"
+        wwl, proc = self._run_isolated_lock(marker, "run1")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(
+            proc.stderr,
+            "error: search resume +26 drop failed; child not started: "
+            "No module named 'search_resume_watchdog'\n",
+        )
+        self.assertEqual(proc.stdout, "")
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(marker.exists())
+        held = wwl.acquire_writer_lock(self.lock, "later")
+        wwl.release_writer_lock(held)
+
+    def test_unset_run_id_runs_child_when_module_unimportable(self) -> None:
+        marker = self.home / "did-run"
+        _wwl, proc = self._run_isolated_lock(marker, None)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "ran")
+        self.assertNotIn("child not started", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.stdout, "")
 
     def test_status_prints_checkpoints_and_refuses_bad_files(self) -> None:
         body = "run_id=att0-L1-EXAMPLE\ndeadline_26=100\ndeadline_50=200\n"

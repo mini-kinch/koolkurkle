@@ -248,7 +248,14 @@ def _drop_search_resume_plus_26() -> None:
         return
     try:
         import search_resume_watchdog
-
+    except Exception as exc:
+        # Import failure must be caught before any use of the module
+        # name. Otherwise `except search_resume_watchdog.DeadlineMismatch`
+        # raises UnboundLocalError and main() prints a traceback (rc 1).
+        raise WriterLockError(
+            "search resume +26 drop failed; child not started: %s" % exc
+        ) from exc
+    try:
         search_resume_watchdog.drop_early_deadline(run_id)
     except search_resume_watchdog.DeadlineMismatch as exc:
         sys.stderr.write("search resume +26 not dropped: %s\n" % exc)
