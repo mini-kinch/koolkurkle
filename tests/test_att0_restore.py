@@ -19,8 +19,70 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+# Discover imports this module after sitecustomize has installed the hermetic
+# guard. Snapshot the wrapped callables before importing the helper. On macOS
+# the writer gate shells out to `ps` (there is no /proc). That path, and the
+# wrapper subprocess below, must not leave subprocess.run unwrapped for tests
+# that run later. Linux CI never takes the ps fallback, which is why it stayed
+# green.
+_HERMETIC_SUBPROCESS = {
+    "run": subprocess.run,
+    "call": subprocess.call,
+    "check_call": subprocess.check_call,
+    "check_output": subprocess.check_output,
+}
+_HERMETIC_POPEN_INIT = subprocess.Popen.__init__
+_HERMETIC_OS = {
+    name: getattr(os, name)
+    for name in (
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "posix_spawn",
+        "posix_spawnp",
+    )
+    if hasattr(os, name) and getattr(getattr(os, name), "_mailroom_hermetic", False)
+}
+
 import attachments.att0_restore as restore  # noqa: E402
 from sor_writer_gate import SorWriterRefuse  # noqa: E402
+
+
+def _rearm_hermetic_guard() -> None:
+    """Put the suite guard back if this module's restore path replaced it."""
+    for name, saved in _HERMETIC_SUBPROCESS.items():
+        if not getattr(saved, "_mailroom_hermetic", False):
+            continue
+        current = getattr(subprocess, name)
+        if current is not saved:
+            setattr(subprocess, name, saved)
+    if getattr(_HERMETIC_POPEN_INIT, "_mailroom_hermetic", False):
+        if subprocess.Popen.__init__ is not _HERMETIC_POPEN_INIT:
+            subprocess.Popen.__init__ = _HERMETIC_POPEN_INIT
+    for name, saved in _HERMETIC_OS.items():
+        current = getattr(os, name, None)
+        if current is not saved:
+            setattr(os, name, saved)
+
+
+def tearDownModule() -> None:  # noqa: N802
+    _rearm_hermetic_guard()
+
+
+_rearm_hermetic_guard()
 
 DOC = ROOT / "docs" / "attachments" / "att0-restore.md"
 HELPER = SCRIPTS / "attachments" / "att0_restore.py"
@@ -59,6 +121,18 @@ def _make_db(path: Path, body: str, *, wal: bool = True) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _format_versions(path: Path) -> tuple[int, int]:
+    """SQLite header bytes 18-19: 1 = rollback journal, 2 = WAL."""
+    blob = path.read_bytes()
+    return blob[18], blob[19]
+
+
+def _wal_without_shm(path: Path) -> bool:
+    write_v, read_v = _format_versions(path)
+    shm = Path(str(path) + "-shm")
+    return (write_v == 2 or read_v == 2) and not shm.is_file()
 
 
 def _temps(directory: Path) -> list[Path]:
@@ -363,6 +437,8 @@ class RestoreCliTests(unittest.TestCase):
             "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
             doc,
         )
+        self.assertIn("PRAGMA journal_mode=DELETE", doc)
+        self.assertIn("bytes 18 and 19", doc)
         self.assertNotIn("$HOME", doc)
         self.assertNotIn("/Users/", doc)
         self.assertNotIn("/home/", doc)
@@ -449,6 +525,59 @@ class RestoreCliTests(unittest.TestCase):
             self.assertIn("CONFLICT", child.stderr)
             self.assertEqual(_sha(dest), before)
             self.assertEqual(_temps(root), [])
+
+    def test_restored_dest_is_not_wal_without_shm(self):
+        """mode=ro must work after restore on SQLite 3.51.0.
+
+        Header bytes 18-19 are the write/read versions (1 rollback, 2 WAL).
+        A WAL header with no -shm file is the shape that raises
+        OperationalError: unable to open database file.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            src_versions = _format_versions(src)
+            self.assertEqual(src_versions, (2, 2))
+            src_before = _sha(src)
+            src_digest = _row_digest(src)
+            restore.restore_database(
+                src,
+                dest,
+                allow_mailroom_sqlite=True,
+                cmdlines=[],
+                lock_held=False,
+            )
+            self.assertEqual(_format_versions(src), src_versions)
+            self.assertEqual(_sha(src), src_before)
+            self.assertEqual(_format_versions(dest), (1, 1))
+            self.assertFalse(_wal_without_shm(dest))
+            self.assertFalse(Path(str(dest) + "-wal").exists())
+            self.assertFalse(Path(str(dest) + "-shm").exists())
+            self.assertEqual(_row_digest(dest), src_digest)
+            self.assertTrue(_integrity_ok(dest))
+
+            simulated = root / "wal-without-shm.sqlite"
+            flipped = bytearray(dest.read_bytes())
+            flipped[18] = 2
+            flipped[19] = 2
+            simulated.write_bytes(flipped)
+            self.assertTrue(_wal_without_shm(simulated))
+            self.assertNotEqual(_format_versions(simulated), (1, 1))
+
+    def test_rearm_restores_subprocess_run_if_this_module_replaced_it(self):
+        replaced = subprocess.run
+        subprocess.run = lambda *args, **kwargs: None
+        try:
+            self.assertFalse(getattr(subprocess.run, "_mailroom_hermetic", False))
+            _rearm_hermetic_guard()
+            self.assertIs(subprocess.run, _HERMETIC_SUBPROCESS["run"])
+            self.assertTrue(getattr(subprocess.run, "_mailroom_hermetic", False))
+        finally:
+            subprocess.run = replaced
+            _rearm_hermetic_guard()
 
 
 if __name__ == "__main__":

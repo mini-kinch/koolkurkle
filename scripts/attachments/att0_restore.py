@@ -9,6 +9,13 @@ writer flock. It must be run as:
 Refuses basename mailroom.sqlite unless --allow-mailroom-sqlite, then
 still calls sor_writer_gate.refuse_if_sor_writer_conflict before opening
 the database. Never modifies or deletes the source file.
+
+The temp copy is sealed with PRAGMA journal_mode=DELETE before the
+atomic replace. Header bytes 18-19 are then the rollback versions
+(1, 1), so a later mode=ro open does not need a -shm file. The next
+writer sets WAL (scripts/sqlite_pragmas.py). Rebuilding -shm after the
+replace would leave a WAL database plus new sidecars; those sidecars
+are removed so a stale WAL cannot replay onto the restored file.
 """
 
 from __future__ import annotations
@@ -22,11 +29,8 @@ from pathlib import Path
 from typing import Any
 
 SCRIPTS = Path(__file__).resolve().parent.parent
-HERE = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
 
 from sor_writer_gate import (  # noqa: E402
     SOR_BASENAME,
@@ -40,8 +44,12 @@ _WRAPPER = (
 )
 _RESTORE_PURPOSE = "att0-restore"
 _SQLITE_HEADER = b"SQLite format 3\x00"
-_JOURNAL_MODES = ("delete", "truncate", "persist", "memory", "wal", "off")
 _TEMP_PREFIX = ".att0-restore-"
+# SQLite header bytes 18 and 19 are the file-format write and read versions.
+# 1 = rollback journal, 2 = WAL. A WAL file (2, 2) with -shm deleted cannot
+# be opened mode=ro on SQLite 3.51.0 (Apple /usr/bin/python3): that build
+# cannot create the shared-memory file on a read-only connection.
+_ROLLBACK_FORMAT = (1, 1)
 
 
 class RestoreRefuse(RuntimeError):
@@ -54,6 +62,19 @@ def _ro_uri(path: Path) -> str:
 
 def _sidecar(path: Path, suffix: str) -> Path:
     return Path(str(path) + suffix)
+
+
+def _format_versions(path: Path) -> tuple[int, int]:
+    """Return SQLite header bytes 18-19 (write version, read version)."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(18)
+            raw = handle.read(2)
+    except OSError:
+        raw = b""
+    if len(raw) != 2:
+        raise RestoreRefuse("refuse: journal_mode mismatch")
+    return raw[0], raw[1]
 
 
 def _is_sqlite_file(path: Path) -> bool:
@@ -181,22 +202,6 @@ def _checkpoint_nonempty_wal(dest: Path) -> None:
         raise RestoreRefuse("refuse: wal checkpoint busy")
 
 
-def _dest_journal_mode(dest: Path) -> str:
-    if not dest.is_file() or not _is_sqlite_file(dest):
-        return "wal"
-    conn = sqlite3.connect(_ro_uri(dest), uri=True)
-    try:
-        row = conn.execute("PRAGMA journal_mode").fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        raise RestoreRefuse("refuse: journal_mode mismatch")
-    mode = str(row[0]).lower()
-    if mode not in _JOURNAL_MODES:
-        raise RestoreRefuse("refuse: journal_mode mismatch")
-    return mode
-
-
 def _apply_journal_mode(conn: sqlite3.Connection, mode: str) -> None:
     row = conn.execute("PRAGMA journal_mode=%s" % mode).fetchone()
     if row is None or str(row[0]).lower() != mode:
@@ -248,8 +253,6 @@ def restore_database(
     if not _is_sqlite_file(source):
         raise RestoreRefuse("refuse: src is not a sqlite database")
 
-    mode = _dest_journal_mode(target)
-
     tmp_path: Path | None = None
     replaced = False
     try:
@@ -265,17 +268,18 @@ def restore_database(
             tmp_conn = sqlite3.connect(str(tmp_path))
             try:
                 _backup(src_conn, tmp_conn)
-                _apply_journal_mode(tmp_conn, mode)
-                if mode == "wal":
-                    row = tmp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-                    if row is None or int(row[0]) != 0:
-                        raise RestoreRefuse("refuse: wal checkpoint busy")
-                _apply_journal_mode(tmp_conn, mode)
+                # Seal rollback mode before replace. The backup API can copy
+                # a WAL header (bytes 18-19 == 2). Leaving that header and
+                # then deleting -shm makes mode=ro fail on SQLite 3.51.0.
+                # The next writer sets WAL; this file does not.
+                _apply_journal_mode(tmp_conn, "delete")
                 _integrity_ok(tmp_conn)
             finally:
                 tmp_conn.close()
         finally:
             src_conn.close()
+        if _format_versions(tmp_path) != _ROLLBACK_FORMAT:
+            raise RestoreRefuse("refuse: journal_mode mismatch")
         for suffix in ("-wal", "-shm", "-journal"):
             _unlink_quiet(_sidecar(tmp_path, suffix))
         _checkpoint_nonempty_wal(target)
