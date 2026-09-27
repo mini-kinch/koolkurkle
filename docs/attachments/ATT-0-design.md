@@ -236,6 +236,16 @@ PYTHONPATH=scripts:scripts/attachments python3 scripts/attachments/meta_fill.py 
 
 ---
 
+## Fingerprint, diff, and backup
+
+Read-only helpers, separate from metadata fill:
+
+- `scripts/attachments/att0_fp.py`
+- `scripts/attachments/att0_fpdiff.py`
+- `scripts/attachments/att0_backup.py`
+
+Usage, exit codes, and the logical shell recipe are in [ATT-0-fingerprint.md](ATT-0-fingerprint.md). This packet does not restore a backup.
+
 ## Out of scope for this packet
 
 - Applying the migration to the system of record or to a daily copy.
