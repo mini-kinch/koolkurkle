@@ -21,6 +21,14 @@ back if that replace does not happen. A missing or empty source -wal
 is opened immutable=1. A non-empty source -wal is hardlinked into a
 private directory and opened mode=ro there, so the source gains no
 sidecars and uncheckpointed frames are still copied.
+
+The writer gate does not see readers. Before the temp file is created,
+and again before sidecars are parked, the pinned binary /usr/sbin/lsof
+(no PATH lookup) is run on the destination, its -wal, and its -shm.
+Another process's pid is a refuse. This process's own pid is ignored.
+If that binary cannot be executed, the check does not refuse; the
+operator card must still boot out the serve job and confirm lsof is
+empty. See docs/attachments/att0-restore.md.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -58,8 +67,12 @@ _TEMP_PREFIX = ".att0-restore-"
 # be opened mode=ro on SQLite 3.51.0 (Apple /usr/bin/python3): that build
 # cannot create the shared-memory file on a read-only connection.
 _ROLLBACK_FORMAT = (1, 1)
-# Source size + source -wal size + this margin must fit in the dest dir.
+# Dest dir: source size + source -wal size + this margin.
+# Source dir, when the source -wal is non-empty: that -wal size + this
+# margin, for the staged copy beside the hardlink.
 _FREE_MARGIN = 64 * 1024 * 1024
+# macOS ships lsof here. No PATH lookup. -n and -P skip name resolution.
+_LSOF_BIN = "/usr/sbin/lsof"
 
 
 class RestoreRefuse(RuntimeError):
@@ -175,13 +188,80 @@ def _wal_nonempty(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
-def _require_free_space(source: Path, parent: Path) -> None:
-    need = source.stat().st_size + _FREE_MARGIN
+def _wal_size(source: Path) -> int:
     wal = _sidecar(source, "-wal")
-    if wal.is_file():
-        need += wal.stat().st_size
+    if not wal.is_file():
+        return 0
+    return wal.stat().st_size
+
+
+def _require_free_space(source: Path, parent: Path) -> None:
+    wal_size = _wal_size(source)
+    need = source.stat().st_size + wal_size + _FREE_MARGIN
     if shutil.disk_usage(parent).free < need:
         raise RestoreRefuse("refuse: not enough free space")
+    # The staged -wal copy lands in the source directory. The main file
+    # is a hardlink, so only the -wal bytes are extra. The dest check
+    # already covers that when both paths share a directory, because its
+    # requirement is larger; a different source directory is checked here.
+    if wal_size <= 0:
+        return
+    try:
+        same = source.parent.resolve() == parent.resolve()
+    except OSError:
+        same = False
+    if same:
+        return
+    if shutil.disk_usage(source.parent).free < wal_size + _FREE_MARGIN:
+        raise RestoreRefuse("refuse: not enough free space")
+
+
+def _query_lsof(argv: list[str]) -> str:
+    """Run pinned lsof. OSError if the binary cannot be executed."""
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout or ""
+
+
+def _foreign_lsof_pids(dest: Path) -> list[int]:
+    """Pids other than this process that hold dest, dest-wal, or dest-shm.
+
+    Best-effort: a missing binary returns no pids and does not refuse.
+    A pid that is returned is a refuse in ``_refuse_if_dest_open``.
+    """
+    argv = [
+        _LSOF_BIN,
+        "-n",
+        "-P",
+        "-t",
+        "--",
+        str(dest),
+        str(_sidecar(dest, "-wal")),
+        str(_sidecar(dest, "-shm")),
+    ]
+    try:
+        stdout = _query_lsof(argv)
+    except OSError:
+        return []
+    me = os.getpid()
+    found: list[int] = []
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text.isdigit():
+            continue
+        pid = int(text)
+        if pid != me and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _refuse_if_dest_open(dest: Path) -> None:
+    if _foreign_lsof_pids(dest):
+        raise RestoreRefuse("refuse: dest file is open")
 
 
 def _copy_bytes(src: Path, dest: Path) -> None:
@@ -362,6 +442,7 @@ def restore_database(
     if not _is_sqlite_file(source):
         raise RestoreRefuse("refuse: src is not a sqlite database")
     _require_free_space(source, parent)
+    _refuse_if_dest_open(target)
 
     tmp_path: Path | None = None
     private: Path | None = None
@@ -402,6 +483,7 @@ def restore_database(
             _preserve_dest_mode_owner(tmp_path, target)
         _fsync_file(tmp_path)
         _fsync_dir(parent)
+        _refuse_if_dest_open(target)
         parked = _park_sidecars(target)
         if _wal_nonempty(target):
             raise RestoreRefuse("refuse: dest wal recreated")
@@ -416,10 +498,18 @@ def restore_database(
         if src_conn is not None:
             src_conn.close()
         _remove_private(private)
-        if parked and not replaced:
-            _unpark(parked)
+        # _unpark can raise. That must not skip temp removal, and it must
+        # not replace the exception that entered this finally.
+        unpark_exc = None
+        try:
+            if parked and not replaced:
+                _unpark(parked)
+        except Exception as exc:
+            unpark_exc = exc
         if tmp_path is not None and not replaced:
             _remove_sqlite_family(tmp_path)
+        if unpark_exc is not None and sys.exc_info()[1] is None:
+            raise unpark_exc
     return {"src": source.name, "dest": target.name}
 
 

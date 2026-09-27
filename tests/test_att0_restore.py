@@ -438,7 +438,11 @@ class RestoreCliTests(unittest.TestCase):
             "python3 scripts/attachments/att0_restore.py ...",
             source,
         )
-        self.assertNotIn("import subprocess", source)
+        self.assertEqual(source.count("import subprocess"), 1)
+        self.assertIn('"/usr/sbin/lsof"', source)
+        self.assertNotIn("shell=True", source)
+        self.assertNotIn("/usr/bin/curl", source)
+        self.assertNotIn("/usr/bin/security", source)
         self.assertNotIn("ask_mail", source)
         doc = DOC.read_text(encoding="utf-8")
         self.assertIn(
@@ -449,7 +453,6 @@ class RestoreCliTests(unittest.TestCase):
             "--allow-mailroom-sqlite",
             doc,
         )
-        self.assertIn('sqlite3 /var/backups/mailroom-backup.sqlite ".backup ', doc)
         self.assertIn(
             "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
             doc,
@@ -466,17 +469,9 @@ class RestoreCliTests(unittest.TestCase):
         self.assertIn("refuse: not enough free space", doc)
         self.assertIn("F_FULLFSYNC", doc)
         self.assertIn("64 MiB", doc)
-        wal_mv = doc.index(
-            "mv /var/lib/mailroom/mailroom.sqlite-wal "
-            "/var/lib/mailroom/mailroom.sqlite-wal.aside"
-        )
-        main_mv = doc.index(
-            "mv /var/lib/mailroom/mailroom.sqlite.restore-tmp "
-            "/var/lib/mailroom/mailroom.sqlite"
-        )
-        rm_aside = doc.index("rm -f /var/lib/mailroom/mailroom.sqlite-wal.aside")
-        self.assertLess(wal_mv, main_mv)
-        self.assertLess(main_mv, rm_aside)
+        self.assertNotIn('sqlite3 /var/backups/mailroom-backup.sqlite ".backup ', doc)
+        self.assertNotIn("mailroom.sqlite.restore-tmp", doc)
+        self.assertNotIn("mv /var/lib/mailroom/mailroom.sqlite-wal", doc)
 
     def test_wrapper_command_restores_and_foreign_lock_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1282,6 +1277,247 @@ class RestoreReviewTests(unittest.TestCase):
                 )
             finally:
                 conn.close()
+
+    def test_doc_records_reader_precondition_aside_and_no_recipe(self):
+        doc = DOC.read_text(encoding="utf-8")
+        self.assertIn("launchctl bootout gui/<uid>/com.mailroom.ask-mail-serve", doc)
+        self.assertIn(
+            "lsof /var/lib/mailroom/mailroom.sqlite "
+            "/var/lib/mailroom/mailroom.sqlite-wal "
+            "/var/lib/mailroom/mailroom.sqlite-shm",
+            doc,
+        )
+        self.assertIn("must print no process", doc)
+        self.assertIn("/usr/sbin/lsof", doc)
+        self.assertIn("refuse: dest file is open", doc)
+        self.assertIn("exit 2", doc)
+        self.assertIn(".att0-restore-aside-<hex>-<name>-wal", doc)
+        self.assertIn("rename that `-wal` aside back", doc)
+        self.assertIn("rerun this helper", doc)
+        self.assertIn("## No hand-rolled swap", doc)
+        self.assertIn("no fsync step", doc)
+        self.assertIn("scripts/attachments/att0_restore.py", doc)
+        self.assertNotIn("$HOME", doc)
+        self.assertNotIn("/Users/", doc)
+        self.assertNotIn("/home/", doc)
+
+    def test_lsof_holder_exits_2_and_self_pid_or_missing_binary_proceeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            before = _sha(dest)
+            ino = dest.stat().st_ino
+            seen: list[list[str]] = []
+
+            def foreign(argv):
+                seen.append(list(argv))
+                return "424242\n"
+
+            stderr = io.StringIO()
+            with mock.patch.object(restore, "_query_lsof", side_effect=foreign):
+                with mock.patch("sys.stderr", stderr):
+                    rc = restore.main(["--src", str(src), "--dest", str(dest)])
+            self.assertEqual(rc, 2, stderr.getvalue())
+            self.assertIn("refuse: dest file is open", stderr.getvalue())
+            self.assertNotIn("warn", stderr.getvalue().lower())
+            self.assertNotIn(str(root), stderr.getvalue())
+            self.assertEqual(seen[0][0], "/usr/sbin/lsof")
+            self.assertEqual(seen[0][1:4], ["-n", "-P", "-t"])
+            self.assertTrue(any(arg.endswith("dest.sqlite") for arg in seen[0]))
+            self.assertTrue(any(arg.endswith("dest.sqlite-wal") for arg in seen[0]))
+            self.assertTrue(any(arg.endswith("dest.sqlite-shm") for arg in seen[0]))
+            self.assertEqual(_sha(dest), before)
+            self.assertEqual(dest.stat().st_ino, ino)
+            self.assertEqual(_temps(root), [])
+
+            def only_self(_argv):
+                return "%d\n" % os.getpid()
+
+            with mock.patch.object(restore, "_query_lsof", side_effect=only_self):
+                restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+            self.assertEqual(_row_digest(dest), _row_digest(src))
+            self.assertEqual(_temps(root), [])
+
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                leftover = Path(str(dest) + suffix) if suffix else dest
+                if leftover.exists():
+                    leftover.unlink()
+            _make_db(dest, "live-again")
+            again = _sha(dest)
+            calls = {"n": 0}
+
+            def second_call_holds(argv):
+                calls["n"] += 1
+                seen.append(list(argv))
+                if calls["n"] == 1:
+                    return ""
+                return "424242\n"
+
+            stderr = io.StringIO()
+            with mock.patch.object(restore, "_query_lsof", side_effect=second_call_holds):
+                with mock.patch("sys.stderr", stderr):
+                    rc = restore.main(["--src", str(src), "--dest", str(dest)])
+            self.assertEqual(rc, 2, stderr.getvalue())
+            self.assertIn("refuse: dest file is open", stderr.getvalue())
+            self.assertGreaterEqual(calls["n"], 2)
+            self.assertEqual(_sha(dest), again)
+            self.assertEqual(_temps(root), [])
+
+            def missing(_argv):
+                raise OSError("injected missing lsof")
+
+            with mock.patch.object(restore, "_query_lsof", side_effect=missing):
+                restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+            self.assertEqual(_row_digest(dest), _row_digest(src))
+            self.assertEqual(_temps(root), [])
+
+    def test_unpark_exception_still_removes_temp_and_keeps_original(self):
+        real_replace = os.replace
+
+        def replace_boom(src_path, dst_path, *, dest_name):
+            src_name = os.path.basename(src_path)
+            dst_name = os.path.basename(dst_path)
+            if dst_name == dest_name and src_name.endswith(".sqlite"):
+                raise OSError("injected replace")
+            return real_replace(src_path, dst_path)
+
+        def unpark_boom(_parked):
+            raise restore.RestoreRefuse("refuse: injected unpark")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            Path(str(dest) + "-wal").write_bytes(b"parked-wal-bytes")
+            before = _sha(dest)
+            ino = dest.stat().st_ino
+            stderr = io.StringIO()
+            with mock.patch(
+                "os.replace",
+                side_effect=lambda src_path, dst_path: replace_boom(
+                    src_path, dst_path, dest_name=dest.name
+                ),
+            ):
+                with mock.patch.object(restore, "_unpark", side_effect=unpark_boom):
+                    with mock.patch("sys.stderr", stderr):
+                        rc = restore.main(
+                            [
+                                "--src",
+                                str(src),
+                                "--dest",
+                                str(dest),
+                                "--allow-mailroom-sqlite",
+                            ]
+                        )
+            self.assertEqual(rc, 1, stderr.getvalue())
+            self.assertIn("restore failed (OSError)", stderr.getvalue())
+            self.assertNotIn("injected unpark", stderr.getvalue())
+            self.assertNotIn(str(root), stderr.getvalue())
+            self.assertEqual(_sha(dest), before)
+            self.assertEqual(dest.stat().st_ino, ino)
+            temps = [
+                path
+                for path in root.iterdir()
+                if path.name.startswith(".att0-restore-") and "aside-" not in path.name
+            ]
+            self.assertEqual(temps, [])
+            asides = [
+                path
+                for path in root.iterdir()
+                if ".att0-restore-aside-" in path.name
+            ]
+            self.assertTrue(asides)
+
+    def test_free_space_checks_source_dir_for_staged_wal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_dir = root / "src"
+            dest_dir = root / "dest"
+            src_dir.mkdir()
+            dest_dir.mkdir()
+            src = src_dir / "backup.sqlite"
+            dest = dest_dir / "dest.sqlite"
+            holder = _open_uncheckpointed(src, "from-src")
+            try:
+                _make_db(dest, "live-dest")
+                before = _sha(dest)
+                wal_size = Path(str(src) + "-wal").stat().st_size
+                self.assertGreater(wal_size, 0)
+                margin = 64 * 1024 * 1024
+                src_need = wal_size + margin
+                dest_need = src.stat().st_size + wal_size + margin
+                usage = shutil.disk_usage(root)
+                plenty = type(usage)(usage.total, usage.used, dest_need + src_need)
+                one_short = type(usage)(usage.total, usage.used, src_need - 1)
+                exact_src = type(usage)(usage.total, usage.used, src_need)
+                seen: list[Path] = []
+
+                def short_source(path):
+                    seen.append(Path(path))
+                    if Path(path) == src_dir:
+                        return one_short
+                    return plenty
+
+                with mock.patch.object(restore.shutil, "disk_usage", side_effect=short_source):
+                    with mock.patch(
+                        "tempfile.mkstemp", side_effect=AssertionError("mkstemp")
+                    ):
+                        with self.assertRaises(restore.RestoreRefuse) as ctx:
+                            restore.restore_database(
+                                src, dest, cmdlines=[], lock_held=False
+                            )
+                self.assertIn("not enough free space", str(ctx.exception))
+                self.assertEqual(seen, [dest_dir, src_dir])
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(_temps(root), [])
+                self.assertEqual(list(src_dir.glob(".att0-restore-*")), [])
+
+                def enough(path):
+                    if Path(path) == src_dir:
+                        return exact_src
+                    return plenty
+
+                with mock.patch.object(restore.shutil, "disk_usage", side_effect=enough):
+                    restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                self.assertEqual(_row_digest(dest), _row_digest(src))
+                self.assertEqual(_temps(root), [])
+            finally:
+                holder.close()
+
+            empty_src = src_dir / "checkpointed.sqlite"
+            empty_dest = dest_dir / "other.sqlite"
+            _make_db(empty_src, "from-src")
+            _make_db(empty_dest, "live-dest")
+            for suffix in ("-wal", "-shm", "-journal"):
+                side = Path(str(empty_src) + suffix)
+                if side.exists():
+                    side.unlink()
+            self.assertFalse(Path(str(empty_src) + "-wal").is_file())
+            zero = type(usage)(usage.total, usage.used, 0)
+            plenty_empty = type(usage)(
+                usage.total,
+                usage.used,
+                empty_src.stat().st_size + margin,
+            )
+            checked: list[Path] = []
+
+            def dest_only(path):
+                checked.append(Path(path))
+                if Path(path) == src_dir:
+                    return zero
+                return plenty_empty
+
+            with mock.patch.object(restore.shutil, "disk_usage", side_effect=dest_only):
+                restore.restore_database(
+                    empty_src, empty_dest, cmdlines=[], lock_held=False
+                )
+            self.assertEqual(checked, [dest_dir])
+            self.assertEqual(_row_digest(empty_dest), _row_digest(empty_src))
 
 
 if __name__ == "__main__":
