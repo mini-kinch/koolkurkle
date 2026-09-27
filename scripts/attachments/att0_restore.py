@@ -18,9 +18,20 @@ writer sets WAL (scripts/sqlite_pragmas.py).
 The live destination is left uncheckpointed. Its -wal and -shm are
 renamed aside before the temp file replaces the main file, and renamed
 back if that replace does not happen. A missing or empty source -wal
-is opened immutable=1. A non-empty source -wal is hardlinked into a
-private directory and opened mode=ro there, so the source gains no
-sidecars and uncheckpointed frames are still copied.
+is opened immutable=1. A non-empty source -wal is staged as a byte
+copy of the main file plus that -wal in a private directory (new
+inode, never a hardlink) and opened mode=ro there, so the source gains
+no sidecars and uncheckpointed frames are still copied. SQLite's unix
+VFS keeps one inode/pShmNode for the whole process; a hardlink would
+write read-marks into the source -shm.
+
+The writer gate does not see readers. Before the temp file is created,
+and again before sidecars are parked, the pinned binary /usr/sbin/lsof
+(no PATH lookup) is run on the destination, its -wal, and its -shm.
+Another process's pid is a refuse. This process's own pid is ignored.
+If that binary cannot be executed, the check does not refuse; the
+operator card must still boot out the serve job and confirm lsof is
+empty. See docs/attachments/att0-restore.md.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -58,8 +70,13 @@ _TEMP_PREFIX = ".att0-restore-"
 # be opened mode=ro on SQLite 3.51.0 (Apple /usr/bin/python3): that build
 # cannot create the shared-memory file on a read-only connection.
 _ROLLBACK_FORMAT = (1, 1)
-# Source size + source -wal size + this margin must fit in the dest dir.
+# Dest dir: source size + source -wal size + this margin.
+# Source dir, when the source -wal is non-empty: the same amount.
+# The stage is a byte copy of the main file and the -wal, not a
+# hardlink of the main file with only the -wal copied beside it.
 _FREE_MARGIN = 64 * 1024 * 1024
+# macOS ships lsof here. No PATH lookup. -n and -P skip name resolution.
+_LSOF_BIN = "/usr/sbin/lsof"
 
 
 class RestoreRefuse(RuntimeError):
@@ -175,18 +192,129 @@ def _wal_nonempty(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
-def _require_free_space(source: Path, parent: Path) -> None:
-    need = source.stat().st_size + _FREE_MARGIN
+def _wal_size(source: Path) -> int:
     wal = _sidecar(source, "-wal")
-    if wal.is_file():
-        need += wal.stat().st_size
+    if not wal.is_file():
+        return 0
+    return wal.stat().st_size
+
+
+def _require_free_space(source: Path, parent: Path) -> None:
+    wal_size = _wal_size(source)
+    need = source.stat().st_size + wal_size + _FREE_MARGIN
     if shutil.disk_usage(parent).free < need:
         raise RestoreRefuse("refuse: not enough free space")
+    # The stage is a byte copy of the main file and the -wal in the
+    # source directory, so that directory needs the same amount. When
+    # both paths share a directory, the destination check is that size
+    # and covers the stage. A different source directory is checked here.
+    if wal_size <= 0:
+        return
+    try:
+        same = source.parent.resolve() == parent.resolve()
+    except OSError:
+        same = False
+    if same:
+        return
+    if shutil.disk_usage(source.parent).free < need:
+        raise RestoreRefuse("refuse: not enough free space")
+
+
+def _query_lsof(argv: list[str]) -> str:
+    """Run pinned lsof. OSError if the binary cannot be executed."""
+    proc = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout or ""
+
+
+def _foreign_lsof_pids(dest: Path) -> list[int]:
+    """Pids other than this process that hold dest, dest-wal, or dest-shm.
+
+    Best-effort: a missing binary returns no pids and does not refuse.
+    A pid that is returned is a refuse in ``_refuse_if_dest_open``.
+    """
+    argv = [
+        _LSOF_BIN,
+        "-n",
+        "-P",
+        "-t",
+        "--",
+        str(dest),
+        str(_sidecar(dest, "-wal")),
+        str(_sidecar(dest, "-shm")),
+    ]
+    try:
+        stdout = _query_lsof(argv)
+    except OSError:
+        return []
+    me = os.getpid()
+    found: list[int] = []
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text.isdigit():
+            continue
+        pid = int(text)
+        if pid != me and pid not in found:
+            found.append(pid)
+    return found
+
+
+def _refuse_if_dest_open(dest: Path) -> None:
+    if _foreign_lsof_pids(dest):
+        raise RestoreRefuse("refuse: dest file is open")
 
 
 def _copy_bytes(src: Path, dest: Path) -> None:
     with open(src, "rb") as inp, open(dest, "wb") as out:
         shutil.copyfileobj(inp, out, length=1024 * 1024)
+
+
+def _copy_stage(source: Path, staged: Path) -> None:
+    """Byte-copy the main file and the ``-wal``. Neither result is a hardlink."""
+    _copy_bytes(source, staged)
+    _copy_bytes(_sidecar(source, "-wal"), _sidecar(staged, "-wal"))
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    """``(st_size, st_mtime_ns, st_ino)``, or None when ``path`` is missing."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (int(st.st_size), int(st.st_mtime_ns), int(st.st_ino))
+
+
+def _source_identity(
+    source: Path,
+) -> tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]:
+    return (_file_identity(source), _file_identity(_sidecar(source, "-wal")))
+
+
+def _refuse_if_source_changed(
+    source: Path,
+    before: tuple[tuple[int, int, int] | None, tuple[int, int, int] | None],
+) -> None:
+    """Refuse when the source main or ``-wal`` changed during the copy.
+
+    A ``-wal`` that appears or disappears is the same refuse. Its identity
+    is None when the path is missing.
+    """
+    if _source_identity(source) != before:
+        raise RestoreRefuse("refuse: source changed during stage")
+
+
+def _close_conn(conn: sqlite3.Connection | None) -> None:
+    """Close ``conn``. A sqlite error must not skip stage cleanup."""
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
 
 
 def _remove_private(private: Path | None) -> None:
@@ -200,26 +328,58 @@ def _open_source(source: Path) -> tuple[sqlite3.Connection, Path | None]:
 
     Missing or empty -wal: immutable=1. That open does not create -wal/-shm
     and does not see uncheckpointed frames, so it is only used when there
-    are none. Non-empty -wal: hardlink the main file into a private directory
-    on the same filesystem, copy the -wal bytes beside that link, and open
-    the private path mode=ro. immutable=1 is never used in that case.
+    are none. Non-empty -wal: byte-copy the main file and the -wal into a
+    private directory and open that copy mode=ro. The main file is a new
+    inode, not a hardlink. SQLite's unix VFS keys unixInodeInfo and its
+    pShmNode by device and inode for the whole process, so a hardlink
+    would write read-marks into the source -shm. immutable=1 is never
+    used for a non-empty -wal.
+
+    ``(st_size, st_mtime_ns, st_ino)`` of the main file and the -wal are
+    recorded before the copy and checked after it. A change, including a
+    -wal that appears or disappears, removes the stage and refuses.
+
+    ``sqlite3.connect`` is not used as a context manager. That form does
+    not close the connection. Every connection is closed in ``finally``.
     """
     if not _wal_nonempty(source):
-        return sqlite3.connect(_immutable_uri(source), uri=True), None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(_immutable_uri(source), uri=True)
+            opened = conn
+            conn = None
+            return opened, None
+        finally:
+            _close_conn(conn)
+    before = _source_identity(source)
     private: Path | None = None
+    conn = None
     try:
-        private = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(source.parent)))
-        staged = private / "db.sqlite"
-        os.link(str(source), str(staged))
-        _copy_bytes(_sidecar(source, "-wal"), _sidecar(staged, "-wal"))
-        conn = sqlite3.connect(_ro_uri(staged), uri=True)
-    except OSError:
+        try:
+            private = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(source.parent)))
+            staged = private / "db.sqlite"
+            _copy_stage(source, staged)
+            _refuse_if_source_changed(source, before)
+            staged_stat = staged.stat()
+            source_stat = source.stat()
+            if (staged_stat.st_dev, staged_stat.st_ino) == (
+                source_stat.st_dev,
+                source_stat.st_ino,
+            ):
+                raise RestoreRefuse("refuse: cannot stage source wal")
+            conn = sqlite3.connect(_ro_uri(staged), uri=True)
+        except RestoreRefuse:
+            raise
+        except OSError:
+            raise RestoreRefuse("refuse: cannot stage source wal") from None
+        opened = conn
+        staged_dir = private
+        conn = None
+        private = None
+        return opened, staged_dir
+    finally:
+        _close_conn(conn)
         _remove_private(private)
-        raise RestoreRefuse("refuse: cannot stage source wal") from None
-    except Exception:
-        _remove_private(private)
-        raise
-    return conn, private
 
 
 def _preserve_dest_mode_owner(tmp: Path, dest: Path) -> None:
@@ -362,6 +522,7 @@ def restore_database(
     if not _is_sqlite_file(source):
         raise RestoreRefuse("refuse: src is not a sqlite database")
     _require_free_space(source, parent)
+    _refuse_if_dest_open(target)
 
     tmp_path: Path | None = None
     private: Path | None = None
@@ -378,8 +539,9 @@ def restore_database(
         tmp_path = Path(tmp_name)
         src_conn, private = _open_source(source)
         try:
-            tmp_conn = sqlite3.connect(str(tmp_path))
+            tmp_conn: sqlite3.Connection | None = None
             try:
+                tmp_conn = sqlite3.connect(str(tmp_path))
                 _backup(src_conn, tmp_conn)
                 # Seal rollback mode before replace. The backup API can copy
                 # a WAL header (bytes 18-19 == 2). Leaving that header and
@@ -388,9 +550,10 @@ def restore_database(
                 _apply_journal_mode(tmp_conn, "delete")
                 _integrity_ok(tmp_conn)
             finally:
-                tmp_conn.close()
+                # sqlite3.connect() as a context manager does not close.
+                _close_conn(tmp_conn)
         finally:
-            src_conn.close()
+            _close_conn(src_conn)
             src_conn = None
             _remove_private(private)
             private = None
@@ -402,6 +565,7 @@ def restore_database(
             _preserve_dest_mode_owner(tmp_path, target)
         _fsync_file(tmp_path)
         _fsync_dir(parent)
+        _refuse_if_dest_open(target)
         parked = _park_sidecars(target)
         if _wal_nonempty(target):
             raise RestoreRefuse("refuse: dest wal recreated")
@@ -413,13 +577,20 @@ def restore_database(
             _unlink_quiet(_sidecar(target, suffix))
         _fsync_dir(parent)
     finally:
-        if src_conn is not None:
-            src_conn.close()
+        _close_conn(src_conn)
         _remove_private(private)
-        if parked and not replaced:
-            _unpark(parked)
+        # _unpark can raise. That must not skip temp removal, and it must
+        # not replace the exception that entered this finally.
+        unpark_exc = None
+        try:
+            if parked and not replaced:
+                _unpark(parked)
+        except Exception as exc:
+            unpark_exc = exc
         if tmp_path is not None and not replaced:
             _remove_sqlite_family(tmp_path)
+        if unpark_exc is not None and sys.exc_info()[1] is None:
+            raise unpark_exc
     return {"src": source.name, "dest": target.name}
 
 

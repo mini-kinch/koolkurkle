@@ -1187,7 +1187,14 @@ class HermeticBoundaryTests(unittest.TestCase):
     def test_package_has_no_process_embed_or_network_path(self):
         for path in sorted(PKG.glob("*.py")):
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("import subprocess", text, path.name)
+            if path.name == "att0_restore.py":
+                self.assertEqual(text.count("import subprocess"), 1, path.name)
+                self.assertIn('"/usr/sbin/lsof"', text, path.name)
+                self.assertNotIn("shell=True", text, path.name)
+                self.assertNotIn("/usr/bin/curl", text, path.name)
+                self.assertNotIn("/usr/bin/security", text, path.name)
+            else:
+                self.assertNotIn("import subprocess", text, path.name)
             self.assertNotIn("os.system", text, path.name)
             self.assertNotIn("os.popen", text, path.name)
             self.assertNotIn("Popen(", text, path.name)
