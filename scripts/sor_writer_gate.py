@@ -463,38 +463,24 @@ def ancestor_pids(
     raise AncestorWalkError("max-depth")
 
 
-def _env_pid(raw: str | None) -> int | None:
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        pid = int(text)
-    except ValueError:
-        return None
-    if pid <= 0:
-        return None
-    return pid
-
-
 def _excluded_pids(
     me: int,
     *,
     ancestors: Iterable[int] | None,
 ) -> set[int]:
+    """Self plus the walked ancestor chain. Never an env pid by itself.
+
+    ``MAILROOM_WRITER_LOCK_PID`` is omitted only when that walk lists it.
+    A failed walk excludes only self, so a rem-like process stays a hit.
+    """
     exclude = set()
     if isinstance(me, int) and not isinstance(me, bool) and me > 0:
         exclude.add(me)
-    wrapper = _env_pid(os.environ.get(wwl.LOCK_PID_ENV))
-    if wrapper is not None:
-        exclude.add(wrapper)
     if ancestors is None:
         try:
             chain = ancestor_pids(me)
-        except AncestorWalkError as exc:
-            if exc.code == "no-such-process":
-                chain = []
-            else:
-                raise
+        except AncestorWalkError:
+            chain = []
     else:
         chain = list(ancestors)
     for pid in chain:
@@ -512,10 +498,10 @@ def rem_process_hits(
     proc_dir: Path | None = None,
     ancestors: Iterable[int] | None = None,
 ) -> list[tuple[int, str]]:
-    """Rem cmdline hits, excluding self, the wrapper pid, and ancestors.
+    """Rem cmdline hits. Excludes self and the walked ancestor chain.
 
-    ``ancestors=None`` walks the parent chain. A walk error other than a
-    missing start pid propagates so the gate can refuse.
+    The env wrapper pid is not trusted on its own. A failed walk excludes
+    only self.
     """
     me = os.getpid() if self_pid is None else self_pid
     exclude = _excluded_pids(me, ancestors=ancestors)

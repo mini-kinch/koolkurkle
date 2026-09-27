@@ -254,6 +254,43 @@ class MatrixTests(IdentityCase):
             finally:
                 wwl.release_writer_lock(held)
 
+    def test_legacy_token_key_refuses_without_dual_read(self):
+        known = "legacy-token-key-secret-4c2e"
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "mailroom.write.lock"
+            db = Path(tmp) / "rehearsal.sqlite"
+            db.write_text("")
+            held = wwl.acquire_writer_lock(lock, "att0-migrate")
+            try:
+                legacy = (
+                    "pid=%d\n"
+                    "hostname=test-host\n"
+                    "purpose=att0-migrate\n"
+                    "acquired_at=%s\n"
+                    "token=%s\n"
+                    % (os.getpid(), wwl.utcnow().isoformat(), known)
+                )
+                keys = [
+                    line.split("=", 1)[0]
+                    for line in legacy.splitlines()
+                    if "=" in line
+                ]
+                if "token" not in keys or "writer_token" in keys:
+                    self.fail("legacy fixture is not an old token= lock")
+                lock.write_text(legacy, encoding="utf-8")
+                info = wwl.read_lock_info(lock)
+                if info.writer_token:
+                    self.fail("old token= key was read as writer_token")
+                os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
+                os.environ[wwl.LOCK_TOKEN_ENV] = known
+                os.environ[wwl.LOCK_PID_ENV] = str(os.getpid())
+                os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
+                message = self._expect_refuse(db, lock)
+                self.assertIn("token mismatch", message)
+                _assert_secret_absent(self, known, message, *self._secret_blobs())
+            finally:
+                wwl.release_writer_lock(held)
+
     def test_env_present_lock_free_refuses_and_probe_is_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock = Path(tmp) / "mailroom.write.lock"
@@ -386,6 +423,32 @@ class MatrixTests(IdentityCase):
             if phrase not in detail:
                 self.fail("%s missing %s (%s)" % (label, phrase, _scrub(detail, known)))
 
+        def cli_stderr(purpose):
+            env = os.environ.copy()
+            for key in (wwl.LOCK_TOKEN_ENV, wwl.LOCK_PID_ENV, wwl.LOCK_PURPOSE_ENV):
+                env.pop(key, None)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "with_writer_lock.py"),
+                    "--purpose",
+                    purpose,
+                    "--lock-file",
+                    str(lock),
+                    "--action-required-file",
+                    str(action),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "pass",
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            return proc.returncode, proc.stdout, proc.stderr
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             lock = root / "mailroom.write.lock"
@@ -425,6 +488,10 @@ class MatrixTests(IdentityCase):
                     expect_reason("busy lock", str(exc), "writer lock held")
                 else:
                     self.fail("second holder acquired the lock")
+                rc, out, err = cli_stderr("second")
+                check("wrapper cli subprocess busy", out, err)
+                if rc != 2 or "writer lock held" not in err or "no steal" in err:
+                    self.fail("busy wrapper cli did not refuse")
 
                 lock.write_text(
                     _replace_field(payload, "acquired_at", "2020-01-01T00:00:00+00:00"),
@@ -436,6 +503,10 @@ class MatrixTests(IdentityCase):
                     expect_reason("stale lock", str(exc), "no steal")
                 else:
                     self.fail("stale holder was stolen")
+                rc, out, err = cli_stderr("second")
+                check("wrapper cli subprocess stale", out, err)
+                if rc != 2 or "no steal" not in err:
+                    self.fail("stale wrapper cli did not refuse")
 
                 lock.write_text(payload, encoding="utf-8")
                 probed_held, probed_detail = gate._probe_writer_lock(lock)
@@ -454,6 +525,10 @@ class MatrixTests(IdentityCase):
                 os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
                 _held, detail = gate.writer_lock_held(lock)
                 expect_reason("token mismatch", detail, "token mismatch")
+                conflict = gate.conflict_message(detail)
+                check("gate conflict detail", detail, conflict)
+                if "token mismatch" not in conflict:
+                    self.fail("gate conflict detail omitted the refusal reason")
                 os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
                 expect_reason(
                     "token mismatch refuse",
@@ -737,8 +812,9 @@ class RemExclusionTests(IdentityCase):
         )
         self.assertEqual([pid for pid, _line in hits], [77])
 
-    def test_rem_process_hits_excludes_wrapper_pid(self):
+    def test_rem_process_hits_env_pid_is_a_hit_unless_ancestor(self):
         os.environ[wwl.LOCK_PID_ENV] = "77"
+        self.assertIsNone(os.environ.get(wwl.LOCK_TOKEN_ENV))
         hits = gate.rem_process_hits(
             self_pid=400,
             cmdlines=(
@@ -746,6 +822,15 @@ class RemExclusionTests(IdentityCase):
                 (88, "python3 embed-rem"),
             ),
             ancestors=[],
+        )
+        self.assertEqual([pid for pid, _line in hits], [77, 88])
+        hits = gate.rem_process_hits(
+            self_pid=400,
+            cmdlines=(
+                (77, "python3 rem-legacy --db /tmp/mailroom.sqlite"),
+                (88, "python3 embed-rem"),
+            ),
+            ancestors=[77, 1],
         )
         self.assertEqual([pid for pid, _line in hits], [88])
 
@@ -765,17 +850,31 @@ class RemExclusionTests(IdentityCase):
         hits = gate.rem_process_hits(cmdlines=cmdlines)
         self.assertEqual([pid for pid, _line in hits], [foreign])
 
-    def test_ancestor_walk_error_refuses(self):
+    def test_ancestor_walk_error_excludes_only_self(self):
         db = Path("/tmp/mailroom.sqlite")
 
         def boom(_pid):
             raise gate.AncestorWalkError("unreadable")
 
+        cmdlines = (
+            (400, "python3 rem-legacy --db /tmp/mailroom.sqlite"),
+            (77, "python3 embed-rem"),
+        )
         with patch("sor_writer_gate.ancestor_pids", side_effect=boom):
+            os.environ[wwl.LOCK_PID_ENV] = "77"
+            hits = gate.rem_process_hits(self_pid=400, cmdlines=cmdlines)
+            self.assertEqual([pid for pid, _line in hits], [77])
             with self.assertRaises(gate.SorWriterRefuse) as ctx:
-                gate.refuse_if_sor_writer_conflict(db, cmdlines=(), lock_held=False)
-        self.assertIn("ancestor walk failed", str(ctx.exception))
-        self.assertIn(gate.CONFLICT_TOKEN, str(ctx.exception))
+                gate.refuse_if_sor_writer_conflict(
+                    db,
+                    self_pid=400,
+                    cmdlines=cmdlines,
+                    lock_held=False,
+                )
+        message = str(ctx.exception)
+        self.assertIn("rem process pid=77", message)
+        self.assertNotIn("ancestor walk failed", message)
+        self.assertIn(gate.CONFLICT_TOKEN, message)
 
 
 class LivePathTests(IdentityCase):
