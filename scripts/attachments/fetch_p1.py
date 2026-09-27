@@ -381,11 +381,20 @@ def _curl_config(
     port: int,
     timeout_s: float,
     commands: list,
+    ca_file: str | None = None,
 ) -> str:
-    """Stdin curl config. The password is not placed in argv."""
+    """Stdin curl config. The password is not placed in argv.
+
+    ``ca_file`` is a test hook for a loopback CA bundle. It keeps
+    verification on. It is not an insecure switch, and production callers
+    leave it unset.
+    """
     url = _imaps_base_url(host, port)
     seconds = float(timeout_s) if timeout_s and timeout_s > 0 else DEFAULT_TIMEOUT_S
     timeout_text = str(int(seconds)) if seconds == int(seconds) else str(seconds)
+    ca_line = ""
+    if ca_file:
+        ca_line = 'cacert = "%s"\n' % _curl_escape(str(ca_file))
     blocks = []
     for command in commands:
         if any(char in str(command) for char in "\r\n\x00"):
@@ -398,6 +407,7 @@ def _curl_config(
                 'max-time = "%s"\n' % _curl_escape(timeout_text),
                 'user = "%s"\n' % _curl_escape("%s:%s" % (user, password)),
                 'request = "%s"\n' % _curl_escape(command),
+                ca_line,
                 'url = "%s"\n' % _curl_escape(url),
             ]
         )
@@ -469,13 +479,20 @@ class _CurlPartConn:
     SELECT. Partial ``UID FETCH`` items are the only fetches.
     """
 
-    def __init__(self, host: str, port: int, timeout: float) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        ca_file: str | None = None,
+    ) -> None:
         self.host = host
         self.port = int(port)
         self.timeout = timeout
         self.user = ""
         self.password = ""
         self.mailbox: str | None = None
+        self.ca_file = str(ca_file) if ca_file else ""
 
     def login(self, user: str, password: str) -> tuple:
         if any(char in str(user) + str(password) for char in "\r\n\x00"):
@@ -496,6 +513,7 @@ class _CurlPartConn:
             self.port,
             self.timeout,
             commands,
+            ca_file=self.ca_file or None,
         )
         argv = [_CURL_BIN, "--silent", "--show-error", "--fail-early", "-K", "-"]
         try:
@@ -550,6 +568,11 @@ class ImapPartClient:
     refused. The password comes from ``password_fn`` (default Keychain via
     ``read_imap_app_password``). Each chunk is written to ``dest`` and
     dropped so peak memory stays one chunk. Tests inject ``imap_factory``.
+
+    ``port`` and ``ca_file`` are test hooks for a loopback TLS stub.
+    Production callers leave both unset: the port stays 993 and curl uses
+    the system trust store. ``ca_file`` adds a CA bundle and does not
+    disable verification.
     """
 
     def __init__(
@@ -560,6 +583,8 @@ class ImapPartClient:
         timeout: float = DEFAULT_TIMEOUT_S,
         imap_factory: Any = None,
         password_fn: Callable[[], str] | None = None,
+        port: int | None = None,
+        ca_file: str | None = None,
     ) -> None:
         if not host:
             raise FetchRefuse("imap host is required")
@@ -567,10 +592,16 @@ class ImapPartClient:
             raise FetchRefuse("plain IMAP is refused")
         self.host = host
         self.user = user or ""
-        self.port = _IMAP_SSL_PORT
+        if port is None:
+            self.port = _IMAP_SSL_PORT
+        else:
+            self.port = int(port)
+            if self.port < 1 or self.port > 65535:
+                raise FetchRefuse("imap host is required")
         self.timeout = timeout
         self._factory = imap_factory
         self._password_fn = password_fn
+        self._ca_file = str(ca_file) if ca_file else ""
         self._conn: Any = None
         self.mailbox: str | None = None
 
@@ -584,7 +615,12 @@ class ImapPartClient:
                 raise FetchRefuse("imap keychain password is missing") from None
             try:
                 if self._factory is None:
-                    self._conn = _CurlPartConn(self.host, self.port, self.timeout)
+                    self._conn = _CurlPartConn(
+                        self.host,
+                        self.port,
+                        self.timeout,
+                        ca_file=self._ca_file or None,
+                    )
                     self._conn.login(self.user, password)
                 else:
                     context = ssl.create_default_context()
