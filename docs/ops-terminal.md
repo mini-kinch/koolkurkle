@@ -189,15 +189,13 @@ MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
 Since the 2026-09-24 SoR flip.
 
-**Mini** is the SoR writer. The nightly daily
-LaunchAgent writes the SoR `mailroom.sqlite` on
-the Mini (`db_mode=sor` is allowlisted there).
+**Mini** is the SoR writer under the daily only. The nightly daily LaunchAgent writes the SoR `mailroom.sqlite` on the Mini (`db_mode=sor` is allowlisted there). Any other writer or host is a hard refuse (`db_mode=refused`).
 
-- The MBP SoR is a rollback/read target and a
-  non-writer. No MBP daily runs against it, and
-  nothing on the MBP writes the SoR.
-- The Mini's `mailroom-copy.sqlite` still exists
-  as a copy DB.
+No MBP writers against SoR.
+
+- The MBP is a non-writer. The MBP SoR is a rollback/read target. No MBP daily runs against it, and nothing on the MBP writes the SoR.
+- Copy DBs remain `mailroom-copy.sqlite` and `mailroom-daily-copy.sqlite`.
+- One writer holds the writer lock (flock). Do not start a second writer against SoR.
 
 This gate is docs/tests only. It does not open MailArchive or live
 sqlite, write embed/SoR data, read Keychain, SSH a live machine, or
