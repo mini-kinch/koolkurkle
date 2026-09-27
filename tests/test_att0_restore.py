@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -93,6 +94,23 @@ WRAPPER = SCRIPTS / "with_writer_lock.py"
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _path_from_uri(text: str) -> Path | None:
+    if not str(text).startswith("file:"):
+        return None
+    parsed = urlparse(str(text))
+    if parsed.scheme != "file" or not parsed.path:
+        return None
+    return Path(unquote(parsed.path))
+
+
+def _family_hashes(path: Path) -> dict[str, str | None]:
+    found: dict[str, str | None] = {"main": _sha(path)}
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        found[suffix] = _sha(sidecar) if sidecar.is_file() else None
+    return found
 
 
 def _row_digest(path: Path) -> str:
@@ -444,6 +462,8 @@ class RestoreCliTests(unittest.TestCase):
         self.assertNotIn("/usr/bin/curl", source)
         self.assertNotIn("/usr/bin/security", source)
         self.assertNotIn("ask_mail", source)
+        self.assertNotIn("os.link(", source)
+        self.assertIn("refuse: source changed during stage", source)
         doc = DOC.read_text(encoding="utf-8")
         self.assertIn(
             "scripts/with_writer_lock.py --purpose att0-restore -- "
@@ -469,6 +489,15 @@ class RestoreCliTests(unittest.TestCase):
         self.assertIn("refuse: not enough free space", doc)
         self.assertIn("F_FULLFSYNC", doc)
         self.assertIn("64 MiB", doc)
+        self.assertIn("refuse: source changed during stage", doc)
+        self.assertIn("SIGKILL", doc)
+        self.assertIn(".att0-restore-", doc)
+        self.assertIn("safe to delete when no helper is running", doc)
+        self.assertIn(
+            "no daily/rem/lock holder, ask-mail-serve booted out, and lsof empty first",
+            doc,
+        )
+        self.assertIn("not hardlinks", doc)
         self.assertNotIn('sqlite3 /var/backups/mailroom-backup.sqlite ".backup ', doc)
         self.assertNotIn("mailroom.sqlite.restore-tmp", doc)
         self.assertNotIn("mv /var/lib/mailroom/mailroom.sqlite-wal", doc)
@@ -787,14 +816,8 @@ class RestoreReviewTests(unittest.TestCase):
             dest = dst_dir / "dest.sqlite"
             _make_db(dest, "live-dest")
             held = sqlite3.connect(str(src))
-            # 3.12+ can close without folding the wal into the main file.
-            # A connection left open shares the hardlink inode and rewrites
-            # one wal-index byte in -shm; closing avoids that.
-            can_close = hasattr(held, "setconfig") and hasattr(
-                sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"
-            )
-            if can_close:
-                held.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+            # The holder stays open on every Python version. A hardlink stage
+            # would share this connection's inode and rewrite source -shm.
             try:
                 held.execute("PRAGMA journal_mode=WAL")
                 held.execute("PRAGMA wal_autocheckpoint=0")
@@ -804,12 +827,10 @@ class RestoreReviewTests(unittest.TestCase):
                 held.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 held.execute("INSERT INTO notes (body) VALUES ('wal-only')")
                 held.commit()
-                if can_close:
-                    held.close()
-                    held = None
                 wal = Path(str(src) + "-wal")
                 shm = Path(str(src) + "-shm")
                 self.assertGreater(wal.stat().st_size, 0)
+                self.assertTrue(shm.is_file())
                 imm = sqlite3.connect(src.resolve().as_uri() + "?immutable=1", uri=True)
                 try:
                     self.assertEqual(
@@ -818,15 +839,24 @@ class RestoreReviewTests(unittest.TestCase):
                     )
                 finally:
                     imm.close()
-                main_hash = _sha(src)
-                wal_hash = _sha(wal)
-                shm_hash = _sha(shm) if shm.is_file() else None
+                before = _family_hashes(src)
+                self.assertIsNotNone(before["-shm"])
                 names_before = sorted(path.name for path in src_dir.iterdir())
                 seen: list[str] = []
+                staged_inodes: list[tuple[int, int]] = []
                 real_connect = sqlite3.connect
 
                 def track(database, *args, **kwargs):
-                    seen.append(str(database))
+                    text = str(database)
+                    seen.append(text)
+                    opened = _path_from_uri(text)
+                    if (
+                        opened is not None
+                        and opened.name == "db.sqlite"
+                        and opened.is_file()
+                    ):
+                        info = opened.stat()
+                        staged_inodes.append((info.st_dev, info.st_ino))
                     return real_connect(database, *args, **kwargs)
 
                 with mock.patch("sqlite3.connect", side_effect=track):
@@ -835,10 +865,14 @@ class RestoreReviewTests(unittest.TestCase):
                 self.assertTrue(any("mode=ro" in item and "db.sqlite" in item for item in seen))
                 self.assertFalse(any("immutable=1" in item for item in seen))
                 self.assertFalse(any(src_uri in item for item in seen))
-                self.assertEqual(_sha(src), main_hash)
-                self.assertEqual(_sha(wal), wal_hash)
-                if can_close and shm_hash is not None:
-                    self.assertEqual(_sha(shm), shm_hash)
+                self.assertEqual(_family_hashes(src), before)
+                self.assertEqual(_sha(src), before["main"])
+                self.assertEqual(_sha(wal), before["-wal"])
+                self.assertEqual(_sha(shm), before["-shm"])
+                self.assertTrue(staged_inodes)
+                self.assertNotEqual(
+                    staged_inodes[0], (src.stat().st_dev, src.stat().st_ino)
+                )
                 self.assertEqual(sorted(path.name for path in src_dir.iterdir()), names_before)
                 self.assertEqual(_temps(src_dir), [])
                 self.assertEqual(_temps(dst_dir), [])
@@ -851,8 +885,7 @@ class RestoreReviewTests(unittest.TestCase):
                     got.close()
                 self.assertEqual(rows, [("checkpointed",), ("wal-only",)])
             finally:
-                if held is not None:
-                    held.close()
+                held.close()
 
     def test_source_stage_failure_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -866,7 +899,9 @@ class RestoreReviewTests(unittest.TestCase):
                 src_before = _sha(src)
                 wal_before = _sha(Path(str(src) + "-wal"))
                 stderr = io.StringIO()
-                with mock.patch("os.link", side_effect=OSError("injected link")):
+                with mock.patch.object(
+                    restore, "_copy_bytes", side_effect=OSError("injected copy")
+                ):
                     with mock.patch("sys.stderr", stderr):
                         rc = restore.main(["--src", str(src), "--dest", str(dest)])
                 self.assertEqual(rc, 2, stderr.getvalue())
@@ -878,6 +913,58 @@ class RestoreReviewTests(unittest.TestCase):
                 self.assertEqual(_temps(root), [])
             finally:
                 held.close()
+
+    def test_source_changed_during_stage_removes_stage(self):
+        real_copy = restore._copy_stage
+
+        def append_main(source, staged):
+            real_copy(source, staged)
+            with open(source, "ab") as handle:
+                handle.write(b"x")
+
+        def drop_wal(source, staged):
+            real_copy(source, staged)
+            Path(str(source) + "-wal").unlink()
+
+        def replace_wal(source, staged):
+            real_copy(source, staged)
+            wal = Path(str(source) + "-wal")
+            wal.unlink()
+            wal.write_bytes(b"replacement-wal")
+
+        cases = (
+            ("append", append_main),
+            ("wal-disappears", drop_wal),
+            ("wal-appears", replace_wal),
+        )
+        for label, hook in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    src = root / "backup.sqlite"
+                    dest = root / "dest.sqlite"
+                    _make_db(dest, "live-dest")
+                    held = _open_uncheckpointed(src, "from-src")
+                    try:
+                        before = _sha(dest)
+                        ino = dest.stat().st_ino
+                        stderr = io.StringIO()
+                        with mock.patch.object(restore, "_copy_stage", side_effect=hook):
+                            with mock.patch("sys.stderr", stderr):
+                                rc = restore.main(
+                                    ["--src", str(src), "--dest", str(dest)]
+                                )
+                        self.assertEqual(rc, 2, stderr.getvalue())
+                        self.assertIn(
+                            "refuse: source changed during stage", stderr.getvalue()
+                        )
+                        self.assertNotIn(str(root), stderr.getvalue())
+                        self.assertEqual(_sha(dest), before)
+                        self.assertEqual(dest.stat().st_ino, ino)
+                        self.assertEqual(_temps(root), [])
+                        self.assertEqual(list(root.glob(".att0-restore-*")), [])
+                    finally:
+                        held.close()
 
     def test_dest_path_is_never_passed_to_sqlite_connect(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1449,8 +1536,10 @@ class RestoreReviewTests(unittest.TestCase):
                 wal_size = Path(str(src) + "-wal").stat().st_size
                 self.assertGreater(wal_size, 0)
                 margin = 64 * 1024 * 1024
-                src_need = wal_size + margin
+                src_need = src.stat().st_size + wal_size + margin
                 dest_need = src.stat().st_size + wal_size + margin
+                self.assertEqual(src_need, dest_need)
+                self.assertGreater(src_need, wal_size + margin)
                 usage = shutil.disk_usage(root)
                 plenty = type(usage)(usage.total, usage.used, dest_need + src_need)
                 one_short = type(usage)(usage.total, usage.used, src_need - 1)

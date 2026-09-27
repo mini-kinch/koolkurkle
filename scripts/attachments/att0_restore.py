@@ -18,9 +18,12 @@ writer sets WAL (scripts/sqlite_pragmas.py).
 The live destination is left uncheckpointed. Its -wal and -shm are
 renamed aside before the temp file replaces the main file, and renamed
 back if that replace does not happen. A missing or empty source -wal
-is opened immutable=1. A non-empty source -wal is hardlinked into a
-private directory and opened mode=ro there, so the source gains no
-sidecars and uncheckpointed frames are still copied.
+is opened immutable=1. A non-empty source -wal is staged as a byte
+copy of the main file plus that -wal in a private directory (new
+inode, never a hardlink) and opened mode=ro there, so the source gains
+no sidecars and uncheckpointed frames are still copied. SQLite's unix
+VFS keeps one inode/pShmNode for the whole process; a hardlink would
+write read-marks into the source -shm.
 
 The writer gate does not see readers. Before the temp file is created,
 and again before sidecars are parked, the pinned binary /usr/sbin/lsof
@@ -68,8 +71,9 @@ _TEMP_PREFIX = ".att0-restore-"
 # cannot create the shared-memory file on a read-only connection.
 _ROLLBACK_FORMAT = (1, 1)
 # Dest dir: source size + source -wal size + this margin.
-# Source dir, when the source -wal is non-empty: that -wal size + this
-# margin, for the staged copy beside the hardlink.
+# Source dir, when the source -wal is non-empty: the same amount.
+# The stage is a byte copy of the main file and the -wal, not a
+# hardlink of the main file with only the -wal copied beside it.
 _FREE_MARGIN = 64 * 1024 * 1024
 # macOS ships lsof here. No PATH lookup. -n and -P skip name resolution.
 _LSOF_BIN = "/usr/sbin/lsof"
@@ -200,10 +204,10 @@ def _require_free_space(source: Path, parent: Path) -> None:
     need = source.stat().st_size + wal_size + _FREE_MARGIN
     if shutil.disk_usage(parent).free < need:
         raise RestoreRefuse("refuse: not enough free space")
-    # The staged -wal copy lands in the source directory. The main file
-    # is a hardlink, so only the -wal bytes are extra. The dest check
-    # already covers that when both paths share a directory, because its
-    # requirement is larger; a different source directory is checked here.
+    # The stage is a byte copy of the main file and the -wal in the
+    # source directory, so that directory needs the same amount. When
+    # both paths share a directory, the destination check is that size
+    # and covers the stage. A different source directory is checked here.
     if wal_size <= 0:
         return
     try:
@@ -212,7 +216,7 @@ def _require_free_space(source: Path, parent: Path) -> None:
         same = False
     if same:
         return
-    if shutil.disk_usage(source.parent).free < wal_size + _FREE_MARGIN:
+    if shutil.disk_usage(source.parent).free < need:
         raise RestoreRefuse("refuse: not enough free space")
 
 
@@ -269,6 +273,50 @@ def _copy_bytes(src: Path, dest: Path) -> None:
         shutil.copyfileobj(inp, out, length=1024 * 1024)
 
 
+def _copy_stage(source: Path, staged: Path) -> None:
+    """Byte-copy the main file and the ``-wal``. Neither result is a hardlink."""
+    _copy_bytes(source, staged)
+    _copy_bytes(_sidecar(source, "-wal"), _sidecar(staged, "-wal"))
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    """``(st_size, st_mtime_ns, st_ino)``, or None when ``path`` is missing."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (int(st.st_size), int(st.st_mtime_ns), int(st.st_ino))
+
+
+def _source_identity(
+    source: Path,
+) -> tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]:
+    return (_file_identity(source), _file_identity(_sidecar(source, "-wal")))
+
+
+def _refuse_if_source_changed(
+    source: Path,
+    before: tuple[tuple[int, int, int] | None, tuple[int, int, int] | None],
+) -> None:
+    """Refuse when the source main or ``-wal`` changed during the copy.
+
+    A ``-wal`` that appears or disappears is the same refuse. Its identity
+    is None when the path is missing.
+    """
+    if _source_identity(source) != before:
+        raise RestoreRefuse("refuse: source changed during stage")
+
+
+def _close_conn(conn: sqlite3.Connection | None) -> None:
+    """Close ``conn``. A sqlite error must not skip stage cleanup."""
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+
 def _remove_private(private: Path | None) -> None:
     if private is None:
         return
@@ -280,26 +328,58 @@ def _open_source(source: Path) -> tuple[sqlite3.Connection, Path | None]:
 
     Missing or empty -wal: immutable=1. That open does not create -wal/-shm
     and does not see uncheckpointed frames, so it is only used when there
-    are none. Non-empty -wal: hardlink the main file into a private directory
-    on the same filesystem, copy the -wal bytes beside that link, and open
-    the private path mode=ro. immutable=1 is never used in that case.
+    are none. Non-empty -wal: byte-copy the main file and the -wal into a
+    private directory and open that copy mode=ro. The main file is a new
+    inode, not a hardlink. SQLite's unix VFS keys unixInodeInfo and its
+    pShmNode by device and inode for the whole process, so a hardlink
+    would write read-marks into the source -shm. immutable=1 is never
+    used for a non-empty -wal.
+
+    ``(st_size, st_mtime_ns, st_ino)`` of the main file and the -wal are
+    recorded before the copy and checked after it. A change, including a
+    -wal that appears or disappears, removes the stage and refuses.
+
+    ``sqlite3.connect`` is not used as a context manager. That form does
+    not close the connection. Every connection is closed in ``finally``.
     """
     if not _wal_nonempty(source):
-        return sqlite3.connect(_immutable_uri(source), uri=True), None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(_immutable_uri(source), uri=True)
+            opened = conn
+            conn = None
+            return opened, None
+        finally:
+            _close_conn(conn)
+    before = _source_identity(source)
     private: Path | None = None
+    conn = None
     try:
-        private = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(source.parent)))
-        staged = private / "db.sqlite"
-        os.link(str(source), str(staged))
-        _copy_bytes(_sidecar(source, "-wal"), _sidecar(staged, "-wal"))
-        conn = sqlite3.connect(_ro_uri(staged), uri=True)
-    except OSError:
+        try:
+            private = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(source.parent)))
+            staged = private / "db.sqlite"
+            _copy_stage(source, staged)
+            _refuse_if_source_changed(source, before)
+            staged_stat = staged.stat()
+            source_stat = source.stat()
+            if (staged_stat.st_dev, staged_stat.st_ino) == (
+                source_stat.st_dev,
+                source_stat.st_ino,
+            ):
+                raise RestoreRefuse("refuse: cannot stage source wal")
+            conn = sqlite3.connect(_ro_uri(staged), uri=True)
+        except RestoreRefuse:
+            raise
+        except OSError:
+            raise RestoreRefuse("refuse: cannot stage source wal") from None
+        opened = conn
+        staged_dir = private
+        conn = None
+        private = None
+        return opened, staged_dir
+    finally:
+        _close_conn(conn)
         _remove_private(private)
-        raise RestoreRefuse("refuse: cannot stage source wal") from None
-    except Exception:
-        _remove_private(private)
-        raise
-    return conn, private
 
 
 def _preserve_dest_mode_owner(tmp: Path, dest: Path) -> None:
@@ -459,8 +539,9 @@ def restore_database(
         tmp_path = Path(tmp_name)
         src_conn, private = _open_source(source)
         try:
-            tmp_conn = sqlite3.connect(str(tmp_path))
+            tmp_conn: sqlite3.Connection | None = None
             try:
+                tmp_conn = sqlite3.connect(str(tmp_path))
                 _backup(src_conn, tmp_conn)
                 # Seal rollback mode before replace. The backup API can copy
                 # a WAL header (bytes 18-19 == 2). Leaving that header and
@@ -469,9 +550,10 @@ def restore_database(
                 _apply_journal_mode(tmp_conn, "delete")
                 _integrity_ok(tmp_conn)
             finally:
-                tmp_conn.close()
+                # sqlite3.connect() as a context manager does not close.
+                _close_conn(tmp_conn)
         finally:
-            src_conn.close()
+            _close_conn(src_conn)
             src_conn = None
             _remove_private(private)
             private = None
@@ -495,8 +577,7 @@ def restore_database(
             _unlink_quiet(_sidecar(target, suffix))
         _fsync_dir(parent)
     finally:
-        if src_conn is not None:
-            src_conn.close()
+        _close_conn(src_conn)
         _remove_private(private)
         # _unpark can raise. That must not skip temp removal, and it must
         # not replace the exception that entered this finally.
