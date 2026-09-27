@@ -59,10 +59,10 @@ def retrieve_db_labels(
         refuse_copy_implies_live_or_sor(labels)
         return labels
     if target.name == SOR_BASENAME:
-        # MBP SoR recipes only. Mini retrieve recipes must not use this name.
+        # Mini is the sole SoR writer; the MBP is search-only, not a writer.
         if host and str(host).strip().lower() == "mini":
             raise RetrieveLabelRefuse(
-                "Mini retrieve must use a copy DB; never imply live/SoR"
+                "Mini is the sole SoR writer; the MBP is search-only, not a writer"
             )
         return {"db_mode": "sor", "copy_age": None}
     return {"db_mode": "other", "copy_age": None}
