@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KOO-15 MBP SoR vs Mini copy-only ops contract.
+"""KOO-15 Mini SoR (sole writer) vs MBP non-writer ops contract.
 
 Since the 2026-09-24 SoR flip, Mini is the SoR writer under the
 daily only and the MBP is a non-writer. Docs/tests contract only.
@@ -28,7 +28,7 @@ if str(SCRIPTS) not in sys.path:
 import mailroom_copy_db as copy_db  # noqa: E402
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
-SOR_HEADING = "## MBP SoR vs Mini copy-only"
+SOR_HEADING = "## Mini SoR (sole writer) vs MBP non-writer"
 
 
 def sor_section(raw: str) -> str:
@@ -44,7 +44,8 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
     def test_contract_locks_mbp_sor_mini_copy_only_language(self):
         raw = OPS.read_text(encoding="utf-8")
         section = sor_section(raw)
-        self.assertIn("MBP SoR vs Mini copy-only", section)
+        self.assertIn("## Mini SoR (sole writer) vs MBP non-writer", section)
+        self.assertNotIn("## MBP SoR vs Mini copy-only", raw)
         self.assertIn("Since the 2026-09-24 SoR flip", section)
         self.assertIn("**Mini** is the SoR writer under the daily only", section)
         self.assertIn("`mailroom.sqlite`", section)
@@ -94,14 +95,56 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
 
     def test_operators_can_find_the_contract(self):
         raw = README.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
         self.assertIn("ops-terminal.md", raw)
-        self.assertIn("MBP SoR vs Mini copy-only", text)
-        self.assertIn("MBP is the live Source of Record", text)
-        self.assertIn("mailroom.sqlite", text)
-        self.assertIn("Mini is copy-only", text)
-        self.assertIn("no Mini writers against SoR", text)
-        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", text)
+        index = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("Mini SoR (sole writer) vs MBP non-writer")
+        )
+        self.assertIn("Mini SoR (sole writer) vs MBP non-writer", index)
+        self.assertNotIn("MBP SoR vs Mini copy-only", index)
+        self.assertIn("Mini is the only SoR writer", index)
+        self.assertIn("`mailroom.sqlite`", index)
+        self.assertIn("via the daily job only", index)
+        self.assertNotIn("under the daily only", index)
+        self.assertIn("the MBP is a non-writer", index)
+        self.assertIn("no MBP writers against SoR", index)
+        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", index)
+        self.assertIn(
+            "authority CRM-log/20260924-1201-mini-only-writer-user.md:4",
+            index,
+        )
+        self.assertNotIn("MBP is the live Source of Record", index)
+        self.assertNotIn("Mini is copy-only", index)
+        self.assertNotIn("no Mini writers against SoR", index)
+        recipes = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("`mailroom.sqlite` name the Mini SoR")
+        )
+        self.assertIn("the only SoR writer", recipes)
+        self.assertIn("The MBP is a non-writer", recipes)
+        self.assertNotIn("MBP-SoR-only", recipes)
+        default_line = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("`mailroom.sqlite` (") and "Recipes that use" in line
+        )
+        retrieve_line = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("# Mini — hybrid retrieve (copy DB until PR-5")
+        )
+        smoke_pair = default_line + "\n" + retrieve_line
+        self.assertNotIn("(empty SoR stub)", smoke_pair)
+        self.assertNotIn("Mini SoR is an empty stub", smoke_pair)
+        self.assertNotIn("empty stub", smoke_pair)
+        self.assertIn("copy DB until PR-5", retrieve_line)
+        self.assertIn(
+            "Mini is the only SoR writer via the daily job only",
+            smoke_pair,
+        )
+        self.assertIn("the MBP is a non-writer, rollback/read", smoke_pair)
         hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)

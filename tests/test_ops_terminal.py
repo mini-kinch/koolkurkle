@@ -230,9 +230,30 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("ollama stop qwen3-embedding:8b", text)
         self.assertIn("--phase retrieve", text)
         self.assertIn("copy-only", text)
-        self.assertIn("MBP SoR vs Mini copy-only", text)
-        self.assertIn("live Source of Record", text)
-        self.assertIn("No Mini writers against SoR", text)
+        self.assertIn("## Mini SoR (sole writer) vs MBP non-writer", text)
+        self.assertNotIn("## MBP SoR vs Mini copy-only", text)
+        index = next(
+            line
+            for line in text.splitlines()
+            if line.startswith("Mini SoR (sole writer) vs MBP non-writer")
+        )
+        self.assertIn("Mini SoR (sole writer) vs MBP non-writer", index)
+        self.assertNotIn("MBP SoR vs Mini copy-only", index)
+        self.assertIn("Mini is the only SoR writer", index)
+        self.assertIn("`mailroom.sqlite`", index)
+        self.assertIn("via the daily job only", index)
+        self.assertNotIn("under the daily only", index)
+        self.assertIn("the MBP is a non-writer", index)
+        self.assertIn("No MBP writers against SoR", index)
+        self.assertIn("PR-5 cutover still gated on rem-legacy EXIT 0", index)
+        self.assertIn(
+            "authority CRM-log/20260924-1201-mini-only-writer-user.md:4",
+            index,
+        )
+        self.assertNotIn("MBP is the live Source of Record", index)
+        self.assertNotIn("live Source of Record", index)
+        self.assertNotIn("Mini is copy-only", index)
+        self.assertNotIn("No Mini writers against SoR", index)
         self.assertIn("gated on rem-legacy EXIT 0", text)
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("same copy", text)
