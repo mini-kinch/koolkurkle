@@ -3,21 +3,48 @@
 
 Option 1 (``--source imap``): rows with ``source='imap-live'``. UIDs are
 unique per folder, so rows are grouped by ``messages.folder`` and each
-folder is selected read-only before its UID FETCH of ``(BODYSTRUCTURE)``.
-The connection is ``imaplib.IMAP4_SSL`` on port 993 with
-``ssl.create_default_context()`` (``CERT_REQUIRED``, ``check_hostname``).
-Folder names are quoted before EXAMINE, including spaces, quotes, and
-backslashes. UIDVALIDITY from that response is stored per folder on
-the first ``--apply`` fill, not at ingest. A mismatch is counted in
-``uidvalidity_mismatch`` (one per row, not per folder) and those rows
-are not written. The ``PARTIAL:`` banner includes
-``uidvalidity_mismatch=N``. The password is read from macOS Keychain
+folder is examined before its UID FETCH of ``(BODYSTRUCTURE)``. The
+production transport is pinned ``/usr/bin/curl`` ``imaps://`` (port 993).
+It does not construct ``imaplib`` or a Python socket. ``CURL_BIN`` is
+not read and Homebrew curl is not a fallback. Per folder, one curl
+process uses the base URL ``imaps://host:993/`` (no mailbox, so curl
+does not SELECT). Transfers are joined by ``next``. ``--fail-early``
+stops that process on the first transfer error. The first is
+``EXAMINE`` of the quoted mailbox (``"Deleted Messages"``). Later
+transfers batch UIDs (``UID FETCH 1:50,77 (BODYSTRUCTURE)``) and do not
+change the seen flag. Stdout is read as bytes so CRLF stays intact.
+There is no ``--dump-header``. A dropped or truncated ``{n}`` literal is an
+error for that UID only (``literal_dropped`` or ``literal_truncated``).
+Every other UID in the folder still parses. The report counts both
+reasons per folder index and lists those UIDs as numbers.
+UIDVALIDITY is the first untagged
+``* OK [UIDVALIDITY n]`` in the EXAMINE reply, before any FETCH, and
+is stored per folder on the first ``--apply`` fill, not at ingest. A
+mismatch is counted in ``uidvalidity_mismatch`` (one per row, not per
+folder) and those rows are not written. The ``PARTIAL:`` banner
+includes ``uidvalidity_mismatch=N``. A non-zero curl status (including
+21, 7, 28, 60, and 67), an authentication failure, or an Errno 9 /
+bad-file-descriptor error counts that folder's UIDs as errors, records
+the classified message, and continues with later folders. It does not
+retry, and the command still writes the report. Nothing from that
+failure is marked scanned. A second connection fails closed. After
+each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
+no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
-``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
-with one legacy fallback. There is no password option and no password
-environment variable. Option 2 (``--source jsonl``): other rows
-that already have ``jsonl_offset``. Seeks that offset and reads
-``jsonl_len`` bytes, then parses MIME headers.
+``/usr/bin/security``. The lookup is
+``/usr/bin/security find-generic-password -s mailroom.imap.app-password -w``,
+with one fallback to ``mailroom.icloud.app-password`` when the default
+item misses. An empty IMAP user fails closed in the curl client before
+LOGIN.
+Curl receives the password only on stdin (``-K -``,
+``user = "..."``), never in argv, the environment, or a file. TLS
+verification stays on (no ``-k``). There is no password option and no
+password environment variable. This module does not import the Python
+IMAP client. The old SSL double lives in
+``tests/imap_bodystructure_double.py`` and is not imported here.
+Option 2 (``--source jsonl``): other rows that already have
+``jsonl_offset``. Seeks that offset and reads ``jsonl_len`` bytes, then
+parses MIME headers.
 
 Default is ``--dry-run`` (counts only). ``--apply`` writes. Filename text
 is stored only with ``--store-filenames`` (default off); otherwise the
@@ -45,16 +72,15 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import imaplib
 import json
 import os
 import re
 import sqlite3
-import ssl
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 HERE = Path(__file__).resolve().parent
@@ -63,7 +89,7 @@ if str(SCRIPTS) not in sys.path:
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from imap_keychain import KeychainError, read_imap_app_password  # noqa: E402
+from imap_keychain import read_imap_app_password  # noqa: E402
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli  # noqa: E402
 from sor_writer_gate import (  # noqa: E402
     SOR_BASENAME,
@@ -90,9 +116,7 @@ except ImportError:  # python3 scripts/attachments/meta_fill.py
         parts_from_rfc822,
     )
 
-_BODYSTRUCTURE_ITEM = "(BODYSTRUCTURE)"
 _IMAP_SOURCE = "imap-live"
-_IMAP_SSL_PORT = 993
 _DEFAULT_MAX_MESSAGES = 200
 _DEFAULT_MAX_PARTS = 100
 _DEFAULT_TIMEOUT_S = 30
@@ -107,127 +131,84 @@ class _Oversized(Exception):
     """Record longer than the byte cap. Not marked scanned."""
 
 
-class ImapBodystructureClient:
-    """UID FETCH of ``(BODYSTRUCTURE)`` over imaplib.IMAP4_SSL port 993.
+def _load_imap_curl():
+    """Import the curl transport without loading it for a JSONL-only run."""
+    import imap_curl
 
-    The password comes from Keychain via ``password_fn`` (default
-    ``read_imap_app_password``). This class does not read a password
-    argument or a password environment variable, and it does not put the
-    password in fetch results. Plain IMAP is never constructed.
-    Call ``select`` for each folder before fetching that folder's UIDs.
-    """
+    return imap_curl
 
-    def __init__(
-        self,
-        host: str,
-        user: str | None,
-        *,
-        timeout: float = 30,
-        imap_factory: Any = None,
-        password_fn: Callable[[], str] | None = None,
-    ) -> None:
-        if not host:
-            raise FillRefuse("imap host is required")
-        self.host = host
-        self.user = user or ""
-        self.port = _IMAP_SSL_PORT
-        self.timeout = timeout
-        self._factory = imaplib.IMAP4_SSL if imap_factory is None else imap_factory
-        if self._factory is imaplib.IMAP4:
-            raise FillRefuse("plain IMAP is refused")
-        self._password_fn = password_fn
-        self._conn: Any = None
-        self.mailbox: str | None = None
-        self.uidvalidity: int | None = None
 
-    def __enter__(self) -> "ImapBodystructureClient":
-        fn = self._password_fn or read_imap_app_password
+class _CurlProductionClient:
+    """CLI / fill_metadata IMAP path. Curl only. Never constructs imaplib."""
+
+    def __init__(self, host, user, timeout, password_fn, port=993, cacert=None) -> None:
+        mod = _load_imap_curl()
+        self._mod = mod
+        fn = read_imap_app_password if password_fn is None else password_fn
         try:
-            password = fn()
-        except KeychainError:
-            raise FillRefuse("imap keychain password is missing") from None
-        try:
-            context = ssl.create_default_context()
-            self._conn = self._factory(
-                self.host, 993, timeout=self.timeout, ssl_context=context
+            self._inner = mod.CurlImapsClient(
+                host,
+                user,
+                timeout=timeout,
+                password_fn=fn,
+                port=int(port),
+                cacert=cacert,
             )
-            self._conn.login(self.user, password)
-        except FillRefuse:
-            self._close()
-            raise
-        except Exception:
-            self._close()
-            raise
-        finally:
-            password = ""
+        except mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        self.mailbox = None
+        self.uidvalidity = None
+
+    def __enter__(self) -> "_CurlProductionClient":
+        try:
+            self._inner.__enter__()
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
         return self
 
-    def select(self, mailbox: str, readonly: bool = True) -> None:
-        """EXAMINE one folder. Readonly. The mailbox argument is quoted."""
-        if readonly is not True:
-            raise FillRefuse("imap select must be readonly")
-        if mailbox is None or str(mailbox).strip() == "":
-            raise ValueError("missing mailbox")
-        if self._conn is None:
-            raise RuntimeError("imap select failed")
-        quoted = quote_imap_mailbox(str(mailbox))
-        typ, _data = self._conn.select(quoted, readonly=True)
-        if typ != "OK":
-            raise RuntimeError("imap select failed")
-        self.mailbox = str(mailbox)
-        self.uidvalidity = _uidvalidity_from_conn(self._conn)
-
     def __exit__(self, exc_type, exc, tb) -> None:
-        self._close()
+        self._inner.__exit__(exc_type, exc, tb)
 
-    def _close(self) -> None:
-        conn = self._conn
-        self._conn = None
-        if conn is None:
-            return
+    def select(self, mailbox: str, readonly: bool = True) -> None:
         try:
-            conn.logout()
-        except Exception:
-            return
+            self._inner.select(mailbox, readonly=readonly)
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        self.mailbox = self._inner.mailbox
+        self.uidvalidity = self._inner.uidvalidity
+
+    def open_folder(self, mailbox: str, uids) -> None:
+        """One curl for this folder. A failed batch is not split into UIDs.
+
+        ``CurlImapError`` propagates with its curl status so the fill can
+        count this folder's UIDs as errors and continue. It is not retried.
+        """
+        self._inner.open_folder(mailbox, uids)
+        self.mailbox = self._inner.mailbox
+        self.uidvalidity = self._inner.uidvalidity
 
     def fetch_bodystructure(self, uid: str) -> str:
-        if uid is None or str(uid).strip() == "":
-            raise ValueError("missing uid")
-        typ, data = self._conn.uid("FETCH", str(uid), _BODYSTRUCTURE_ITEM)
-        if typ != "OK":
-            raise ValueError("bodystructure fetch failed")
-        return bodystructure_from_fetch(data)
+        try:
+            return self._inner.fetch_bodystructure(uid)
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
 
 
-def quote_imap_mailbox(name: str) -> str:
-    """IMAP atom quoting. Spaces, quotes, and backslashes stay one mailbox."""
-    escaped = str(name).replace("\\", "\\\\").replace('"', '\\"')
-    return '"' + escaped + '"'
+def _progress_rc(exc: BaseException) -> int:
+    rc = getattr(exc, "rc", None)
+    if isinstance(rc, int):
+        return rc
+    return 1
 
 
-def _uidvalidity_from_conn(conn: Any) -> int:
-    """Read UIDVALIDITY after EXAMINE or SELECT has returned.
-
-    ``IMAP4.response`` pops the untagged value collected during that
-    command. Real imaplib returns ``('UIDVALIDITY', [b'42'])``, or
-    ``('UIDVALIDITY', [None])`` when the server did not send one.
-    Call this once, immediately after ``select``, before anything else
-    calls ``response('UIDVALIDITY')``.
-    """
-    responder = getattr(conn, "response", None)
-    if responder is None:
-        raise RuntimeError("imap uidvalidity missing")
-    typ, data = responder("UIDVALIDITY")
-    if typ != "UIDVALIDITY" or not data or data[0] in (None, b"", ""):
-        raise RuntimeError("imap uidvalidity missing")
-    raw = data[0]
-    if isinstance(raw, bytes):
-        text = raw.decode("ascii", "replace").strip()
-    else:
-        text = str(raw).strip()
-    if not text.isdigit():
-        raise RuntimeError("imap uidvalidity missing")
-    return int(text)
+def _write_folder_progress(index: int, total: int, rc: int) -> None:
+    """Stall-watcher line. Folder index only, flushed, Pacific time."""
+    now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+    sys.stderr.write(
+        "%02d:%02d PT | folder %s/%s | rc=%s\n"
+        % (now.hour, now.minute, int(index), int(total), int(rc))
+    )
+    sys.stderr.flush()
 
 
 def _default_now() -> str:
@@ -602,6 +583,10 @@ def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
         "partial_banner": "",
         "parts_truncated": 0,
         "uidvalidity_mismatch": 0,
+        "curl_failures": [],
+        "literal_dropped": 0,
+        "literal_truncated": 0,
+        "literal_folders": [],
     }
 
 
@@ -609,6 +594,31 @@ _IMAP_NOT_SCANNED = "id NOT IN (SELECT message_id FROM attachment_meta_scans)"
 _IMAP_FOLDER_KEY = (
     "CASE WHEN folder IS NULL OR TRIM(folder) = '' THEN NULL ELSE folder END"
 )
+
+
+def _note_literal_issue(report, folder_literal, exc) -> None:
+    """Count one UID. Folder identity in the report is the index only."""
+    reason = getattr(exc, "reason", None)
+    uid = getattr(exc, "uid", None)
+    if folder_literal is None:
+        return
+    if reason not in ("literal_dropped", "literal_truncated"):
+        return
+    if uid is None or not str(uid).isdigit():
+        return
+    number = int(uid)
+    report[reason] = int(report.get(reason) or 0) + 1
+    folder_literal[reason] = int(folder_literal.get(reason) or 0) + 1
+    key = "dropped_uids" if reason == "literal_dropped" else "truncated_uids"
+    folder_literal[key].append(number)
+
+
+def _store_literal_folder(report, folder_literal) -> None:
+    if not folder_literal:
+        return
+    if not folder_literal["literal_dropped"] and not folder_literal["literal_truncated"]:
+        return
+    report["literal_folders"].append(folder_literal)
 
 
 def _select_rows(conn: sqlite3.Connection, source: str, mailbox: str | None = None):
@@ -895,6 +905,8 @@ def fill_metadata(
     user: str | None = None,
     password_fn: Callable[[], str] | None = None,
     mailbox: str | None = None,
+    imap_port: int = 993,
+    cacert: str | None = None,
     max_messages: int = _DEFAULT_MAX_MESSAGES,
     max_parts: int = _DEFAULT_MAX_PARTS,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
@@ -904,10 +916,15 @@ def fill_metadata(
 ) -> dict[str, Any]:
     """Count or write attachment metadata. ``bytes_stored`` is always 0.
 
-    ``imap_client`` skips socket setup and Keychain. The CLI builds
-    ``ImapBodystructureClient`` only when this is omitted and host is set.
-    ``mailbox`` limits IMAP rows to that folder. Omit it to select every
-    folder that still has unscanned rows.
+    ``imap_client`` skips curl and Keychain. When it is omitted and the
+    source is imap, the CLI builds ``_CurlProductionClient`` (pinned
+    ``/usr/bin/curl imaps://``, one process per folder). That path does
+    not import imaplib.
+    ``mailbox`` limits
+    IMAP rows to that folder. Omit it to examine every folder that still
+    has unscanned rows. ``imap_port`` and ``cacert`` are test injections
+    for a local fake IMAPS server. The CLI does not pass them. Production
+    uses port 993 and does not pass ``--cacert``.
     """
     path = Path(db)
     refuse_destructive_cli([] if argv is None else list(argv))
@@ -941,6 +958,7 @@ def fill_metadata(
     conn = _connect(path, apply)
     fh = None
     opened_client = False
+    login_failed = False
     client = imap_client
     skipped_other = 0
     try:
@@ -960,25 +978,36 @@ def fill_metadata(
                 raise FillRefuse("imap host is required")
             if not user:
                 raise FillRefuse("imap user is required")
-            client = ImapBodystructureClient(
+            client = _CurlProductionClient(
                 host,
                 user,
                 timeout=timeout_s if timeout_s > 0 else _DEFAULT_TIMEOUT_S,
                 password_fn=password_fn,
+                port=imap_port,
+                cacert=cacert,
             )
             try:
                 client.__enter__()
-            except FillRefuse:
-                raise
+            except FillRefuse as exc:
+                report["errors"] = report["eligible"]
+                report["curl_failures"].append(str(exc))
+                login_failed = True
             except Exception:
-                raise FillRefuse("imap login failed") from None
-            opened_client = True
+                report["errors"] = report["eligible"]
+                report["curl_failures"].append("imap login failed")
+                login_failed = True
+            else:
+                opened_client = True
         start = tick()
-        for folder_name, group in groups:
+        folder_total = len(groups)
+        if not login_failed:
+          for folder_index, (folder_name, group) in enumerate(groups, start=1):
+            folder_literal = None
             if report["stopped"]:
                 break
             if source == "imap":
                 if not folder_name:
+                    _write_folder_progress(folder_index, folder_total, 0)
                     for _row in group:
                         if _stop_for_limits(
                             report,
@@ -991,17 +1020,31 @@ def fill_metadata(
                         report["errors"] += 1
                     continue
                 try:
-                    client.select(folder_name, readonly=True)
+                    if hasattr(client, "open_folder"):
+                        client.open_folder(
+                            folder_name,
+                            [
+                                str(row[1]).strip()
+                                for row in group
+                                if row[1] is not None and str(row[1]).strip()
+                            ],
+                        )
+                    else:
+                        client.select(folder_name, readonly=True)
                     if client.uidvalidity is None:
                         raise RuntimeError("imap uidvalidity missing")
                     if _note_uidvalidity(
                         conn, folder_name, int(client.uidvalidity), apply
                     ):
                         report["uidvalidity_mismatch"] += len(group)
+                        _write_folder_progress(folder_index, folder_total, 0)
                         continue
-                except FillRefuse:
-                    raise
-                except Exception:
+                except Exception as exc:
+                    if type(exc).__name__ in ("FillRefuse", "CurlImapError"):
+                        report["curl_failures"].append(str(exc))
+                    _write_folder_progress(
+                        folder_index, folder_total, _progress_rc(exc)
+                    )
                     for _row in group:
                         if _stop_for_limits(
                             report,
@@ -1013,6 +1056,14 @@ def fill_metadata(
                             break
                         report["errors"] += 1
                     continue
+                _write_folder_progress(folder_index, folder_total, 0)
+                folder_literal = {
+                    "index": folder_index,
+                    "literal_dropped": 0,
+                    "literal_truncated": 0,
+                    "dropped_uids": [],
+                    "truncated_uids": [],
+                }
             for row in group:
                 if _stop_for_limits(
                     report,
@@ -1035,8 +1086,9 @@ def fill_metadata(
                 except _Oversized:
                     report["capped"] += 1
                     continue
-                except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError):
+                except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError) as exc:
                     report["errors"] += 1
+                    _note_literal_issue(report, folder_literal, exc)
                     continue
                 full_flag = has_attachments_flag(parts)
                 if max_parts > 0 and len(parts) > max_parts:
@@ -1061,7 +1113,9 @@ def fill_metadata(
                 report["has_attachments"] += flag
                 report["filenames"] += names
             else:
+                _store_literal_folder(report, folder_literal)
                 continue
+            _store_literal_folder(report, folder_literal)
             break
     finally:
         if opened_client and client is not None:
@@ -1101,8 +1155,23 @@ def format_report(report: dict[str, Any]) -> str:
             "parts_truncated=%s" % report.get("parts_truncated"),
             "uidvalidity_mismatch=%s" % report.get("uidvalidity_mismatch"),
             "capped: %s" % report.get("capped"),
+            "literal_dropped=%s" % report.get("literal_dropped", 0),
+            "literal_truncated=%s" % report.get("literal_truncated", 0),
         ]
     )
+    for item in report.get("literal_folders") or []:
+        dropped = ",".join(str(uid) for uid in item.get("dropped_uids") or [])
+        truncated = ",".join(str(uid) for uid in item.get("truncated_uids") or [])
+        lines.append(
+            "literal_folder index=%s literal_dropped=%s literal_truncated=%s dropped_uids=%s truncated_uids=%s"
+            % (
+                item.get("index"),
+                item.get("literal_dropped", 0),
+                item.get("literal_truncated", 0),
+                dropped,
+                truncated,
+            )
+        )
     lines.append("summary_json=%s" % json.dumps(report, sort_keys=True))
     return "\n".join(lines) + "\n"
 
@@ -1184,8 +1253,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mailbox",
         help=(
-            "Limit IMAP rows to this folder and SELECT only that folder. "
-            "Omit to SELECT every folder that still has unscanned rows."
+            "Limit IMAP rows to this folder and EXAMINE only that folder. "
+            "Omit to EXAMINE every folder that still has unscanned rows."
         ),
     )
     return parser
