@@ -2,7 +2,7 @@
 """Doc contract: Mini daily job is the sole SoR writer.
 
 Locks the role wording in beginner-guide, rerank, ask_mail,
-ops-terminal, the README index, and model-runtime-gates.
+ops-terminal, the README index, model-runtime-gates, and ATT-0 hard deck 8.
 Docs only. No Keychain, no network, no live sqlite.
 """
 
@@ -18,6 +18,8 @@ ASK = ROOT / "docs" / "ask_mail.md"
 OPS = ROOT / "docs" / "ops-terminal.md"
 README = ROOT / "README.md"
 GATES = ROOT / "docs" / "model-runtime-gates.md"
+ATT0 = ROOT / "docs" / "att0-constraints.md"
+DECISION_RECORD = "CRM-log/20260924-1201-mini-only-writer-user.md"
 
 CANONICAL = (
     "The Mini daily job is the sole SoR writer; "
@@ -194,6 +196,33 @@ class SorWriterWordingDocsTests(unittest.TestCase):
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay)
             self.assertNotIn("cutover is done", text.lower())
+
+    def test_att0_hard_deck_8_names_mini_only_writer(self):
+        text = ATT0.read_text(encoding="utf-8")
+        rule = (
+            "%s Mini retrieve stays on a copy DB until PR-5; "
+            "PR-5 cutover / RunAtLoad stays gated."
+            % (CANONICAL,)
+        )
+        self.assertIn(
+            "8. %s Attachment jobs on Mini use copy DB + local extract dir. `%s`"
+            % (rule, DECISION_RECORD),
+            text,
+        )
+        self.assertNotIn("Mini **copy-only until PR-5**", text)
+        self.assertNotIn("Mini copy-only until PR-5", text)
+        self.assertNotIn(
+            "PR-5 cutover stays gated. Attachment jobs on Mini use copy DB",
+            text,
+        )
+        self.assertNotIn("](%s)" % (DECISION_RECORD,), text)
+        self.assertIn("7. Bot box never holds SoR, live extracts, or attachment blobs.", text)
+        self.assertIn("9. No SMB/NFS sqlite. Stage extract trees locally.", text)
+        self.assertFalse((ROOT / "CRM-log" / "20260924-1201-mini-only-writer-user.md").is_file())
+        hay = text.replace("/Users/<operator>/", "")
+        for needle in PRIVACY_NEEDLES:
+            self.assertNotIn(needle, hay)
+        self.assertNotIn("cutover is done", text.lower())
 
 
 if __name__ == "__main__":
