@@ -11,7 +11,9 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -131,6 +133,7 @@ class _DbCase(unittest.TestCase):
         return {
             "exclusions": doc["exclusions"],
             "tables": doc["tables"],
+            "skipped_virtual_tables": doc["skipped_virtual_tables"],
             "journal_mode": doc["journal_mode"],
             "imap_live_total": doc["imap_live_total"],
             "imap_live_null_folder": doc["imap_live_null_folder"],
@@ -181,6 +184,7 @@ class FingerprintTests(_DbCase):
         self.assertNotIn("drafts", doc["tables"])
         self.assertIn("messages", doc["tables"])
         self.assertIn("bills", doc["tables"])
+        self.assertEqual(doc["skipped_virtual_tables"], [])
 
     def test_excluded_writes_do_not_change_logical_fingerprint(self):
         before = fp.fingerprint(self.db)
@@ -394,6 +398,69 @@ class FingerprintTests(_DbCase):
         self.assertIn("note main_sha256_identical", out)
         self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
 
+    def test_fts5_virtual_tables_are_skipped_and_shadow_tables_are_hashed(self):
+        path = self.root / "fts.sqlite"
+        _seed_fts(path)
+        doc = fp.fingerprint(path)
+        self.assertEqual(
+            doc["skipped_virtual_tables"], ["messages_fts", "messages_ids"]
+        )
+        self.assertNotIn("messages_fts", doc["tables"])
+        self.assertNotIn("messages_ids", doc["tables"])
+        self.assertIn("messages", doc["tables"])
+        for shadow in (
+            "messages_fts_data",
+            "messages_fts_idx",
+            "messages_fts_content",
+            "messages_fts_docsize",
+            "messages_fts_config",
+            "messages_ids_data",
+            "messages_ids_idx",
+            "messages_ids_content",
+            "messages_ids_docsize",
+            "messages_ids_config",
+        ):
+            info = doc["tables"][shadow]
+            self.assertIsInstance(info["count"], int)
+            self.assertNotIsInstance(info["count"], bool)
+            self.assertEqual(len(info["sha256"]), 64)
+        self.assertGreater(doc["tables"]["messages_fts_data"]["count"], 0)
+        loaded = json.loads(fp.render_json(doc))
+        self.assertEqual(
+            loaded["skipped_virtual_tables"], ["messages_fts", "messages_ids"]
+        )
+        code, out, err = _run(
+            fpdiff.main,
+            [self._dump("fts-a.json", doc), self._dump("fts-b.json", doc)],
+        )
+        self.assertEqual(err, "")
+        self.assertEqual(code, 0, msg=out)
+        self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
+
+    def test_table_read_error_exits_without_a_hash(self):
+        original = fp._row_sha256
+
+        def boom(conn, table, info, skip):
+            if table == "bills":
+                raise sqlite3.OperationalError("no such module: vec0")
+            return original(conn, table, info, skip)
+
+        dest = self.root / "fp.json"
+        with mock.patch.object(fp, "_row_sha256", side_effect=boom):
+            with self.assertRaises(fp.FpRefuse) as ctx:
+                fp.fingerprint(self.db)
+            code, out, err = _run(fp.main, [str(self.db), "--out", str(dest)])
+        self.assertEqual(str(ctx.exception), "ERROR bills")
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(err, "ERROR bills\n")
+        self.assertNotIn(EMPTY_SHA, out)
+        self.assertNotIn(EMPTY_SHA, err)
+        self.assertNotRegex(out + err, r"[0-9a-f]{64}")
+        self.assertNotIn("bills", out)
+        self.assertFalse(dest.exists())
+
     def _dump(self, name, doc) -> str:
         path = self.root / name
         path.write_text(fp.render_json(doc), encoding="utf-8")
@@ -551,6 +618,38 @@ class FpdiffTests(_DbCase):
         text = Path(fpdiff.__file__).read_text(encoding="utf-8")
         self.assertIn("--logical", text)
         self.assertIn("table counts and hashes", text)
+
+    def test_skipped_virtual_tables_are_ignored_consistently(self):
+        base = self._doc()
+        listed = self._doc(
+            skipped_virtual_tables=["messages_fts", "messages_ids"]
+        )
+        reordered = self._doc(
+            skipped_virtual_tables=["messages_ids", "messages_fts"]
+        )
+        wrong_type = self._doc(skipped_virtual_tables="messages_fts")
+        for args in ((), ("--logical",)):
+            for other in (listed, reordered, wrong_type):
+                code, out, err = self._pair(base, other, *args)
+                self.assertEqual(err, "")
+                self.assertEqual(code, 0, msg=out)
+                self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
+                self.assertNotIn("DIFF", out)
+                self.assertNotIn("skipped_virtual_tables", out)
+            code, out, err = self._pair(
+                listed, json.loads(json.dumps(reordered)), *args
+            )
+            self.assertEqual(err, "")
+            self.assertEqual(code, 0, msg=out)
+            self.assertIn("SOR_FINGERPRINT=IDENTICAL", out)
+        changed = self._doc(
+            skipped_virtual_tables=["message_embeddings"],
+            tables={"messages": {"count": 1, "sha256": "ef" * 32}},
+        )
+        code, out, _err = self._pair(listed, changed, "--logical")
+        self.assertEqual(code, 1)
+        self.assertIn("DIFF table messages sha256", out)
+        self.assertNotIn("skipped_virtual_tables", out)
 
 
 class BackupTests(_DbCase):
@@ -753,6 +852,10 @@ class HelperContractTests(unittest.TestCase):
             "shasum -a 256",
             "mode=ro",
             "quick_check",
+            "skipped_virtual_tables",
+            "pipefail",
+            "CREATE VIRTUAL TABLE",
+            "ERROR",
         ):
             self.assertIn(needle, text, msg=needle)
         self.assertIn("ATT-0-fingerprint.md", design)
@@ -782,6 +885,119 @@ class HelperContractTests(unittest.TestCase):
             self.assertNotIn("@me.com", source)
             self.assertNotIn("@icloud.com", source)
         self.assertNotIn("att0_restore", "\n".join(p.name for p in HELPERS))
+
+
+def _seed_fts(path: Path) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)"
+        )
+        conn.execute("INSERT INTO messages (body) VALUES ('alpha')")
+        conn.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(body)")
+        conn.execute("INSERT INTO messages_fts (body) VALUES ('alpha')")
+        conn.execute("CREATE VIRTUAL TABLE messages_ids USING fts5(body)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _shell_recipe() -> str:
+    text = DOC.read_text(encoding="utf-8")
+    marker = "```bash\n"
+    start = text.index(marker) + len(marker)
+    end = text.index("\n```", start)
+    return text[start:end] + "\n"
+
+
+def _shell_tools() -> bool:
+    return all(
+        shutil.which(name) for name in ("bash", "sqlite3", "shasum", "grep", "paste")
+    )
+
+
+class ShellRecipeTests(_DbCase):
+    def _run_recipe(self, db: Path, extra_env=None):
+        script = _shell_recipe().replace("/path/to/db.sqlite", str(db))
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            ["bash", "-c", script],
+            cwd=str(self.root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_recipe_skips_virtual_tables_and_hashes_shadow_tables(self):
+        if not _shell_tools():
+            self.skipTest("bash, sqlite3, or shasum is missing")
+        path = self.root / "fts.sqlite"
+        _seed_fts(path)
+        proc = self._run_recipe(path)
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        names = [line.split("\t", 1)[0] for line in proc.stdout.splitlines() if line]
+        self.assertIn("messages_fts_data", names)
+        self.assertNotIn("messages_fts", names)
+        self.assertNotIn("messages_ids", names)
+        doc = fp.fingerprint(path)
+        self.assertEqual(names, list(doc["tables"]))
+        for name in names:
+            count, digest = proc.stdout.splitlines()[names.index(name)].split("\t")[1:]
+            self.assertRegex(count, r"^[0-9]+$")
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_recipe_fails_loud_when_stderr_is_set_on_a_numeric_count(self):
+        if not _shell_tools():
+            self.skipTest("bash, sqlite3, or shasum is missing")
+        _seed(self.db)
+        real = shutil.which("sqlite3")
+        marker = self.root / "hash-reached"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        wrapper = bin_dir / "sqlite3"
+        wrapper.write_text(
+            """#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *'FROM "bills"'*)
+      case "$arg" in
+        *'COUNT(*)'*)
+          echo "no such module: vec0" >&2
+          printf '0\\n'
+          exit 0
+          ;;
+      esac
+      if [ -n "$ATT0_HASH_MARKER" ]; then
+        printf 'reached\\n' > "$ATT0_HASH_MARKER"
+      fi
+      echo "no such module: vec0" >&2
+      exit 0
+      ;;
+  esac
+done
+exec %s "$@"
+"""
+            % real,
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        env = {
+            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "ATT0_HASH_MARKER": str(marker),
+        }
+        proc = self._run_recipe(self.db, extra_env=env)
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        self.assertEqual(proc.stderr, "ERROR bills\n")
+        self.assertEqual(proc.stdout, "")
+        self.assertNotIn("bills", proc.stdout)
+        self.assertNotIn(EMPTY_SHA, proc.stdout)
+        self.assertNotRegex(proc.stdout, r"[0-9a-f]{64}")
+        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

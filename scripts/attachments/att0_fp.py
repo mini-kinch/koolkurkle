@@ -7,13 +7,20 @@ SQLite itself may still create an empty ``-wal`` and a ``-shm``
 read-mark file; those paths are statted before the connection opens,
 and the main-file bytes are not modified.
 
-Every ordinary table (``sqlite_master`` type ``table``, skipping
-``sqlite_%``) is reported with a row count and a sha256 of its quoted
-rows. Columns are in ``cid`` order. Rows are ordered by the primary
-key, or by ``rowid`` when the table has none. That is the same
-inclusion and ordering as the shell recipe in
-``docs/attachments/ATT-0-fingerprint.md``. The digest does not have to
-match the shell bytes.
+Every ordinary table is reported with a row count and a sha256 of its
+quoted rows. The list is ``sqlite_master`` rows with ``type='table'``,
+names that do not start with ``sqlite_``, and ``sql`` that is not a
+``CREATE VIRTUAL TABLE`` statement. ``sql IS NULL`` stays included, so
+shadow tables are hashed. FTS5 and vec0 virtual tables are skipped and
+listed in ``skipped_virtual_tables``. Columns are in ``cid`` order.
+Rows are ordered by the primary key, or by ``rowid`` when the table
+has none. That is the same inclusion and ordering as the shell recipe
+in ``docs/attachments/ATT-0-fingerprint.md``. The digest does not have
+to match the shell bytes.
+
+A SQLite error while reading one table exits 1 with ``ERROR`` and that
+table name on stderr. The tool does not write a count or a hash for
+it, and it does not hash empty input after a failed read.
 
 ``--exclude-table`` (repeatable) adds to the default ``ask_audit`` and
 ``drafts`` exclusions. Those two tables are written by ``ask_mail.py``
@@ -45,6 +52,9 @@ DEFAULT_EXCLUDE_TABLES = ("ask_audit", "drafts")
 DEFAULT_EXCLUDE_COLUMNS = ("messages.has_attachments",)
 _SQLITE_MAGIC = b"SQLite format 3\x00"
 _IMAP_SOURCE = "imap-live"
+# Shadow tables stay in the hash set. Virtual tables do not.
+_ORDINARY_SQL = "(sql IS NULL OR sql NOT LIKE 'CREATE VIRTUAL TABLE%')"
+_VIRTUAL_SQL = "sql LIKE 'CREATE VIRTUAL TABLE%'"
 
 
 class FpRefuse(Exception):
@@ -147,13 +157,28 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _table_names(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
+def _master_names(conn: sqlite3.Connection, sql_pred: str) -> list[str]:
+    query = (
         "SELECT name FROM sqlite_master "
         "WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' "
-        "ORDER BY name"
-    ).fetchall()
+        "AND " + sql_pred + " ORDER BY name"
+    )
+    rows = conn.execute(query).fetchall()
     return [row[0] for row in rows]
+
+
+def _hash_table(conn: sqlite3.Connection, table: str, exclude_columns: tuple):
+    """Return ``(count, sha256)``. A SQLite error is ``ERROR <table>``.
+
+    The hash is computed only after the reads succeed. A failed read
+    does not hash empty input.
+    """
+    try:
+        info = _table_info(conn, table)
+        skip = _excluded_columns(exclude_columns, table)
+        return _row_sha256(conn, table, info, skip)
+    except sqlite3.Error:
+        raise FpRefuse("ERROR %s" % table, code=1) from None
 
 
 def _table_info(conn: sqlite3.Connection, table: str):
@@ -256,17 +281,24 @@ def fingerprint(db, extra_tables=None, extra_columns=None) -> dict:
         try:
             conn.execute("BEGIN")
             journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
-            names = _table_names(conn)
+            names = _master_names(conn, _ORDINARY_SQL)
+            virtual = _master_names(conn, _VIRTUAL_SQL)
             tables = {}
             skipped = {name.lower() for name in exclude_tables}
             for name in names:
                 if name.lower() in skipped:
                     continue
-                info = _table_info(conn, name)
-                skip = _excluded_columns(exclude_columns, name)
-                count, digest = _row_sha256(conn, name, info, skip)
+                count, digest = _hash_table(conn, name, exclude_columns)
                 tables[name] = {"count": count, "sha256": digest}
-            imap = _imap_counts(conn, names)
+            try:
+                imap = _imap_counts(conn, names)
+            except sqlite3.Error:
+                label = "messages"
+                for name in names:
+                    if name.lower() == "messages":
+                        label = name
+                        break
+                raise FpRefuse("ERROR %s" % label, code=1) from None
             conn.execute("COMMIT")
         except FpRefuse:
             raise
@@ -292,6 +324,7 @@ def fingerprint(db, extra_tables=None, extra_columns=None) -> dict:
             "columns": list(exclude_columns),
         },
         "tables": tables,
+        "skipped_virtual_tables": virtual,
     }
     doc.update(imap)
     return doc

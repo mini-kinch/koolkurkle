@@ -23,6 +23,11 @@ difference.
 Fingerprints made with different exclusion sets are not compared
 (exit 2).
 
+``skipped_virtual_tables`` is recorded by ``att0_fp.py`` and ignored
+here. A missing list, an empty list, and a different list are not
+differences, in either mode. Shadow tables are ordinary tables, so
+their counts and hashes still compare.
+
 Without ``--logical``, file stats are compared too. An ``-shm`` change
 is a note (a read-only reader updates read marks). A ``-wal`` that
 appears with size 0 is a note. A new non-empty ``-wal`` is a
@@ -115,6 +120,7 @@ def compare_fingerprints(before: dict, after: dict, logical=False, allow_added=N
         raise FpdiffRefuse("refuse: exclusion sets differ")
     before_tables = _tables(before, "before")
     after_tables = _tables(after, "after")
+    # skipped_virtual_tables is informational. Both modes ignore it.
     allowed = _allow_set(allow_added)
     diffs = []
     notes = []

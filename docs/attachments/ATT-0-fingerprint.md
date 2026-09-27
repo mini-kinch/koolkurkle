@@ -21,7 +21,7 @@ python3 scripts/attachments/att0_backup.py /path/to/db.sqlite /tmp/att0-snapshot
 
 Read-only. The database is opened with a `file:...?mode=ro` URI and `PRAGMA query_only=ON`. The process does not run SQL writes. Stats for the main file, `-wal`, and `-shm` are taken before that open, and the JSON uses basenames only.
 
-Each ordinary table (`sqlite_master` type `table`, names that do not start with `sqlite_`) gets a `count` and a `sha256`. Columns are in `cid` order. Rows are ordered by the primary key, or by `rowid` when there is no primary key. The hash covers SQLite `quote()` of those columns, one row per line. An empty table hashes the empty byte string.
+Each ordinary table gets a `count` and a `sha256`. The table list is `sqlite_master` rows with `type='table'`, names that do not start with `sqlite_`, and `sql` that is not a `CREATE VIRTUAL TABLE` statement. `sql IS NULL` stays included. FTS5 and vec0 virtual tables are skipped and listed in `skipped_virtual_tables` (names only). Their shadow tables, for example `messages_fts_data` and `message_embeddings_rowids`, are ordinary tables and are hashed. Columns are in `cid` order. Rows are ordered by the primary key, or by `rowid` when there is no primary key. The hash covers SQLite `quote()` of those columns, one row per line. An empty table hashes the empty byte string.
 
 Defaults, always recorded in `exclusions` and extended by the repeatable flags:
 
@@ -34,7 +34,7 @@ When `messages` has a `source` column, the JSON also has count fields: `imap_liv
 
 JSON is one document on stdout. `--out PATH` writes that document to PATH instead and leaves stdout empty. `--out` must not be the database file.
 
-Exit 0 on success. Exit 2 when the path is missing, not SQLite, or a flag is invalid.
+Exit 0 on success. Exit 1 when SQLite cannot read one table: stderr is `ERROR` plus that table name, and stdout has no fingerprint. The tool does not write a count or a hash for that table, and it does not hash empty input after a failed read. Exit 2 when the path is missing, not SQLite, or a flag is invalid.
 
 On a database already in WAL mode, opening it can create an empty `-wal` and a `-shm` file. That is SQLite's read-mark behavior. The main-file sha256 is unchanged. `att0_fpdiff.py` treats a new empty `-wal` and an `-shm` change as notes, not as a content change.
 
@@ -65,7 +65,7 @@ ATT-0 tables from `scripts/attachments/schema.sql` that a migration can add:
 - `attachment_folder_uidvalidity`
 - `attachment_chunks_fts`
 
-SQLite may also add FTS shadow tables. Pass `--allow-added-table` once for each name the diff reports as added.
+`attachment_chunks_fts` is virtual. It is listed in `skipped_virtual_tables` and is not a hashed table. Its shadow tables are hashed. Pass `--allow-added-table` once for each shadow table the diff reports as added. `skipped_virtual_tables` is on the fingerprint. Both diff modes ignore it. A missing list, an empty list, and a different list are not differences. Shadow-table counts and hashes still compare.
 
 Without `--logical`, `stat_main` and an already-present `-wal` must match. A new `-wal` of size 0 is `note wal_created_empty_by_ro_reader`. A new non-empty `-wal` is a difference. An `-shm` change is `note shm_changed(reader read-marks; not proof of a write)`. When `stat_main` matches and `main_sha256` does not, the line is `DIFF main_sha256`.
 
@@ -98,20 +98,40 @@ backup_ok src=db.sqlite dest=att0-snapshot.sqlite seconds=0.0 size=8192 quick_ch
 
 ## Logical shell recipe
 
-No-install fallback. Per-table inclusion and ordering match `att0_fp.py`. The Python digest does not have to be byte-identical to `shasum`. The Python tool also skips internal tables whose names start with `sqlite_`. This recipe does not.
+No-install fallback. Per-table inclusion and ordering match `att0_fp.py`, including the skip of `sqlite_%` names and of `CREATE VIRTUAL TABLE` statements. `sql IS NULL` stays included, so shadow tables are hashed. Virtual table names are not printed. The Python digest does not have to be byte-identical to `shasum`. Python records those names in `skipped_virtual_tables`.
+
+`set -o pipefail` is on. Each `sqlite3` invocation captures stderr. If a count is not a non-negative integer, a hash is not 64 hex digits, or captured stderr is non-empty, the recipe prints `ERROR` plus the table name on stderr and exits 1. It does not print a count or a hash for that table. Rows already read stay in a temp file and are printed only after every table succeeds.
 
 ```bash
+set -o pipefail
 DB=/path/to/db.sqlite
-sqlite3 -readonly "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('ask_audit','drafts') ORDER BY name;" |
+err=$(mktemp)
+out=$(mktemp)
+trap 'rm -f "$err" "$out"' EXIT
+fail() { printf 'ERROR %s\n' "$1" >&2; exit 1; }
+names=$(sqlite3 -readonly "$DB" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND (sql IS NULL OR sql NOT LIKE 'CREATE VIRTUAL TABLE%') AND name NOT IN ('ask_audit','drafts') ORDER BY name;" 2>"$err") || fail sqlite_master
+if [ -s "$err" ]; then fail sqlite_master; fi
 while IFS= read -r t; do
   [ -n "$t" ] || continue
-  ident=$(printf '%s' "$t" | sed 's/"/""/g'); lit=$(printf '%s' "$t" | sed "s/'/''/g")
-  count=$(sqlite3 -readonly "$DB" "SELECT COUNT(*) FROM \"$ident\";")
+  ident=$(printf '%s' "$t" | sed 's/"/""/g')
+  lit=$(printf '%s' "$t" | sed "s/'/''/g")
+  : >"$err"
+  count=$(sqlite3 -readonly "$DB" "SELECT COUNT(*) FROM \"$ident\";" 2>"$err") || fail "$t"
+  if [ -s "$err" ] || ! printf '%s' "$count" | grep -Eq '^[0-9]+$'; then fail "$t"; fi
   if [ "$t" = "messages" ]; then filt="name != 'has_attachments'"; else filt="1=1"; fi
-  cols=$(sqlite3 -readonly "$DB" "SELECT '\"' || replace(name,'\"','\"\"') || '\"' FROM pragma_table_info('$lit') WHERE $filt ORDER BY cid;" | paste -sd, -)
-  order=$(sqlite3 -readonly "$DB" "SELECT '\"' || replace(name,'\"','\"\"') || '\"' FROM pragma_table_info('$lit') WHERE pk>0 ORDER BY pk;" | paste -sd, -)
+  : >"$err"
+  cols=$(sqlite3 -readonly "$DB" "SELECT '\"' || replace(name,'\"','\"\"') || '\"' FROM pragma_table_info('$lit') WHERE $filt ORDER BY cid;" 2>"$err" | paste -sd, -) || fail "$t"
+  if [ -s "$err" ]; then fail "$t"; fi
+  : >"$err"
+  order=$(sqlite3 -readonly "$DB" "SELECT '\"' || replace(name,'\"','\"\"') || '\"' FROM pragma_table_info('$lit') WHERE pk>0 ORDER BY pk;" 2>"$err" | paste -sd, -) || fail "$t"
+  if [ -s "$err" ]; then fail "$t"; fi
   [ -n "$order" ] || order="rowid"
-  hash=$(printf '.mode quote\n.headers off\nSELECT %s FROM "%s" ORDER BY %s;\n' "$cols" "$ident" "$order" | sqlite3 -readonly "$DB" | shasum -a 256 | awk '{print $1}')
-  printf '%s\t%s\t%s\n' "$t" "$count" "$hash"
-done
+  : >"$err"
+  hash=$(printf '.mode quote\n.headers off\nSELECT %s FROM "%s" ORDER BY %s;\n' "$cols" "$ident" "$order" | sqlite3 -readonly "$DB" 2>"$err" | shasum -a 256 | awk '{print $1}') || fail "$t"
+  if [ -s "$err" ] || ! printf '%s' "$hash" | grep -Eq '^[0-9a-f]{64}$'; then fail "$t"; fi
+  printf '%s\t%s\t%s\n' "$t" "$count" "$hash" >>"$out"
+done <<END_ATT0_TABLES
+$names
+END_ATT0_TABLES
+cat "$out"
 ```
