@@ -2,7 +2,7 @@
 
 Lock file: `~/MailArchive/mailroom.write.lock`
 
-Mechanism: exclusive `flock` (advisory). Holder writes `PID` / `hostname` / `purpose` / ISO timestamp into the lock file.
+Mechanism: exclusive `flock` (advisory). Holder writes `PID` / `hostname` / `purpose` / ISO timestamp / `writer_token` into the lock file. The token value is never logged or printed.
 
 If the lock is held longer than **4 hours**, refuse. **Do not steal.**
 
@@ -61,6 +61,31 @@ with_writer_lock.py --purpose embed_backfill -- \
 ```
 
 Testing overrides: `--lock-file`, `--max-age-hours` (default 4).
+
+## Identity handoff
+
+The wrapper draws `secrets.token_urlsafe(16)` or longer, stores it in the lock file as `writer_token`, and passes it to the child with the wrapper pid and purpose:
+
+- `MAILROOM_WRITER_LOCK_TOKEN`
+- `MAILROOM_WRITER_LOCK_PID`
+- `MAILROOM_WRITER_LOCK_PURPOSE`
+
+The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB`, then closes that probe fd. It does not keep the probe lock. With no token in the environment, a free lock is allowed and a held lock is a conflict, same as before. With a token, a free lock is a conflict (the wrapper died; do not write unlocked). A held lock is allowed only when the lock-file `writer_token` matches, the recorded pid is live, that pid is the child or an ancestor, and the purpose is on the writer allowlist (`att0-migrate`, `att0 meta fill`, and the existing writer purposes). Any miss or ancestor-walk error refuses. The walk is at most 32 steps and does not use `/proc` on Darwin.
+
+`is_live_sor` compares realpaths, so a symlink is not judged by its raw path string.
+
+`SOR_FORCE_LIVE_CHECKS=1` turns the live checks on for a path that is not the live SoR. No value turns those checks off on the live path. Do not set the variable in a LaunchAgent.
+
+## Caller-side basename guards (inventory)
+
+These four refuses run in the callers, before `refuse_if_sor_writer_conflict`. Each compares `Path.name` to `SOR_BASENAME`. They do not call `is_live_sor`. This table records them. It does not change them. Alias directions have no test. See `docs/heavy/20260927-2207-pr90-caller-live-only-guards.md`.
+
+| Guard | Exact code | Test |
+|---|---|---|
+| `scripts/attachments/migrate_att0_schema.py:364` in `migrate_database` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_refuses_mailroom_sqlite_without_flag_and_does_not_open_it`. Alias directions: no test |
+| `scripts/attachments/migrate_att0_schema.py:434` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_attachment_search.py` `SchemaMigrationTests.test_cli_refuse_and_copy_success`. Alias directions: no test |
+| `scripts/attachments/meta_fill.py:931` in `fill_metadata` | `if path.name == SOR_BASENAME and not allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `FillTests.test_refuses_mailroom_sqlite_without_creating_it`. Alias directions: no test |
+| `scripts/attachments/meta_fill.py:1284` in `main` | `if db_path.name == SOR_BASENAME and not args.allow_mailroom_sqlite:` | `tests/test_att0_meta_fill.py` `CliTests.test_negative_smoke_and_mailroom_refuse`. Alias directions: no test |
 
 ## Same-file embed_backfill (HARD DECK)
 
