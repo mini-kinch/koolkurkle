@@ -28,7 +28,7 @@ if str(SCRIPTS) not in sys.path:
 import mailroom_copy_db as copy_db  # noqa: E402
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
-SOR_HEADING = "## MBP SoR vs Mini copy-only"
+SOR_HEADING = "## Mini SoR (sole writer) vs MBP non-writer"
 
 
 def sor_section(raw: str) -> str:
@@ -44,7 +44,8 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
     def test_contract_locks_mbp_sor_mini_copy_only_language(self):
         raw = OPS.read_text(encoding="utf-8")
         section = sor_section(raw)
-        self.assertIn("MBP SoR vs Mini copy-only", section)
+        self.assertIn("## Mini SoR (sole writer) vs MBP non-writer", section)
+        self.assertNotIn("## MBP SoR vs Mini copy-only", raw)
         self.assertIn("Since the 2026-09-24 SoR flip", section)
         self.assertIn("**Mini** is the SoR writer under the daily only", section)
         self.assertIn("`mailroom.sqlite`", section)

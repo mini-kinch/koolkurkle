@@ -230,7 +230,8 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("ollama stop qwen3-embedding:8b", text)
         self.assertIn("--phase retrieve", text)
         self.assertIn("copy-only", text)
-        self.assertIn("MBP SoR vs Mini copy-only", text)
+        self.assertIn("## Mini SoR (sole writer) vs MBP non-writer", text)
+        self.assertNotIn("## MBP SoR vs Mini copy-only", text)
         index = next(
             line
             for line in text.splitlines()

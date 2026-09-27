@@ -185,7 +185,7 @@ card. Fail closed: if a card cannot follow this format, do not issue it.
 This gate is docs/tests only. It does not SSH a live machine, open
 MailArchive or live sqlite, read Keychain, or change rem-legacy.
 
-## MBP SoR vs Mini copy-only
+## Mini SoR (sole writer) vs MBP non-writer
 
 Since the 2026-09-24 SoR flip.
 
