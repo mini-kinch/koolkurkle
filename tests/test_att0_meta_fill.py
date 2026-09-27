@@ -327,7 +327,14 @@ def _imap_speak(conn, uidvalidity):
                     conn.sendall(tag + b" OK CAPABILITY completed\r\n")
                 elif cmd == b"LOGIN":
                     conn.sendall(tag + b" OK LOGIN completed\r\n")
-                elif cmd in (b"EXAMINE", b"SELECT"):
+                elif cmd == b"SELECT":
+                    conn.sendall(b"* 1 EXISTS\r\n")
+                    conn.sendall(b"* 0 RECENT\r\n")
+                    if uidvalidity is not None:
+                        token = str(int(uidvalidity)).encode("ascii")
+                        conn.sendall(b"* OK [UIDVALIDITY " + token + b"] UIDs valid\r\n")
+                    conn.sendall(tag + b" OK [READ-WRITE] SELECT completed\r\n")
+                elif cmd == b"EXAMINE":
                     conn.sendall(b"* 1 EXISTS\r\n")
                     conn.sendall(b"* 0 RECENT\r\n")
                     if uidvalidity is not None:
@@ -424,6 +431,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parsed[0].mime, "text/plain")
         self.assertEqual(parsed[0].part_id, "1")
         self.assertEqual(parsed[0].size, 3)
+
+    def test_truncated_literal_is_a_parse_error(self):
+        short = '("NAME" {8}\r\nnote'
+        with self.assertRaises(bodystructure.ParseError) as ctx:
+            bodystructure.parse_sexp(short)
+        self.assertIn("literal short", str(ctx.exception))
+        with self.assertRaises(bodystructure.ParseError) as fetched:
+            bodystructure.bodystructure_from_fetch(
+                "* 1 FETCH (UID 9 BODYSTRUCTURE " + short + ")"
+            )
+        self.assertIn("literal short", str(fetched.exception))
 
     def test_envelope_display_name_is_not_a_filename(self):
         text = (
@@ -2291,7 +2309,7 @@ class CurlTransportTests(unittest.TestCase):
         argv = captured[0]["argv"]
         self.assertEqual(
             argv,
-            ["/usr/bin/curl", "--silent", "--show-error", "-K", "-"],
+            ["/usr/bin/curl", "--silent", "--show-error", "--fail-early", "-K", "-"],
         )
         self.assertEqual(argv[argv.index("-K") + 1], "-")
         self.assertNotIn("-k", argv)
@@ -3206,6 +3224,11 @@ class CurlTransportTests(unittest.TestCase):
             self.assertEqual(calls, [1])
             self.assertEqual(report["messages"], 1)
             self.assertEqual(report["errors"], 1)
+            self.assertEqual(report["capped"], 0)
+            self.assertEqual(
+                report["messages"] + report["errors"] + report["capped"],
+                report["eligible"],
+            )
             self.assertNotIn(SECRET, str(report))
             conn = sqlite3.connect(str(db))
             try:
@@ -3416,6 +3439,574 @@ class CurlTransportTests(unittest.TestCase):
         self.assertEqual(report["errors"], 1)
         self.assertNotIn(SECRET, str(report))
         self.assertNotIn("boom", str(report))
+
+    def test_truncated_literal_counts_as_an_error(self):
+        """A short ``{n}`` literal is a ParseError and is not scanned."""
+        import imap_curl as imap_curl
+
+        short = (
+            "* OK [UIDVALIDITY 5] UIDs valid\r\n"
+            '* 1 FETCH (UID 9 BODYSTRUCTURE ("NAME" {8}\r\n'
+            "note"
+        )
+        with self.assertRaises(bodystructure.ParseError) as ctx:
+            imap_curl.structures_by_uid(short)
+        self.assertIn("literal short", str(ctx.exception))
+        calls = []
+
+        def runner(argv, config_text, env, timeout):
+            calls.append(config_text)
+            self.assertNotIn("dump-header", config_text)
+            self.assertNotIn("SELECT", config_text)
+            return 0, short, ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-short", "imap-live", "9", None, None, "synthetic", "INBOX")],
+            )
+            with mock.patch("imap_curl.run_subprocess", runner):
+                report = meta.fill_metadata(
+                    db,
+                    source="imap",
+                    apply=True,
+                    host="imap.example.invalid",
+                    user="user@example.invalid",
+                    password_fn=lambda: SECRET,
+                    cmdlines=[],
+                    lock_held=False,
+                    max_messages=0,
+                    timeout_s=0,
+                )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(report["messages"], 0)
+            self.assertEqual(report["capped"], 0)
+            self.assertEqual(report["errors"], report["eligible"])
+            self.assertEqual(
+                report["messages"] + report["errors"] + report["capped"],
+                report["eligible"],
+            )
+            self.assertNotIn(SECRET, str(report))
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+                stored = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
+            self.assertEqual(stored, 0)
+
+    def test_wire_harness_modes(self):
+        """Real curl against a fake IMAPS server, one mode at a time.
+
+        SELECT is answered ``[READ-WRITE]`` so a regression cannot look
+        read-only. Modes: normal, missing_uid, literal, trunc_literal,
+        login_no, rc 7, rc 21, rc 60.
+        """
+        import imap_curl as imap_curl
+
+        if not os.access("/usr/bin/curl", os.X_OK):
+            self.skipTest("curl is not available")
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is not available")
+        password = "example-secret"
+        with tempfile.TemporaryDirectory() as tmp:
+            key = str(Path(tmp) / "key.pem")
+            cert = str(Path(tmp) / "cert.pem")
+            proc = subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-keyout",
+                    key,
+                    "-out",
+                    cert,
+                    "-days",
+                    "1",
+                    "-nodes",
+                    "-subj",
+                    "/CN=127.0.0.1",
+                    "-addext",
+                    "subjectAltName=IP:127.0.0.1",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0 or not Path(cert).is_file():
+                self.skipTest("could not generate a throwaway certificate")
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(cert, key)
+            except ssl.SSLError:
+                self.skipTest("TLS is not available")
+
+            mode = {"name": "normal"}
+            seen = []
+            stats = {"connections": 0, "logins": 0, "selects": 0, "examines": 0}
+            lock = threading.Lock()
+
+            def handler(conn):
+                buf = b""
+                try:
+                    conn.sendall(b"* OK IMAP4rev1 ready\r\n")
+                    while True:
+                        try:
+                            data = conn.recv(8192)
+                        except socket.timeout:
+                            return
+                        if not data:
+                            return
+                        buf += data
+                        while b"\r\n" in buf:
+                            line, buf = buf.split(b"\r\n", 1)
+                            text = line.decode("utf-8", "replace")
+                            with lock:
+                                seen.append(text)
+                                current = mode["name"]
+                            parts = line.split(b" ", 2)
+                            tag = parts[0]
+                            cmd = parts[1].upper() if len(parts) > 1 else b""
+                            if cmd == b"CAPABILITY":
+                                conn.sendall(
+                                    b"* CAPABILITY IMAP4rev1\r\n"
+                                    + tag
+                                    + b" OK CAPABILITY completed\r\n"
+                                )
+                            elif cmd == b"LOGIN":
+                                with lock:
+                                    stats["logins"] += 1
+                                if current == "login_no":
+                                    conn.sendall(tag + b" NO LOGIN denied\r\n")
+                                    continue
+                                conn.sendall(tag + b" OK LOGIN completed\r\n")
+                            elif cmd == b"SELECT":
+                                with lock:
+                                    stats["selects"] += 1
+                                conn.sendall(
+                                    b"* 1 EXISTS\r\n* OK [UIDVALIDITY 11] UIDs valid\r\n"
+                                    + tag
+                                    + b" OK [READ-WRITE] SELECT completed\r\n"
+                                )
+                            elif cmd == b"EXAMINE":
+                                with lock:
+                                    stats["examines"] += 1
+                                if current == "rc21":
+                                    conn.sendall(tag + b" NO EXAMINE denied\r\n")
+                                    continue
+                                conn.sendall(
+                                    b"* 1 EXISTS\r\n* OK [UIDVALIDITY 11] UIDs valid\r\n"
+                                    b"* OK [PERMANENTFLAGS ()] Read-only\r\n"
+                                    + tag
+                                    + b" OK [READ-ONLY] EXAMINE completed\r\n"
+                                )
+                            elif cmd == b"UID":
+                                if current == "missing_uid":
+                                    body = (
+                                        b'* 1 FETCH (UID 1 BODYSTRUCTURE ("TEXT" "PLAIN" '
+                                        b'NIL NIL NIL "7BIT" 4 1))\r\n'
+                                    )
+                                elif current == "literal":
+                                    name = b"note.pdf"
+                                    inner = (
+                                        b'("APPLICATION" "PDF" ("NAME" {8}\r\n'
+                                        + name
+                                        + b') NIL NIL "BASE64" 4 NIL ("ATTACHMENT" ("FILENAME" {8}\r\n'
+                                        + name
+                                        + b")) NIL NIL)"
+                                    )
+                                    body = (
+                                        b"* 1 FETCH (UID 9 BODYSTRUCTURE " + inner + b")\r\n"
+                                    )
+                                elif current == "trunc_literal":
+                                    body = (
+                                        b"* 1 FETCH (UID 9 BODYSTRUCTURE {400}\r\n"
+                                        + (b"x" * 400)
+                                    )
+                                else:
+                                    body = (
+                                        b'* 1 FETCH (UID 9 BODYSTRUCTURE ("TEXT" "PLAIN" '
+                                        b'NIL NIL NIL "7BIT" 4 1))\r\n'
+                                    )
+                                conn.sendall(
+                                    body
+                                    + b"* OK [UIDVALIDITY 99] not the examine value\r\n"
+                                    + tag
+                                    + b" OK UID FETCH completed\r\n"
+                                )
+                            elif cmd == b"LOGOUT":
+                                conn.sendall(b"* BYE\r\n" + tag + b" OK LOGOUT\r\n")
+                                return
+                            else:
+                                conn.sendall(tag + b" BAD\r\n")
+                except Exception:
+                    return
+                finally:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(8)
+            listener.settimeout(0.5)
+            port = listener.getsockname()[1]
+            stop = threading.Event()
+
+            def loop():
+                while not stop.is_set():
+                    try:
+                        conn, _addr = listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        return
+                    try:
+                        wrapped = ctx.wrap_socket(conn, server_side=True)
+                    except ssl.SSLError:
+                        try:
+                            conn.close()
+                        except OSError:
+                            pass
+                        continue
+                    wrapped.settimeout(20)
+                    with lock:
+                        stats["connections"] += 1
+                    handler(wrapped)
+
+            thread = threading.Thread(target=loop, daemon=True)
+            thread.start()
+            calls = []
+            real_run = imap_curl.run_subprocess
+
+            def spy(argv, config_text, env, timeout):
+                rc, out, err = real_run(argv, config_text, env, timeout)
+                calls.append(
+                    {
+                        "argv": list(argv),
+                        "config": config_text,
+                        "env": dict(env),
+                        "stdout": out,
+                        "rc": rc,
+                    }
+                )
+                return rc, out, err
+
+            def boom(*_args, **_kwargs):
+                raise AssertionError("fill opened imaplib or a python socket")
+
+            def reset():
+                calls.clear()
+                seen.clear()
+                for key_name in stats:
+                    stats[key_name] = 0
+
+            def snapshot(name):
+                return {
+                    "mode": name,
+                    "processes": len(calls),
+                    "connections": stats["connections"],
+                    "logins": stats["logins"],
+                    "selects": stats["selects"],
+                    "examines": stats["examines"],
+                }
+
+            def run_fill(rows, *, apply, cacert_path):
+                db = Path(tmp) / ("wire-%s.sqlite" % mode["name"])
+                if db.exists():
+                    db.unlink()
+                _seed(db, rows)
+                with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                    "imaplib.IMAP4_SSL", boom
+                ), mock.patch("socket.create_connection", boom):
+                    report = meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=apply,
+                        host="127.0.0.1",
+                        user="user@example.invalid",
+                        password_fn=lambda: password,
+                        imap_port=port,
+                        cacert=cacert_path,
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=0,
+                    )
+                return db, report
+
+            def assert_wire(name, report, *, processes, examines):
+                shot = snapshot(name)
+                self.assertEqual(shot["processes"], processes, shot)
+                self.assertEqual(shot["selects"], 0, shot)
+                self.assertEqual(shot["examines"], examines, shot)
+                self.assertEqual(
+                    report["messages"] + report["errors"] + report["capped"],
+                    report["eligible"],
+                    report,
+                )
+                self.assertNotIn(password, str(report))
+                transcript = "\n".join(seen)
+                self.assertNotIn("SELECT", transcript)
+                self.assertNotIn("READ-WRITE", transcript)
+                for item in calls:
+                    self.assertEqual(item["argv"][0], "/usr/bin/curl")
+                    self.assertNotIn("dump-header", item["config"])
+                    self.assertNotIn("SELECT", item["config"])
+                    self.assertNotIn(password, item["argv"])
+                    self.assertNotIn(password, item["env"].values())
+                    self.assertIn("-K", item["argv"])
+                    blocks = [
+                        block
+                        for block in item["config"].split("\nnext\n")
+                        if block.strip()
+                    ]
+                    self.assertGreaterEqual(len(blocks), 1)
+                    for block in blocks:
+                        self.assertIn("connect-timeout", block)
+                        self.assertIn("max-time", block)
+                        self.assertIn("user = ", block)
+                print(
+                    "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s"
+                    % (
+                        name,
+                        shot["processes"],
+                        shot["connections"],
+                        shot["logins"],
+                        shot["selects"],
+                        shot["examines"],
+                    ),
+                    flush=True,
+                )
+                return shot
+
+            results = []
+            try:
+                reset()
+                mode["name"] = "normal"
+                db, report = run_fill(
+                    [("ex-n", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=False,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("normal", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(report["messages"], 1, report)
+                self.assertEqual(report["errors"], 0, report)
+                self.assertEqual(report["bytes_stored"], 0)
+                self.assertTrue(report["dry_run"])
+                conn = sqlite3.connect(str(db))
+                try:
+                    stored = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(stored, 0)
+                self.assertIn("EXAMINE", calls[0]["config"])
+                self.assertIn("\nnext\n", calls[0]["config"])
+                self.assertIn("UID FETCH", calls[0]["config"])
+                self.assertIn("\r\n", calls[0]["stdout"])
+                results.append(shot)
+
+                reset()
+                mode["name"] = "missing_uid"
+                db, report = run_fill(
+                    [
+                        ("ex-1", "imap-live", "1", None, None, "synthetic", "INBOX"),
+                        ("ex-2", "imap-live", "2", None, None, "synthetic", "INBOX"),
+                    ],
+                    apply=True,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("missing_uid", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(report["messages"], 1, report)
+                self.assertEqual(report["errors"], 1, report)
+                conn = sqlite3.connect(str(db))
+                try:
+                    scans = conn.execute(
+                        "SELECT message_id FROM attachment_meta_scans"
+                    ).fetchall()
+                finally:
+                    conn.close()
+                self.assertEqual(scans, [("ex-1",)])
+                results.append(shot)
+
+                reset()
+                mode["name"] = "literal"
+                _db, report = run_fill(
+                    [("ex-lit", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=False,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("literal", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                if report["messages"] == 1:
+                    self.assertEqual(report["errors"], 0, report)
+                    self.assertGreaterEqual(report["filenames"], 1)
+                else:
+                    self.assertEqual(report["messages"], 0, report)
+                    self.assertEqual(report["errors"], report["eligible"], report)
+                results.append(shot)
+
+                reset()
+                mode["name"] = "trunc_literal"
+                db, report = run_fill(
+                    [("ex-trunc", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=True,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("trunc_literal", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(report["messages"], 0, report)
+                self.assertEqual(report["errors"], report["eligible"], report)
+                conn = sqlite3.connect(str(db))
+                try:
+                    scans = conn.execute(
+                        "SELECT COUNT(*) FROM attachment_meta_scans"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(scans, 0)
+                results.append(shot)
+
+                reset()
+                mode["name"] = "login_no"
+                _db, report = run_fill(
+                    [("ex-login", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=False,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("login_no", report, processes=1, examines=0)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(report["messages"], 0, report)
+                self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertEqual(len(report["curl_failures"]), 1)
+                self.assertIn("67", report["curl_failures"][0])
+                self.assertIn("not retrying", report["curl_failures"][0])
+                self.assertNotIn("LOGIN denied", str(report))
+                results.append(shot)
+
+                reset()
+                mode["name"] = "rc21"
+                _db, report = run_fill(
+                    [("ex-21", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=False,
+                    cacert_path=cert,
+                )
+                shot = assert_wire("rc21", report, processes=1, examines=1)
+                self.assertEqual(shot["connections"], 1, shot)
+                self.assertEqual(shot["logins"], 1, shot)
+                self.assertEqual(report["messages"], 0, report)
+                self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertIn("21", report["curl_failures"][0])
+                self.assertIn("not retrying", report["curl_failures"][0])
+                self.assertNotIn("EXAMINE denied", str(report))
+                results.append(shot)
+
+                reset()
+                mode["name"] = "rc60"
+                _db, report = run_fill(
+                    [("ex-60", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                    apply=False,
+                    cacert_path=None,
+                )
+                shot = assert_wire("rc60", report, processes=1, examines=0)
+                self.assertEqual(shot["selects"], 0, shot)
+                self.assertEqual(report["messages"], 0, report)
+                self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertEqual(len(report["curl_failures"]), 1)
+                self.assertIn("60", report["curl_failures"][0])
+                self.assertIn("certificate", report["curl_failures"][0])
+                self.assertIn("not retrying", report["curl_failures"][0])
+                results.append(shot)
+
+                closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                closed.bind(("127.0.0.1", 0))
+                closed_port = closed.getsockname()[1]
+                closed.close()
+                reset()
+                mode["name"] = "rc7"
+                db = Path(tmp) / "wire-rc7.sqlite"
+                _seed(
+                    db,
+                    [("ex-7", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                )
+                with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                    "imaplib.IMAP4_SSL", boom
+                ), mock.patch("socket.create_connection", boom):
+                    report = meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=False,
+                        host="127.0.0.1",
+                        user="user@example.invalid",
+                        password_fn=lambda: password,
+                        imap_port=closed_port,
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=0,
+                    )
+                shot = {
+                    "mode": "rc7",
+                    "processes": len(calls),
+                    "connections": 0,
+                    "logins": 0,
+                    "selects": 0,
+                    "examines": 0,
+                }
+                self.assertEqual(shot["processes"], 1, shot)
+                self.assertEqual(report["messages"], 0, report)
+                self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertEqual(
+                    report["messages"] + report["errors"] + report["capped"],
+                    report["eligible"],
+                )
+                self.assertIn("7", report["curl_failures"][0])
+                self.assertIn("connect", report["curl_failures"][0])
+                self.assertIn("not retrying", report["curl_failures"][0])
+                self.assertNotIn(password, str(report))
+                self.assertEqual(calls[0]["argv"][0], "/usr/bin/curl")
+                print(
+                    "WIRE rc7 processes=1 connections=0 logins=0 selects=0 examines=0",
+                    flush=True,
+                )
+                results.append(shot)
+                Path("/tmp/wire-harness-counts.txt").write_text(
+                    "\n".join(
+                        "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s"
+                        % (
+                            item["mode"],
+                            item["processes"],
+                            item["connections"],
+                            item["logins"],
+                            item["selects"],
+                            item["examines"],
+                        )
+                        for item in results
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            finally:
+                stop.set()
+                try:
+                    listener.close()
+                except OSError:
+                    pass
+                thread.join(timeout=3)
 
 
 if __name__ == "__main__":

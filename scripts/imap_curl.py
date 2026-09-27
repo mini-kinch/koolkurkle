@@ -5,7 +5,9 @@ One curl process per folder. The URL is the base ``imaps://host:port/``
 with no mailbox, so curl does not SELECT (SELECT is read-write). The
 first transfer is ``EXAMINE "<mailbox>"``. Further transfers are
 ``UID FETCH <uidset> (BODYSTRUCTURE)``, joined by ``next`` so the login
-is reused. ``next`` resets per-transfer options, so every transfer
+is reused. ``--fail-early`` stops the process on the first transfer
+error so a failed login does not open a second connection. ``next``
+resets per-transfer options, so every transfer
 repeats ``user``, ``connect-timeout``, ``max-time``, ``write-out``,
 and ``cacert`` when a test certificate is injected.
 
@@ -194,7 +196,7 @@ def allow_command(command: str) -> None:
 
 def curl_argv() -> list:
     """Pinned argv. Password and commands stay in the ``-K -`` config."""
-    argv = [CURL_BIN, "--silent", "--show-error", "-K", "-"]
+    argv = [CURL_BIN, "--silent", "--show-error", "--fail-early", "-K", "-"]
     guard_curl_argv(argv)
     return argv
 

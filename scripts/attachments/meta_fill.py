@@ -8,7 +8,8 @@ production transport is pinned ``/usr/bin/curl`` ``imaps://`` (port 993).
 It does not construct ``imaplib`` or a Python socket. ``CURL_BIN`` is
 not read and Homebrew curl is not a fallback. Per folder, one curl
 process uses the base URL ``imaps://host:993/`` (no mailbox, so curl
-does not SELECT). Transfers are joined by ``next``. The first is
+does not SELECT). Transfers are joined by ``next``. ``--fail-early``
+stops that process on the first transfer error. The first is
 ``EXAMINE`` of the quoted mailbox (``"Deleted Messages"``). Later
 transfers batch UIDs (``UID FETCH 1:50,77 (BODYSTRUCTURE)``) and do not
 change the seen flag. Stdout is read as bytes so CRLF stays intact.
