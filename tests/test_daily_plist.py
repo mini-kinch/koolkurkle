@@ -76,7 +76,10 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("~/MailArchive/.venv/bin/python", text)
         self.assertIn("cannot load sqlite-vec", text)
         self.assertIn("SMB/NFS", text)
-        self.assertIn("copy-only", text)
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            text,
+        )
         self.assertIn("mailroom-copy.sqlite", text)
         self.assertIn("mailroom-daily-copy.sqlite", text)
         self.assertIn("SoR cutover is PR-5", text)

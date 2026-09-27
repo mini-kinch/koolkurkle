@@ -57,8 +57,9 @@ class MailroomCopyDbRemGatedOpsTests(unittest.TestCase):
             hay = text.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)
-        daily = DAILY.read_text(encoding="utf-8")
-        self.assertIn("Mini copy only when", daily)
+        daily = " ".join(DAILY.read_text(encoding="utf-8").split())
+        self.assertIn("copy from live SoR only when rem-legacy is not writing", daily)
+        self.assertNotIn("Mini copy only when", daily)
         self.assertIn("No live MBP→Mini", daily)
         helper = HELPER.read_text(encoding="utf-8")
         self.assertIn("Rem-gated copy", helper)

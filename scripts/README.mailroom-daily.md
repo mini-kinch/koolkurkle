@@ -8,7 +8,9 @@ scripts that already live in `~/MailArchive/scripts` (headers / FTS / 8pm
 classify+bills / `embed_backfill.py`). Do not treat this PR as a rewrite of
 those tools.
 
-## Preferred practice (copy-only until SoR cutover)
+## Preferred practice (Mini daily job is the sole SoR writer)
+
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 Set `MAILROOM_DB` (or `--db`) to a path whose basename is
 `mailroom-copy.sqlite`, `mailroom-daily-copy.sqlite`, or `mailroom.sqlite`.
@@ -22,13 +24,13 @@ There is no silent default to `mailroom.sqlite`.
 copy while rem embed may still hold `mailroom-copy`. A silent default
 to `mailroom.sqlite` would write the empty SoR or race the rem job.
 Copy-only keeps one writer on the live rem copy and leaves SoR promotion
-to PR-5 (out of scope here). Rem-gated copy: Mini copy only when
-rem-legacy is not writing, or after rem-legacy EXIT 0. Do not mount
+to PR-5 (out of scope here). Rem-gated copy: copy from live SoR only when
+rem-legacy is not writing, or after rem-legacy EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Do not mount
 the live SQLite over SMB/NFS and do not dual-write. No live MBP→Mini
 copy is required from this tree. Look-ahead calendar jobs: if rem/writer
 on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe
-before the clock. Do not run the classic MBP SoR 8pm chain while
-rem-legacy is alive; use Mini/copy until rem EXIT 0.
+before the clock. Do not run the MBP 8pm chain while
+rem-legacy is alive. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 ### Daily children use the same copy path
 
@@ -39,7 +41,7 @@ passes `--db` and sets `MAILROOM_DB` on headers (`imap_newmail.py`,
 through `mailroom_copy_db.bind_copy_db()` (same allowlist) — do not use a
 hardcoded SoR path (`t.DB` or `~/MailArchive/mailroom.sqlite`).
 
-**PR-36 / child MAILROOM_DB lesson:** driver copy-only is not enough if a
+**PR-36 / child MAILROOM_DB lesson:** the driver DB path is not enough if a
 child ignores `--db` / `$MAILROOM_DB`. `bind_copy_db()` / `parse_db_cli()`
 must read `sys.argv[1:]` when `argv` is `None`. Treating `None` like `[]`
 drops process `--db` and the child can still open Mini's empty SoR stub.
@@ -68,8 +70,8 @@ is hard-fail (`db_mode=refused`), not fail-open. PR-5 cutover checklist
 is docs only — do not enable cutover or RunAtLoad here
 ([pr5-cutover.md](../docs/pr5-cutover.md)).
 PR-5 prep is **NON-GO** (EXIT ≠ cutover GO; dry verify
-[pr5_preflight.py](pr5_preflight.py)). Mini copy-only until promote
-GO; refuse SoR stub when rem-legacy is present or the writer lock is held.
+[pr5_preflight.py](pr5_preflight.py)). The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
+Refuse the SoR stub when rem-legacy is present or the writer lock is held.
 
 ## Pipeline
 
