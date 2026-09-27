@@ -2,9 +2,10 @@
 """MAILROOM.md §9.5 exclusive writer lock for mailroom.sqlite.
 
 Sole-writer wrapper: exclusive flock on ~/MailArchive/mailroom.write.lock.
-Writes PID, hostname, purpose, and an ISO timestamp. If the lock is
-already held (busy) or held more than 4 hours, refuse before a second
-writer — do not steal.
+Writes PID, hostname, purpose, an ISO timestamp, and a random token.
+The token is passed to the child in the environment and is never
+logged or printed. If the lock is already held (busy) or held more
+than 4 hours, refuse before a second writer — do not steal.
 
 Shipping this guard is not starting rem-legacy. Do not start rem-legacy
 from this wrapper.
@@ -27,6 +28,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -34,6 +36,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import IO
+
+# Namespaced handoff for the child gate. Never log these values.
+LOCK_TOKEN_ENV = "MAILROOM_WRITER_LOCK_TOKEN"
+LOCK_PID_ENV = "MAILROOM_WRITER_LOCK_PID"
+LOCK_PURPOSE_ENV = "MAILROOM_WRITER_LOCK_PURPOSE"
 
 DEFAULT_LOCK = Path.home() / "MailArchive" / "mailroom.write.lock"
 DEFAULT_ACTION_REQUIRED = Path.home() / "MailArchive" / "ACTION_REQUIRED"
@@ -51,6 +58,7 @@ class LockInfo:
     purpose: str
     acquired_at: datetime | None
     raw: str
+    token: str = ""
 
     def age(self, now: datetime) -> timedelta | None:
         if self.acquired_at is None:
@@ -58,6 +66,7 @@ class LockInfo:
         return now - self.acquired_at
 
     def summary(self) -> str:
+        """Holder metadata. Never includes the lock token."""
         ts = self.acquired_at.isoformat() if self.acquired_at else "unknown"
         return "pid=%s host=%s purpose=%s acquired_at=%s" % (
             self.pid if self.pid is not None else "?",
@@ -65,6 +74,12 @@ class LockInfo:
             self.purpose or "?",
             ts,
         )
+
+    def __str__(self) -> str:
+        return self.summary()
+
+    def __repr__(self) -> str:
+        return "LockInfo(%s)" % self.summary()
 
 
 @dataclass
@@ -103,14 +118,23 @@ def parse_acquired_at(raw: str) -> datetime | None:
     return dt
 
 
-def format_lock_payload(purpose: str, now: datetime, pid: int, hostname: str) -> str:
-    return (
+def format_lock_payload(
+    purpose: str,
+    now: datetime,
+    pid: int,
+    hostname: str,
+    token: str | None = None,
+) -> str:
+    payload = (
         "pid=%d\n"
         "hostname=%s\n"
         "purpose=%s\n"
         "acquired_at=%s\n"
         % (pid, hostname, purpose, now.isoformat())
     )
+    if token:
+        payload = payload + "token=" + token + "\n"
+    return payload
 
 
 def parse_lock_payload(raw: str) -> LockInfo:
@@ -131,6 +155,7 @@ def parse_lock_payload(raw: str) -> LockInfo:
         purpose=fields.get("purpose", ""),
         acquired_at=parse_acquired_at(fields.get("acquired_at", "")),
         raw=raw,
+        token=fields.get("token", ""),
     )
 
 
@@ -147,11 +172,15 @@ def action_required_open(path: Path) -> bool:
 
 
 def _write_lock_payload(fh: IO[str], purpose: str, now: datetime) -> LockInfo:
+    token = secrets.token_urlsafe(16)
+    if not token or len(token) < 16:
+        raise WriterLockError("writer lock token generation failed")
     payload = format_lock_payload(
         purpose=purpose,
         now=now,
         pid=os.getpid(),
         hostname=socket.gethostname(),
+        token=token,
     )
     fh.seek(0)
     fh.truncate()
@@ -228,7 +257,14 @@ def run_with_lock(
         now=now,
     )
     try:
-        completed = subprocess.run(cmd, check=False)
+        token = held.info.token
+        if not token:
+            raise WriterLockError("writer lock token missing")
+        env = os.environ.copy()
+        env[LOCK_TOKEN_ENV] = token
+        env[LOCK_PID_ENV] = str(os.getpid())
+        env[LOCK_PURPOSE_ENV] = purpose
+        completed = subprocess.run(cmd, check=False, env=env)
         return int(completed.returncode)
     finally:
         release_writer_lock(held)

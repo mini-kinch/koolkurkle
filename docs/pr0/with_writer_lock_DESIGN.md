@@ -2,7 +2,7 @@
 
 Lock file: `~/MailArchive/mailroom.write.lock`
 
-Mechanism: exclusive `flock` (advisory). Holder writes `PID` / `hostname` / `purpose` / ISO timestamp into the lock file.
+Mechanism: exclusive `flock` (advisory). Holder writes `PID` / `hostname` / `purpose` / ISO timestamp / a random token into the lock file. The token is never logged or printed.
 
 If the lock is held longer than **4 hours**, refuse. **Do not steal.**
 
@@ -61,6 +61,20 @@ with_writer_lock.py --purpose embed_backfill -- \
 ```
 
 Testing overrides: `--lock-file`, `--max-age-hours` (default 4).
+
+## Identity handoff
+
+The wrapper draws `secrets.token_urlsafe(16)` or longer, stores it in the lock file, and passes it to the child with the wrapper pid and purpose:
+
+- `MAILROOM_WRITER_LOCK_TOKEN`
+- `MAILROOM_WRITER_LOCK_PID`
+- `MAILROOM_WRITER_LOCK_PURPOSE`
+
+The child gate probes `mailroom.write.lock` with a new open and `LOCK_EX|LOCK_NB`, then closes that probe fd. It does not keep the probe lock. With no token in the environment, a free lock is allowed and a held lock is a conflict, same as before. With a token, a free lock is a conflict (the wrapper died; do not write unlocked). A held lock is allowed only when the lock-file token matches, the recorded pid is live, that pid is the child or an ancestor, and the purpose is on the writer allowlist (`att0-migrate`, `att0 meta fill`, and the existing writer purposes). Any miss or ancestor-walk error refuses. The walk is at most 32 steps and does not use `/proc` on Darwin.
+
+`is_live_sor` compares realpaths, so a symlink is not judged by its raw path string.
+
+`SOR_FORCE_LIVE_CHECKS=1` turns the live checks on for a path that is not the live SoR. No value turns those checks off on the live path. Do not set the variable in a LaunchAgent.
 
 ## Same-file embed_backfill (HARD DECK)
 

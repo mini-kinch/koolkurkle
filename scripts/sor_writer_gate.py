@@ -11,6 +11,15 @@ mailroom.sqlite) are allowed; they still use the normal lock.
 This gate does not start rem-legacy, does not restart rem, and does
 not require MBP. Prefer ``MAILROOM_DB=copy`` until rem EXIT 0.
 
+``is_live_sor`` compares realpaths (symlinks resolved). Live checks
+are ``rem_process_hits`` and ``writer_lock_held``. When the wrapper
+has passed ``MAILROOM_WRITER_LOCK_TOKEN``, a held lock is allowed only
+if that token matches the lock file, the recorded pid is this process
+or a live ancestor, and the purpose is allowlisted. A present token
+with a free lock is a conflict. No token keeps the previous probe.
+``SOR_FORCE_LIVE_CHECKS=1`` can turn the live checks on for a path
+that is not the live SoR. Nothing turns them off on the live path.
+
   python3 sor_writer_gate.py --db /tmp/mailroom.sqlite
   python3 sor_writer_gate.py --db /tmp/mailroom-copy.sqlite
 """
@@ -18,11 +27,16 @@ not require MBP. Prefer ``MAILROOM_DB=copy`` until rem EXIT 0.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
+import errno
 import fcntl
+import hashlib
+import hmac
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import with_writer_lock as wwl
 
@@ -46,6 +60,78 @@ REM_LOCK_PURPOSE_NEEDLES = (
     "embed_rem",
     "reembed-legacy",
 )
+
+# Lock-file purposes a wrapped child may recognize. Exact match.
+# att0-migrate: A2 wrapper purpose for scripts/attachments/migrate_att0_schema.py.
+# att0 meta fill: A3 job name in scripts/attachments/meta_fill.py.
+# embed_batch: embed_backfill.py and embed_lib.py default.
+# embed_backfill: docs/pr0/with_writer_lock_DESIGN.md example.
+# pr1_schema: migrate_pr1_schema.py default.
+# sidecar_apply: embed_sidecar_apply.py DEFAULT_PURPOSE.
+# post_exit_catchup: docs/post-exit-catchup.md.
+# rem*: REM_LOCK_PURPOSE_NEEDLES.
+WRITER_PURPOSE_ALLOWLIST = frozenset(
+    (
+        "att0-migrate",
+        "att0 meta fill",
+        "embed_batch",
+        "embed_backfill",
+        "pr1_schema",
+        "sidecar_apply",
+        "post_exit_catchup",
+        "rem",
+        "rem-legacy",
+        "embed-rem",
+        "embed_rem",
+        "reembed-legacy",
+    )
+)
+
+FORCE_LIVE_CHECKS_ENV = "SOR_FORCE_LIVE_CHECKS"
+MAX_ANCESTOR_DEPTH = 32
+PROC_PIDTBSDINFO = 3
+_DARWIN_MAXCOMLEN = 16
+
+
+class AncestorWalkError(Exception):
+    """Parent-pid walk failed. ``code`` is a short token, never a secret."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        Exception.__init__(self, code)
+
+
+class ProcBsdInfo(ctypes.Structure):
+    """Darwin ``proc_bsdinfo``. ``pbi_ppid`` is at byte 16; size is 136.
+
+    Field order matches the public ``bsd/sys/proc_info.h`` layout.
+    """
+
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * _DARWIN_MAXCOMLEN),
+        ("pbi_name", ctypes.c_char * (2 * _DARWIN_MAXCOMLEN)),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
 
 LOOKAHEAD_NEEDLE = (
     "if rem/writer on live SoR → refuse calendar SoR writers same cycle; "
@@ -81,8 +167,33 @@ class SorWriterRefuse(RuntimeError):
     """Rem / lock CONFLICT on live SoR. Never includes secrets."""
 
 
+def _resolved_path(path: str | Path) -> Path:
+    raw = Path(path).expanduser()
+    try:
+        return raw.resolve()
+    except (OSError, RuntimeError):
+        return raw
+
+
 def is_live_sor(path: str | Path) -> bool:
-    return Path(path).name == SOR_BASENAME
+    """True when the resolved path's basename is the live SoR.
+
+    Symlinks are resolved first. A link named ``mailroom.sqlite`` that
+    points at a copy is not live. A link with another name that points
+    at ``mailroom.sqlite`` is live.
+    """
+    return _resolved_path(path).name == SOR_BASENAME
+
+
+def live_checks_apply(path: str | Path) -> bool:
+    """Live checks on the real path, or forced on elsewhere.
+
+    ``SOR_FORCE_LIVE_CHECKS=1`` can only turn checks on. A live path
+    stays checked for every other value, including ``0``.
+    """
+    if is_live_sor(path):
+        return True
+    return os.environ.get(FORCE_LIVE_CHECKS_ENV) == "1"
 
 
 def is_copy_db(path: str | Path) -> bool:
@@ -197,16 +308,219 @@ def iter_cmdlines(
         yield from iter_ps_cmdlines()
 
 
+def _libproc_proc_pidinfo(
+    pid: int,
+    flavor: int,
+    arg: int,
+    info: ProcBsdInfo,
+    size: int,
+) -> int:
+    """Darwin ``proc_pidinfo`` syscall. Tests pass a replacement instead."""
+    names = []
+    found = ctypes.util.find_library("System")
+    if found:
+        names.append(found)
+    names.append("/usr/lib/libSystem.B.dylib")
+    lib = None
+    for name in names:
+        try:
+            lib = ctypes.CDLL(name, use_errno=True)
+            break
+        except OSError:
+            lib = None
+    if lib is None:
+        raise AncestorWalkError("syscall")
+    fn = lib.proc_pidinfo
+    fn.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    fn.restype = ctypes.c_int
+    try:
+        written = fn(
+            int(pid),
+            int(flavor),
+            ctypes.c_uint64(int(arg)),
+            ctypes.byref(info),
+            int(size),
+        )
+    except OSError as exc:
+        raise AncestorWalkError("syscall") from exc
+    if int(written) <= 0 and ctypes.get_errno() == errno.ESRCH:
+        raise AncestorWalkError("no-such-process")
+    return int(written)
+
+
+def darwin_ppid(
+    pid: int,
+    *,
+    proc_pidinfo: Callable[..., int] | None = None,
+) -> int:
+    """Parent pid via libproc ``proc_pidinfo``. Fail-closed on any error."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise AncestorWalkError("bad-pid")
+    info = ProcBsdInfo()
+    size = ctypes.sizeof(info)
+    call = proc_pidinfo if proc_pidinfo is not None else _libproc_proc_pidinfo
+    try:
+        written = call(int(pid), PROC_PIDTBSDINFO, 0, info, size)
+    except AncestorWalkError:
+        raise
+    except Exception as exc:
+        raise AncestorWalkError("syscall") from exc
+    if isinstance(written, bool) or not isinstance(written, int):
+        raise AncestorWalkError("syscall")
+    if written <= 0 or written != size:
+        raise AncestorWalkError("syscall")
+    if int(info.pbi_pid) != int(pid):
+        raise AncestorWalkError("pid-mismatch")
+    parent = int(info.pbi_ppid)
+    if parent < 0:
+        raise AncestorWalkError("negative-ppid")
+    return parent
+
+
+def linux_ppid(pid: int) -> int:
+    """Parent pid from ``/proc/<pid>/status``. Fail-closed on a bad read."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise AncestorWalkError("bad-pid")
+    status = Path("/proc") / str(pid) / "status"
+    try:
+        text = status.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise AncestorWalkError("no-such-process") from exc
+    except OSError as exc:
+        raise AncestorWalkError("unreadable") from exc
+    for line in text.splitlines():
+        if line.startswith("PPid:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                parent = int(raw)
+            except ValueError as exc:
+                raise AncestorWalkError("bad-ppid") from exc
+            if parent < 0:
+                raise AncestorWalkError("negative-ppid")
+            return parent
+    raise AncestorWalkError("bad-ppid")
+
+
+def ppid_of(pid: int) -> int:
+    if sys.platform == "darwin":
+        return darwin_ppid(pid)
+    if sys.platform.startswith("linux"):
+        return linux_ppid(pid)
+    raise AncestorWalkError("unsupported")
+
+
+def ancestor_pids(
+    pid: int,
+    *,
+    max_depth: int = MAX_ANCESTOR_DEPTH,
+    ppid_fn: Callable[[int], int] | None = None,
+) -> list[int]:
+    """Parent chain, not including ``pid``. Max depth 32. Fail-closed.
+
+    Stops at pid 0 or after including pid 1. A missing start pid raises
+    ``no-such-process``. Any later error, cycle, or depth overflow raises
+    a different code so callers can refuse.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise AncestorWalkError("bad-pid")
+    if isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth <= 0:
+        raise AncestorWalkError("bad-pid")
+    fn = ppid_fn if ppid_fn is not None else ppid_of
+    ancestors: list[int] = []
+    seen = {pid}
+    current = pid
+    while len(ancestors) < max_depth:
+        try:
+            parent = fn(current)
+        except AncestorWalkError as exc:
+            if exc.code == "no-such-process" and not ancestors:
+                raise
+            if exc.code == "no-such-process":
+                raise AncestorWalkError("walk-error") from exc
+            raise
+        except Exception as exc:
+            raise AncestorWalkError("ppid-failed") from exc
+        if isinstance(parent, bool) or not isinstance(parent, int):
+            raise AncestorWalkError("bad-ppid")
+        if parent < 0:
+            raise AncestorWalkError("negative-ppid")
+        if parent == 0:
+            return ancestors
+        if parent in seen:
+            raise AncestorWalkError("cycle")
+        ancestors.append(parent)
+        if parent == 1:
+            return ancestors
+        seen.add(parent)
+        current = parent
+    raise AncestorWalkError("max-depth")
+
+
+def _env_pid(raw: str | None) -> int | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    if pid <= 0:
+        return None
+    return pid
+
+
+def _excluded_pids(
+    me: int,
+    *,
+    ancestors: Iterable[int] | None,
+) -> set[int]:
+    exclude = set()
+    if isinstance(me, int) and not isinstance(me, bool) and me > 0:
+        exclude.add(me)
+    wrapper = _env_pid(os.environ.get(wwl.LOCK_PID_ENV))
+    if wrapper is not None:
+        exclude.add(wrapper)
+    if ancestors is None:
+        try:
+            chain = ancestor_pids(me)
+        except AncestorWalkError as exc:
+            if exc.code == "no-such-process":
+                chain = []
+            else:
+                raise
+    else:
+        chain = list(ancestors)
+    for pid in chain:
+        if isinstance(pid, bool) or not isinstance(pid, int):
+            raise AncestorWalkError("bad-ppid")
+        if pid > 0:
+            exclude.add(pid)
+    return exclude
+
+
 def rem_process_hits(
     *,
     self_pid: int | None = None,
     cmdlines: Iterable[tuple[int, str]] | None = None,
     proc_dir: Path | None = None,
+    ancestors: Iterable[int] | None = None,
 ) -> list[tuple[int, str]]:
+    """Rem cmdline hits, excluding self, the wrapper pid, and ancestors.
+
+    ``ancestors=None`` walks the parent chain. A walk error other than a
+    missing start pid propagates so the gate can refuse.
+    """
     me = os.getpid() if self_pid is None else self_pid
+    exclude = _excluded_pids(me, ancestors=ancestors)
     hits: list[tuple[int, str]] = []
     for pid, line in iter_cmdlines(proc_dir=proc_dir, cmdlines=cmdlines):
-        if pid == me:
+        if pid in exclude:
             continue
         if is_rem_cmdline(line):
             hits.append((pid, line))
@@ -218,14 +532,16 @@ def lock_purpose_is_rem(purpose: str) -> bool:
     return any(needle == low or needle in low for needle in REM_LOCK_PURPOSE_NEEDLES)
 
 
-def writer_lock_held(
+def _probe_writer_lock(
     path: Path | None = None,
     *,
     held: bool | None = None,
 ) -> tuple[bool, str]:
-    """Probe the exclusive writer lock without stealing or rewriting it.
+    """Today's flock probe. Drops the probe fd. Never keeps that lock.
 
-    Returns (held, detail). ``held=`` injects the probe for tests.
+    ``LOCK_UN`` runs only on the probe fd after this probe acquired it.
+    A ``BlockingIOError`` means someone else holds the lock; that fd is
+    closed without ``LOCK_UN``.
     """
     if held is not None:
         return bool(held), "writer lock held (injected)"
@@ -249,6 +565,95 @@ def writer_lock_held(
     return False, "writer lock free"
 
 
+def _identity_token() -> str | None:
+    raw = os.environ.get(wwl.LOCK_TOKEN_ENV)
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return text
+
+
+def tokens_equal(left: str, right: str) -> bool:
+    """Constant-time token compare. Hashes first so length is not a leak."""
+    try:
+        a = hashlib.sha256(left.encode("utf-8")).digest()
+        b = hashlib.sha256(right.encode("utf-8")).digest()
+    except Exception:
+        return False
+    return hmac.compare_digest(a, b)
+
+
+def pid_is_live(pid: int) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            return True
+        return False
+    return True
+
+
+def _identity_decision(lock: Path, *, child_pid: int | None = None) -> tuple[bool, str]:
+    """Held-lock identity. True only when every check matches.
+
+    Reasons are fixed strings. They never include the token.
+    """
+    token = _identity_token()
+    info = wwl.read_lock_info(lock)
+    if token is None or not tokens_equal(info.token or "", token):
+        return False, "token mismatch"
+    if info.pid is None or not pid_is_live(info.pid):
+        return False, "pid not live"
+    me = os.getpid() if child_pid is None else child_pid
+    if info.pid != me:
+        try:
+            chain = ancestor_pids(me)
+        except AncestorWalkError:
+            return False, "ancestor walk error"
+        if info.pid not in chain:
+            return False, "pid not ancestor"
+    if (info.purpose or "") not in WRITER_PURPOSE_ALLOWLIST:
+        return False, "purpose not allowed"
+    return True, "match"
+
+
+def writer_lock_held(
+    path: Path | None = None,
+    *,
+    held: bool | None = None,
+) -> tuple[bool, str]:
+    """Probe the exclusive writer lock, then apply the identity matrix.
+
+    With no identity token in the environment the return is the probe:
+    ``(held, detail)``, byte-for-byte the previous behavior, including
+    the injected ``held=`` short circuit.
+
+    With a token, the boolean is the gate decision (True means refuse):
+
+    - probe free: refuse (the wrapper is gone; do not write unlocked)
+    - probe held and identity matches: allow
+    - probe held and any miss or walk error: refuse
+    """
+    probed_held, probed_detail = _probe_writer_lock(path, held=held)
+    if _identity_token() is None:
+        return probed_held, probed_detail
+    if not probed_held:
+        return True, "writer lock identity refused: lock not held"
+    lock = Path(path).expanduser() if path is not None else wwl.default_lock_path()
+    matched, why = _identity_decision(lock)
+    if matched:
+        return False, "writer lock held by wrapper"
+    return True, "writer lock identity refused: %s" % why
+
+
 def refuse_if_sor_writer_conflict(
     db: str | Path,
     *,
@@ -261,14 +666,18 @@ def refuse_if_sor_writer_conflict(
     """Refuse live SoR writes when rem or a foreign writer lock is present.
 
     Copy / non-``mailroom.sqlite`` paths are allowed (normal lock still
-    applies at the caller). Fail-closed: no env override.
+    applies at the caller) unless ``SOR_FORCE_LIVE_CHECKS=1``. That flag
+    cannot turn checks off on a live path.
     """
     path = Path(db).expanduser()
-    if not is_live_sor(path):
+    if not live_checks_apply(path):
         return
-    hits = rem_process_hits(
-        self_pid=self_pid, cmdlines=cmdlines, proc_dir=proc_dir
-    )
+    try:
+        hits = rem_process_hits(
+            self_pid=self_pid, cmdlines=cmdlines, proc_dir=proc_dir
+        )
+    except AncestorWalkError:
+        raise SorWriterRefuse(conflict_message("ancestor walk failed")) from None
     if hits:
         pid, _line = hits[0]
         raise SorWriterRefuse(conflict_message("rem process pid=%s" % pid))

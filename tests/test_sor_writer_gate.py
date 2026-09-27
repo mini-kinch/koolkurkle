@@ -312,9 +312,10 @@ class WiredWriterTests(unittest.TestCase):
 
     def test_post_rem_lever_refuses_live_sor_while_rem(self):
         with self.assertRaises(gate.SorWriterRefuse):
+            # Pid 1 is an ancestor and is excluded. This pid is a foreign rem.
             prb.refuse_post_rem_against_live_rem_sor(
                 Path("/tmp/mailroom.sqlite"),
-                cmdlines=((1, "rem-legacy"),),
+                cmdlines=((424242, "rem-legacy"),),
                 lock_held=False,
             )
 
