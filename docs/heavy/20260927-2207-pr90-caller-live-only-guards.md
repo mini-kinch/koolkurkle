@@ -1,6 +1,6 @@
 # PR 90 caller live-only guards
 
-Status: documented only. `scripts/attachments/migrate_att0_schema.py` and `scripts/attachments/meta_fill.py` are unchanged. This note replaces `docs/heavy/20260927-2159-caller-side-sor-basename-guards.md`.
+Status: PR #90 documented the four raw-basename guards and left those scripts unchanged. Option A is implemented in the follow-up stacked on that branch: the four caller predicates call `sor_writer_gate.is_live_sor`. This note is the PR #90 inventory and is not rewritten. Residual, not fixed here: `is_live_sor()` uses the resolved basename, not the inode, so an APFS hard link with a different name to the SoR inode still looks not-live. This note replaces `docs/heavy/20260927-2159-caller-side-sor-basename-guards.md`.
 
 `SOR_BASENAME` is `mailroom.sqlite`.
 
