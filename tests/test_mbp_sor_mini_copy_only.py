@@ -148,7 +148,11 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
             "Mini is the only SoR writer via the daily job only",
             smoke_pair,
         )
-        self.assertIn("the MBP is a non-writer, rollback/read", smoke_pair)
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            smoke_pair,
+        )
+        self.assertNotIn("rollback/read", smoke_pair)
         hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)

@@ -59,7 +59,7 @@ The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, re
 4. **Classify / bills** — lanes (auth, money, people, …) and a local bills table.
 5. **Embed** — local `qwen3-embedding:8b` (store 1024-d). **One writer at a time** per database file.
 
-Body embeddings exist. A rem-legacy backfill on the MBP is filling the older long-body band. While that job holds the live-database lock, do not start a second embed writer on the same file. Attachment / iMessage / Notes embeddings are not shipped.
+Body embeddings exist. A rem-legacy backfill on the MBP filled the older long-body band and held the live-database lock. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Attachment / iMessage / Notes embeddings are not shipped.
 
 ---
 

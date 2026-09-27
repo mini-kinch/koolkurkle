@@ -15,7 +15,7 @@ This refresh is the ATT-0 implementation spec for schema, file-only extract, chu
 
 Heavy 05 hard deck 8 and the stage machine assumed two machines: the MBP held the live SQLite system of record, the Mac mini was copy-only until PR-5, and rem-legacy was the sole writer on basename `mailroom.sqlite` until EXIT 0.
 
-Today one Mac mini is the sole writer of that SQLite system of record. There is no second machine writing the file. Attachment work still must not become a second writer on it. Scope B (below) is how this packet keeps that rule.
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). There is no second machine writing the file. Attachment work still must not become a second writer on it. Scope B (below) is how this packet keeps that rule.
 
 ### 2. Search is FTS-only. There is no embedding service. Ollama is down.
 

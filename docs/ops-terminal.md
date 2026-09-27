@@ -21,7 +21,7 @@ host-kept foreground embed ops contract:
 Remote Shell vs LaunchAgent lifetime (a job started with `&` or `nohup ... &` inside a remote agent Shell dies when that call returns; a LaunchAgent survives): section below.
 Tombstone / never-purge (never physically delete iCloud or server mail;
 local tombstone only): [tombstone.md](tombstone.md).
-Mini SoR (sole writer) vs MBP non-writer (Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; No MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4): section below.
+Mini SoR (sole writer) vs MBP non-writer (The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; No MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4): section below.
 Auth/2FA mail never Junk or Trash (destination hygiene folder is Auth; fail closed for classify/rules): section below.
 CoS HOLD Mac writers (CoS does not run Mac writer/recovery ops; CoS orders Developer, collects status, issues user ARs only; Developer owns Mac process ownership and installs): section below.
 Discuss ≠ authorize (discussion and how questions are not authorization; implement only on do it / approved / implement or standing authorized process; in CoS Desk discussion/troubleshooting, do not act until explicit): section below.
@@ -434,8 +434,7 @@ This gate is docs/tests only. It does not run live Mac writers, does not run liv
 ## Rem-aware SoR writer gate (look-ahead)
 
 Standing rem-aware writer contract: same-sqlite dual-writer HARD DECK
-(never two-wide writers on one `.sqlite`). While rem-legacy is the
-sole writer on live basename `mailroom.sqlite`, classic SoR writers
+(never two-wide writers on one `.sqlite`). rem-legacy may hold the write lock while it runs on live basename `mailroom.sqlite`; classic SoR writers
 CONFLICT. Look-ahead calendar jobs: do not run the MBP 8pm chain while rem-legacy is
 alive; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
