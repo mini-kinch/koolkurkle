@@ -23,8 +23,8 @@ table name on stderr. The tool does not write a count or a hash for
 it, and it does not hash empty input after a failed read.
 
 ``--exclude-table`` (repeatable) adds to the default ``ask_audit`` and
-``drafts`` exclusions. Those two tables are written by ``ask_mail.py``
-serve. ``--exclude-column TABLE.COL`` (repeatable) adds to the default
+``drafts`` exclusions. Those two tables are written during serve.
+``--exclude-column TABLE.COL`` (repeatable) adds to the default
 ``messages.has_attachments``. The JSON records the exclusion set that
 was applied.
 
