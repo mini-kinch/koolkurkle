@@ -82,7 +82,14 @@ class Pr5PrepDocNeedleTests(unittest.TestCase):
         self.assertIn("mailroom.imap.app-password", text)
         self.assertIn("lane=auth", text)
         self.assertIn("One cutover + one rollback", text)
-        self.assertIn("SoR=MBP until CoS says", text)
+        ops_text = " ".join(OPS.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            ops_text,
+        )
+        self.assertIn("PR-5 cutover / RunAtLoad enable stays gated", ops_text)
+        self.assertNotIn("SoR=MBP until CoS says", ops_text)
+        self.assertNotIn("Mini copy-only until promote GO", ops_text)
         self.assertIn("mlx", text)
         self.assertIn("pr5_preflight.py", text)
         self.assertIn("gated on rem-legacy EXIT 0", text)
@@ -109,9 +116,25 @@ class Pr5PrepDocNeedleTests(unittest.TestCase):
             self.assertIn("gate ALLOW", text, msg=path.name)
             self.assertIn("not enable with catch-up", text.lower(), msg=path.name)
             self.assertIn("stale dead-PID lock", text, msg=path.name)
-            self.assertIn("promote GO", text, msg=path.name)
-            self.assertIn("SoR=MBP until CoS says", text, msg=path.name)
             self.assertIn("17223/17223", text, msg=path.name)
+            if path == OPS:
+                self.assertIn(
+                    "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+                    text,
+                    msg=path.name,
+                )
+                self.assertIn(
+                    "PR-5 cutover / RunAtLoad enable stays gated",
+                    text,
+                    msg=path.name,
+                )
+                self.assertNotIn("SoR=MBP until CoS says", text, msg=path.name)
+                self.assertNotIn(
+                    "Mini copy-only until promote GO", text, msg=path.name
+                )
+            else:
+                self.assertIn("promote GO", text, msg=path.name)
+                self.assertIn("SoR=MBP until CoS says", text, msg=path.name)
 
     def test_ops_keeps_standing_do_not_enable_runatload(self):
         raw = OPS.read_text(encoding="utf-8")

@@ -8,8 +8,8 @@ Hard-fail, not fail-open. No silent default to the SoR name. The SoR
 basename is allowed only when explicitly named, and rem-legacy must
 be absent.
 
-Rem-gated copy: Mini copy only when rem-legacy is not writing, or
-after rem-legacy EXIT 0. No SMB/NFS dual-write. No live MBP→Mini
+Rem-gated copy: copy from live SoR only when rem-legacy is not writing, or
+after rem-legacy EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). No SMB/NFS dual-write. No live MBP→Mini
 copy from this helper. The rem-aware SoR writer gate refuses
 mailroom.sqlite (CONFLICT) when rem-legacy or the writer lock is
 held; prefer MAILROOM_DB=copy.

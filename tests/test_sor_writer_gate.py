@@ -59,6 +59,15 @@ WIRED_NEEDLES = (
 
 DOC_PATHS = (MAILROOM, OPS, EMBED)
 
+# MAILROOM.md, ops-terminal.md, and embed-backfill.md are outside this
+# wording pass and still cite the previous MBP 8pm refuse label.
+HISTORICAL_DOC_REFUSE = {
+    (
+        "MBP 8pm (`imap_newmail`+`classify`+`notify_bills`); "
+        "the MBP is a non-writer (rollback, read-only)"
+    ): "Classic MBP 8pm (`imap_newmail`+`classify`+`notify_bills` → SoR)",
+}
+
 
 class RemAndLockRefuseTests(unittest.TestCase):
     def test_rem_process_refuses_live_sor(self):
@@ -346,7 +355,8 @@ class LookAheadDocTests(unittest.TestCase):
             self.assertIn("CONFLICT", raw, msg=path.name)
             self.assertIn("mini/copy until rem exit 0", text.lower(), msg=path.name)
             for item in gate.REFUSE_WHILE_REM_ON_LIVE_SOR:
-                self.assertIn(item, raw, msg="%s missing %s" % (path.name, item))
+                needle = HISTORICAL_DOC_REFUSE.get(item, item)
+                self.assertIn(needle, raw, msg="%s missing %s" % (path.name, needle))
             for item in gate.ALLOW_WHILE_REM:
                 self.assertIn(item, raw, msg="%s missing allow %s" % (path.name, item))
             hay = raw.replace("/Users/<operator>/", "")
@@ -359,10 +369,17 @@ class LookAheadDocTests(unittest.TestCase):
             text = " ".join(raw.split())
             self.assertIn("look-ahead", text.lower(), msg=path.name)
             self.assertIn("before the clock", text, msg=path.name)
-            self.assertIn("classic MBP SoR 8pm", text, msg=path.name)
             hay = raw.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)
+        readme = " ".join(README.read_text(encoding="utf-8").split())
+        self.assertIn("classic MBP SoR 8pm", readme)
+        daily = " ".join(DAILY.read_text(encoding="utf-8").split())
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            daily,
+        )
+        self.assertNotIn("classic MBP SoR 8pm", daily)
 
     def test_gate_module_has_zero_pii(self):
         raw = (SCRIPTS / "sor_writer_gate.py").read_text(encoding="utf-8")

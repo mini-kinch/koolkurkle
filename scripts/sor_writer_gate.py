@@ -53,7 +53,7 @@ LOOKAHEAD_NEEDLE = (
 )
 
 REFUSE_WHILE_REM_ON_LIVE_SOR = (
-    "Classic MBP 8pm (`imap_newmail`+`classify`+`notify_bills` → SoR)",
+    "MBP 8pm (`imap_newmail`+`classify`+`notify_bills`); the MBP is a non-writer (rollback, read-only)",
     "IMAP writers on SoR (`imap_newmail`/`tombstone`/`fetch_bodies*`)",
     "Classify/bills SoR writes",
     "Second `embed_backfill` / shard / merge-apply on same sqlite",

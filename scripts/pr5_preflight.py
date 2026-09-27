@@ -107,7 +107,10 @@ def is_copy_basename(path: str | Path) -> bool:
 
 
 def repo_template_copy_only(plist_path: str | Path) -> str:
-    """Fail-closed: checked-in daily template must stay copy-only."""
+    """Fail-closed: checked-in daily template MAILROOM_DB must be a copy basename.
+
+    The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
+    """
     info = inspect_plist(plist_path)
     raw = info.get("mailroom_db") or ""
     if not raw:
@@ -205,7 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repo-plist",
         default=None,
-        help="Checked-in template to confirm copy-only MAILROOM_DB.",
+        help=(
+            "Checked-in template to confirm MAILROOM_DB is a copy basename. "
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only)."
+        ),
     )
     parser.add_argument(
         "--copy-db",
