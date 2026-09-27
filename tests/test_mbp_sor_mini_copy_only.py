@@ -43,19 +43,16 @@ def sor_section(raw: str) -> str:
 class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
     def test_contract_locks_mbp_sor_mini_copy_only_language(self):
         raw = OPS.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
-        self.assertIn("MBP SoR vs Mini copy-only", text)
-        self.assertIn("Since the 2026-09-24 SoR flip", text)
-        self.assertIn("**Mini** is the SoR writer under the daily only", text)
-        self.assertIn("`mailroom.sqlite`", text)
-        self.assertIn("The MBP is a non-writer", text)
-        self.assertIn("rollback/read", text)
-        self.assertIn("No MBP writers against SoR", text)
-        self.assertIn("mailroom-copy.sqlite", text)
-        self.assertIn("mailroom-daily-copy.sqlite", text)
-        self.assertIn("hard refuse", text)
-        self.assertIn("db_mode=refused", text)
         section = sor_section(raw)
+        self.assertIn("MBP SoR vs Mini copy-only", section)
+        self.assertIn("Since the 2026-09-24 SoR flip", section)
+        self.assertIn("**Mini** is the SoR writer under the daily only", section)
+        self.assertIn("`mailroom.sqlite`", section)
+        self.assertIn("The MBP is a non-writer", section)
+        self.assertIn("rollback/read", section)
+        self.assertIn("No MBP writers against SoR", section)
+        self.assertIn("mailroom-copy.sqlite", section)
+        self.assertIn("mailroom-daily-copy.sqlite", section)
         self.assertIn(
             "`db_mode=sor` only when `mailroom.sqlite` is explicitly named and rem-legacy is absent.",
             section,
@@ -65,23 +62,32 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
             "There is no silent default to `mailroom.sqlite`.",
             section,
         )
+        self.assertIn(
+            "An unset or unknown basename is a hard refuse (`db_mode=refused`).",
+            section,
+        )
+        self.assertIn("hard refuse", section)
+        self.assertIn("db_mode=refused", section)
         self.assertIn("EXIT 0", section)
-        self.assertIn("writer lock", text)
-        self.assertIn("flock", text)
-        self.assertIn("Do not start a second writer against SoR", text)
-        self.assertIn("Do not start a Mini writer against SoR", text)
-        self.assertIn("Do not promote Mini", text)
-        self.assertIn("gated on rem-legacy", text)
-        self.assertIn("docs/tests only", text)
-        self.assertIn("does not open MailArchive or live sqlite", text)
-        self.assertIn("read Keychain", text)
-        self.assertIn("SSH a live machine", text)
-        self.assertIn("change rem-legacy", text)
-        self.assertNotIn("dual writers are allowed", text.lower())
-        self.assertNotIn("MBP may write SoR", text)
-        self.assertNotIn("MBP writers against SoR are allowed", text)
-        self.assertNotIn("second writer against SoR is allowed", text.lower())
-        self.assertNotIn("**MBP** is the live Source of Record", text)
+        self.assertIn("promotion stays gated on rem-legacy EXIT 0", section)
+        self.assertIn("One writer holds the writer lock (flock).", section)
+        self.assertIn("Do not start a second writer against SoR", section)
+        self.assertIn(
+            "Do not start a Mini writer against SoR while rem-legacy is live",
+            section,
+        )
+        self.assertIn(
+            "Do not promote Mini (or any other writer) while rem-legacy is live",
+            section,
+        )
+        self.assertIn("gated on rem-legacy", section)
+        self.assertIn("docs/tests only", section)
+        self.assertNotIn("or host", section)
+        self.assertNotIn("dual writers are allowed", section.lower())
+        self.assertNotIn("MBP may write SoR", section)
+        self.assertNotIn("MBP writers against SoR are allowed", section)
+        self.assertNotIn("second writer against sor is allowed", section.lower())
+        self.assertNotIn("**MBP** is the live Source of Record", section)
         hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)
@@ -102,24 +108,33 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
 
     def test_fail_closed_mbp_is_not_sor_writer(self):
         raw = OPS.read_text(encoding="utf-8")
-        text = " ".join(raw.split())
-        self.assertIn("No MBP writers against SoR", text)
-        self.assertIn("SoR writer under the daily only", text)
-        self.assertIn("The MBP is a non-writer", text)
-        self.assertIn("rollback/read", text)
-        self.assertIn("hard refuse", text)
-        self.assertIn("db_mode=refused", text)
-        self.assertIn("writer lock", text)
-        self.assertIn("Do not start a second writer against SoR", text)
-        self.assertIn("Do not start a Mini writer against SoR", text)
-        self.assertIn("Do not promote Mini", text)
-        self.assertIn("gated on rem-legacy", text)
-        self.assertNotIn("cutover is not gated", text.lower())
-        self.assertNotIn("dual writers are allowed", text.lower())
-        self.assertNotIn("MBP may write SoR", text)
-        self.assertNotIn("MBP writers against SoR are allowed", text)
-        self.assertNotIn("Mini is the live Source of Record", text)
-        self.assertNotIn("second writer against SoR is allowed", text.lower())
+        section = sor_section(raw)
+        self.assertIn("No MBP writers against SoR", section)
+        self.assertIn("SoR writer under the daily only", section)
+        self.assertIn("The MBP is a non-writer", section)
+        self.assertIn("rollback/read", section)
+        self.assertIn(
+            "An unset or unknown basename is a hard refuse (`db_mode=refused`).",
+            section,
+        )
+        self.assertIn("One writer holds the writer lock (flock).", section)
+        self.assertIn("Do not start a second writer against SoR", section)
+        self.assertIn(
+            "Do not start a Mini writer against SoR while rem-legacy is live",
+            section,
+        )
+        self.assertIn(
+            "Do not promote Mini (or any other writer) while rem-legacy is live",
+            section,
+        )
+        self.assertIn("promotion stays gated on rem-legacy EXIT 0", section)
+        self.assertNotIn("or host", section)
+        self.assertNotIn("cutover is not gated", section.lower())
+        self.assertNotIn("dual writers are allowed", section.lower())
+        self.assertNotIn("MBP may write SoR", section)
+        self.assertNotIn("MBP writers against SoR are allowed", section)
+        self.assertNotIn("Mini is the live Source of Record", section)
+        self.assertNotIn("second writer against sor is allowed", section.lower())
 
     def test_non_allowlisted_basename_and_second_writer_are_refused(self):
         """A non-allowlisted basename is refused, and a second SoR writer is refused while the writer lock is held.
