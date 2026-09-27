@@ -23,7 +23,7 @@ Read-only. The helper does not create a `-wal` or a `-shm` beside the database, 
 
 When the `-wal` is missing or empty, the open is `file:...?mode=ro&immutable=1`. That open does not read uncheckpointed frames, and there are none. `immutable=1` is required on SQLite 3.51.0: a plain `mode=ro` open of a WAL database with no `-shm` fails there (`unable to open database file`), because a read-only connection cannot create the shared-memory file.
 
-When the `-wal` is non-empty, `immutable=1` is not used. It would hide committed frames that are only in the `-wal`. The helper hardlinks the main file into a private directory on the same filesystem, copies the `-wal` beside that link, and opens the private path `mode=ro`. The private directory is removed after the read. The fingerprinted path is not opened in place, so it gains no sidecar. If the private directory or the hardlink cannot be created, the process exits 2 and stderr is `refuse: cannot stage source wal`.
+When the `-wal` is non-empty, `immutable=1` is not used. It would hide committed frames that are only in the `-wal`. The helper copies the main file and the `-wal` into a private directory and opens that copy `mode=ro`. The main file is a new inode, not a hardlink. SQLite's unix VFS keeps one shared-memory node per device and inode for the whole process. A hardlink would attach to the source `-shm` when any other connection in the process already has the source open, and that open rewrites the source `-shm`. The private directory is removed after the read. The fingerprinted path is not opened in place, so it gains no sidecar. Before the copy, the source directory must have free space for the main file, the `-wal`, and a 64 MiB margin. If it does not, the process exits 2 and stderr is `refuse: not enough free space`. If the private directory or the copy cannot be created, the process exits 2 and stderr is `refuse: cannot stage source wal`.
 
 `journal_mode` is `wal` when header bytes 18 and 19 are 2. An `immutable=1` connection reports `delete` even for a WAL file, so those bytes are the source of truth. Otherwise `journal_mode` is the `PRAGMA journal_mode` value (`delete` for a rollback file).
 
@@ -40,7 +40,7 @@ When `messages` has a `source` column, the JSON also has count fields: `imap_liv
 
 JSON is one document on stdout. `--out PATH` writes that document to PATH instead and leaves stdout empty. `--out` must not be the database file.
 
-Exit 0 on success. Exit 1 when SQLite cannot read one table: stderr is `ERROR` plus that table name, and stdout has no fingerprint. The tool does not write a count or a hash for that table, and it does not hash empty input after a failed read. Exit 2 when the path is missing, not SQLite, a flag is invalid, or a non-empty `-wal` cannot be staged.
+Exit 0 on success. Exit 1 when SQLite cannot read one table: stderr is `ERROR` plus that table name, and stdout has no fingerprint. The tool does not write a count or a hash for that table, and it does not hash empty input after a failed read. Exit 2 when the path is missing, not SQLite, a flag is invalid, the source directory does not have room to copy a non-empty `-wal` (`refuse: not enough free space`), or that copy cannot be staged (`refuse: cannot stage source wal`).
 
 ---
 
@@ -77,7 +77,7 @@ Without `--logical`, `stat_main` and an already-present `-wal` must match. `att0
 
 ## Backup (`att0_backup.py`)
 
-Copies `src` into a new file at `dest`. The source is opened with the same rule as the fingerprint (`mode=ro` and `immutable=1` when the source `-wal` is missing or empty; a private hardlink and a copied `-wal` opened `mode=ro` when the `-wal` is non-empty). The source gains no sidecar. `sqlite3.Connection.backup` writes a temporary file in the destination directory. That temp copy is sealed with `PRAGMA journal_mode=DELETE` before it is closed, so header bytes 18 and 19 are 1, 1. `PRAGMA quick_check` then opens it `mode=ro` and must return `ok`. A WAL header left in place, with the temp `-shm` removed, fails that open on SQLite 3.51.0. The temp file is fsync'd, then `os.replace` publishes it as `dest`. The next writer re-enables WAL (`scripts/sqlite_pragmas.py`).
+Copies `src` into a new file at `dest`. The source is opened with the same rule as the fingerprint (`mode=ro` and `immutable=1` when the source `-wal` is missing or empty; a private copy of the main file and a copied `-wal` opened `mode=ro` when the `-wal` is non-empty). The staged main file is a new inode, not a hardlink, so the open does not rewrite the source `-shm`. The source gains no sidecar. The source directory must have free space for the main file, the `-wal`, and a 64 MiB margin. `sqlite3.Connection.backup` writes a temporary file in the destination directory. That temp copy is sealed with `PRAGMA journal_mode=DELETE` before it is closed, so header bytes 18 and 19 are 1, 1. `PRAGMA quick_check` then opens it `mode=ro` and must return `ok`. A WAL header left in place, with the temp `-shm` removed, fails that open on SQLite 3.51.0. The temp file is fsync'd, then `os.replace` publishes it as `dest`. The next writer re-enables WAL (`scripts/sqlite_pragmas.py`).
 
 Reading the system of record is allowed. The script does not take the writer lock. The operator decides whether to wrap the run in `with_writer_lock.py`. Before the copy, the script calls `sor_writer_gate.refuse_if_sor_writer_conflict` on the source, the same gate as `scripts/attachments/meta_fill.py`. A source named `mailroom.sqlite` is refused when that gate reports a conflict.
 
@@ -88,6 +88,7 @@ Exit 2 when:
 - `dest` is the same file as `src`
 - the destination directory is missing
 - `src` is missing or not SQLite
+- the source directory does not have room to copy a non-empty `-wal` (`refuse: not enough free space`)
 - a non-empty source `-wal` cannot be staged (`refuse: cannot stage source wal`)
 - the writer gate reports a conflict
 

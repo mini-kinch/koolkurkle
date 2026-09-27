@@ -3,9 +3,12 @@
 
 Opens the source with the same no-sidecar rule as ``att0_fp.py``:
 ``mode=ro`` and ``immutable=1`` when the source ``-wal`` is missing or
-empty, and a private hardlink plus a copied ``-wal`` opened ``mode=ro``
-when the ``-wal`` is non-empty. The source gains no ``-wal`` or
-``-shm``. ``PRAGMA query_only=ON`` is set on that connection.
+empty, and a private copy of the main file plus a copied ``-wal``
+opened ``mode=ro`` when the ``-wal`` is non-empty. The copy is a new
+inode, so it does not attach to a source ``-shm`` already mapped in
+this process. The source gains no ``-wal`` or ``-shm``. ``PRAGMA
+query_only=ON`` is set on that connection. The source directory must
+have free space for that main file, the ``-wal``, and a margin.
 
 Copies with ``sqlite3.Connection.backup`` into a temporary file beside
 the destination. The temp copy is sealed with ``PRAGMA
@@ -27,8 +30,9 @@ conflict.
 Refuses (exit 2) when the destination exists, the destination basename
 is ``mailroom.sqlite``, the destination is the same file as the source,
 the destination directory is missing, the source is missing or not
-SQLite, or a non-empty source ``-wal`` cannot be staged. Never
-overwrites. Prints basenames only.
+SQLite, the source directory lacks room to copy a non-empty ``-wal``
+(``refuse: not enough free space``), or that copy cannot be staged.
+Never overwrites. Prints basenames only.
 """
 
 from __future__ import annotations

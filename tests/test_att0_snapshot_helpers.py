@@ -138,13 +138,16 @@ def _path_from_uri(text: str) -> Path | None:
 
 
 @contextmanager
-def _sqlite351_ro_guard(seen=None):
+def _sqlite351_ro_guard(seen=None, staged_inodes=None):
     """Fail a plain mode=ro open of a WAL file that has no -wal and no -shm.
 
     SQLite 3.51.0 (Apple /usr/bin/python3) returns ``unable to open database
     file`` for that open: a read-only connection cannot create ``-shm``.
     ``immutable=1`` is allowed. A private stage is allowed only after its
     ``-wal`` has been copied, which is the open that can read those frames.
+
+    ``staged_inodes`` records ``(st_dev, st_ino)`` of each ``db.sqlite``
+    the guard sees, so a test can prove the stage is not the source inode.
     """
     real = sqlite3.connect
 
@@ -152,6 +155,11 @@ def _sqlite351_ro_guard(seen=None):
         text = str(database)
         if seen is not None and text.startswith("file:"):
             seen.append(text)
+        if staged_inodes is not None and text.startswith("file:"):
+            opened = _path_from_uri(text)
+            if opened is not None and opened.name == "db.sqlite" and opened.is_file():
+                info = opened.stat()
+                staged_inodes.append((info.st_dev, info.st_ino))
         if (
             text.startswith("file:")
             and "mode=ro" in text
@@ -562,6 +570,82 @@ class FingerprintTests(_DbCase):
         )
         self.assertFalse(any("immutable=1" in item for item in seen))
 
+    def test_same_process_holder_does_not_change_source_family(self):
+        """A connection that already has the source open must not share -shm.
+
+        Python 3.9 leaves the writer open (it has no
+        SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE). The same join happens whenever
+        any other connection in this process has the source open. The
+        source main, -wal, and -shm bytes must stay identical, and the
+        wal-only row must still be visible.
+        """
+        path = self.root / "wal.sqlite"
+        setup = _open_uncheckpointed(path)
+        if setup is not None:
+            self.addCleanup(setup.close)
+        holder = sqlite3.connect(str(path))
+        self.addCleanup(holder.close)
+        before = _family_hashes(path)
+        names_before = sorted(item.name for item in path.parent.iterdir())
+        seen: list[str] = []
+        staged_inodes: list[tuple[int, int]] = []
+        with _sqlite351_ro_guard(seen, staged_inodes):
+            doc = fp.fingerprint(path)
+        self.assertEqual(doc["journal_mode"], "wal")
+        self.assertEqual(doc["tables"]["bills"]["count"], 2)
+        imm = sqlite3.connect(fp._immutable_uri(path), uri=True)
+        try:
+            visible = imm.execute("SELECT amount FROM bills").fetchall()
+        finally:
+            imm.close()
+        self.assertEqual(visible, [(1,)])
+        self.assertEqual(_family_hashes(path), before)
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), names_before)
+        self.assertFalse(
+            any(name.startswith(".att0-fp-") for name in os.listdir(path.parent))
+        )
+        self.assertFalse(
+            any(
+                _path_from_uri(item) is not None
+                and _path_from_uri(item).resolve() == path.resolve()
+                for item in seen
+            )
+        )
+        self.assertTrue(staged_inodes)
+        self.assertNotEqual(staged_inodes[0], (path.stat().st_dev, path.stat().st_ino))
+
+    def test_stage_space_is_main_plus_wal_plus_margin(self):
+        path = self.root / "wal.sqlite"
+        held = _open_uncheckpointed(path)
+        if held is not None:
+            self.addCleanup(held.close)
+        before = _family_hashes(path)
+        need = (
+            path.stat().st_size
+            + Path(str(path) + "-wal").stat().st_size
+            + fp._STAGE_FREE_MARGIN
+        )
+        short = mock.Mock(free=need - 1)
+        with mock.patch("attachments.att0_fp.shutil.disk_usage", return_value=short):
+            with self.assertRaises(fp.FpRefuse) as ctx:
+                fp.fingerprint(path)
+            code, out, err = _run(fp.main, [str(path)])
+        self.assertEqual(str(ctx.exception), "refuse: not enough free space")
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("not enough free space", err)
+        self.assertNotIn(DIR_TOKEN, err)
+        self.assertEqual(_family_hashes(path), before)
+        self.assertFalse(
+            any(name.startswith(".att0-fp-") for name in os.listdir(path.parent))
+        )
+        exact = mock.Mock(free=need)
+        with mock.patch("attachments.att0_fp.shutil.disk_usage", return_value=exact):
+            doc = fp.fingerprint(path)
+        self.assertEqual(doc["tables"]["bills"]["count"], 2)
+        self.assertEqual(_family_hashes(path), before)
+
     def test_nonempty_wal_stage_failure_exits_2(self):
         path = self.root / "wal.sqlite"
         held = _open_uncheckpointed(path)
@@ -569,7 +653,9 @@ class FingerprintTests(_DbCase):
             self.addCleanup(held.close)
         before = _family_hashes(path)
         names_before = sorted(item.name for item in path.parent.iterdir())
-        with mock.patch("attachments.att0_fp.os.link", side_effect=OSError("injected")):
+        with mock.patch(
+            "attachments.att0_fp._copy_bytes", side_effect=OSError("injected")
+        ):
             with self.assertRaises(fp.FpRefuse) as ctx:
                 fp.fingerprint(path)
             code, out, err = _run(fp.main, [str(path)])
@@ -993,6 +1079,81 @@ class BackupTests(_DbCase):
             check.close()
         self.assertEqual(rows, [(1,), (2,)])
 
+    def test_same_process_holder_does_not_change_source_family(self):
+        """A connection that already has the source open must not share -shm."""
+        src = self.root / "wal-src.sqlite"
+        setup = _open_uncheckpointed(src)
+        if setup is not None:
+            self.addCleanup(setup.close)
+        holder = sqlite3.connect(str(src))
+        self.addCleanup(holder.close)
+        before = _family_hashes(src)
+        names_before = sorted(item.name for item in src.parent.iterdir())
+        dest = self.root / "wal-copy.sqlite"
+        seen: list[str] = []
+        staged_inodes: list[tuple[int, int]] = []
+        with _sqlite351_ro_guard(seen, staged_inodes):
+            line = backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+        self.assertIn("quick_check=ok", line)
+        self.assertIn("journal_mode=delete", line)
+        self.assertEqual(_format_versions(dest), (1, 1))
+        self.assertEqual(_family_hashes(src), before)
+        self.assertEqual(
+            sorted(
+                item.name
+                for item in src.parent.iterdir()
+                if item.name != dest.name
+            ),
+            names_before,
+        )
+        self.assertFalse(
+            any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
+        )
+        self.assertFalse(
+            any(
+                _path_from_uri(item) is not None
+                and _path_from_uri(item).resolve() == src.resolve()
+                for item in seen
+            )
+        )
+        self.assertTrue(staged_inodes)
+        self.assertNotEqual(staged_inodes[0], (src.stat().st_dev, src.stat().st_ino))
+        check = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = check.execute("SELECT amount FROM bills ORDER BY id").fetchall()
+            self.assertEqual(check.execute("PRAGMA quick_check").fetchone()[0], "ok")
+        finally:
+            check.close()
+        self.assertEqual(rows, [(1,), (2,)])
+
+    def test_stage_space_refusal_leaves_no_dest(self):
+        src = self.root / "wal-src.sqlite"
+        held = _open_uncheckpointed(src)
+        if held is not None:
+            self.addCleanup(held.close)
+        before = _family_hashes(src)
+        dest = self.root / "wal-copy.sqlite"
+        need = (
+            src.stat().st_size
+            + Path(str(src) + "-wal").stat().st_size
+            + fp._STAGE_FREE_MARGIN
+        )
+        short = mock.Mock(free=need - 1)
+        with mock.patch("attachments.att0_fp.shutil.disk_usage", return_value=short):
+            with self.assertRaises(backup.BackupRefuse) as ctx:
+                backup.backup_database(src, dest, cmdlines=[], lock_held=False)
+            code, _out, err = _run(backup.main, [str(src), str(dest)])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(str(ctx.exception), "refuse: not enough free space")
+        self.assertEqual(code, 2)
+        self.assertIn("not enough free space", err)
+        self.assertNotIn(DIR_TOKEN, err)
+        self.assertFalse(dest.exists())
+        self.assertEqual(_family_hashes(src), before)
+        self.assertFalse(
+            any(name.startswith(".att0-backup-") for name in os.listdir(self.root))
+        )
+
     def test_wal_stage_failure_exits_2_and_leaves_no_dest(self):
         src = self.root / "wal-src.sqlite"
         held = _open_uncheckpointed(src)
@@ -1000,7 +1161,9 @@ class BackupTests(_DbCase):
             self.addCleanup(held.close)
         before = _family_hashes(src)
         dest = self.root / "wal-copy.sqlite"
-        with mock.patch("attachments.att0_fp.os.link", side_effect=OSError("injected")):
+        with mock.patch(
+            "attachments.att0_fp._copy_bytes", side_effect=OSError("injected")
+        ):
             with self.assertRaises(backup.BackupRefuse) as ctx:
                 backup.backup_database(src, dest, cmdlines=[], lock_held=False)
         self.assertEqual(ctx.exception.code, 2)
@@ -1150,6 +1313,8 @@ class HelperContractTests(unittest.TestCase):
             "journal_mode=DELETE",
             "sqlite_pragmas.py",
             "cannot stage source wal",
+            "not enough free space",
+            "not a hardlink",
             "quick_check",
             "skipped_virtual_tables",
             "pipefail",

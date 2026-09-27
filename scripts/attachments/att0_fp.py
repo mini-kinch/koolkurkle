@@ -13,12 +13,18 @@ a WAL database with no ``-shm`` fails there, because a read-only
 connection cannot create the shared-memory file.
 
 A non-empty ``-wal`` is never opened with ``immutable=1`` (that would
-hide committed frames). The main file is hardlinked into a private
-directory on the same filesystem, the ``-wal`` is copied beside that
-link, and the private path is opened ``mode=ro``. The private directory
-is removed after the read. If it cannot be created, the process exits
-2 with ``refuse: cannot stage source wal``. The fingerprinted path is
-not opened in place.
+hide committed frames). The main file and the ``-wal`` are copied into
+a private directory, and that copy is opened ``mode=ro``. The main file
+is a new inode, not a hardlink. SQLite's unix VFS keeps one
+``unixInodeInfo``, and the WAL ``-shm`` node on it, per device and
+inode for the whole process. A hardlink would join a connection that
+already has the source open and rewrite the source ``-shm``. The
+private directory is removed after the read. The source directory must
+have free space for the main file, the ``-wal``, and a margin. If it
+does not, the process exits 2 with ``refuse: not enough free space``.
+If the copy cannot be created, the process exits 2 with ``refuse:
+cannot stage source wal``. The fingerprinted path is not opened in
+place.
 
 Every ordinary table is reported with a row count and a sha256 of its
 quoted rows. The list is ``sqlite_master`` rows with ``type='table'``,
@@ -115,6 +121,33 @@ def _copy_bytes(src: Path, dest: Path) -> None:
         shutil.copyfileobj(inp, out, length=1024 * 1024)
 
 
+# The private stage is a byte copy of the main file and the ``-wal``.
+# SQLite then creates a ``-shm`` beside that copy. The margin covers
+# that file and filesystem overhead. A hardlink would not write the
+# main-file bytes; this copy does.
+_STAGE_FREE_MARGIN = 64 * 1024 * 1024
+
+
+def _stage_space_needed(path: Path) -> int:
+    """Bytes to stage a non-empty ``-wal``: main, wal, and margin."""
+    return (
+        path.stat().st_size
+        + _wal_path(path).stat().st_size
+        + _STAGE_FREE_MARGIN
+    )
+
+
+def _require_stage_space(path: Path) -> None:
+    """Refuse when the source directory cannot hold the private copy."""
+    try:
+        need = _stage_space_needed(path)
+        free = shutil.disk_usage(path.parent).free
+    except OSError:
+        raise FpRefuse("refuse: cannot stage source wal", code=2) from None
+    if free < need:
+        raise FpRefuse("refuse: not enough free space", code=2)
+
+
 def _remove_private(private: Path | None) -> None:
     if private is not None:
         shutil.rmtree(str(private), ignore_errors=True)
@@ -148,9 +181,14 @@ def connect_without_sidecars(
     """Open ``path`` for reading without creating sidecars beside it.
 
     Missing or empty ``-wal``: ``mode=ro`` and ``immutable=1``. Non-empty
-    ``-wal``: hardlink the main file into a private directory on the same
-    filesystem, copy the ``-wal`` beside that link, and open the private
-    path ``mode=ro``. ``immutable=1`` is never used in that case.
+    ``-wal``: copy the main file and the ``-wal`` into a private
+    directory and open that copy ``mode=ro``. The main file is not a
+    hardlink. SQLite's unix VFS keys ``unixInodeInfo`` and its
+    ``pShmNode`` by device and inode inside this process, so a hardlink
+    would read and write the source ``-shm`` whenever another connection
+    here already has the source open. ``immutable=1`` is never used for
+    a non-empty ``-wal``. The source directory must have room for the
+    main file, the ``-wal``, and :data:`_STAGE_FREE_MARGIN`.
 
     Returns ``(connection, private_dir)``. ``private_dir`` is None when
     no stage was needed. The caller must :func:`release_readonly`.
@@ -174,9 +212,10 @@ def connect_without_sidecars(
     private: Path | None = None
     conn: sqlite3.Connection | None = None
     try:
+        _require_stage_space(path)
         private = Path(tempfile.mkdtemp(prefix=temp_prefix, dir=str(path.parent)))
         staged = private / "db.sqlite"
-        os.link(str(path), str(staged))
+        _copy_bytes(path, staged)
         _copy_bytes(_wal_path(path), Path(str(staged) + "-wal"))
         conn = sqlite3.connect(_ro_uri(staged), uri=True, isolation_level=None)
         _apply_query_only(conn, label)
