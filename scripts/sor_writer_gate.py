@@ -14,9 +14,10 @@ not require MBP. Prefer ``MAILROOM_DB=copy`` until rem EXIT 0.
 ``is_live_sor`` compares realpaths (symlinks resolved). Live checks
 are ``rem_process_hits`` and ``writer_lock_held``. When the wrapper
 has passed ``MAILROOM_WRITER_LOCK_TOKEN``, a held lock is allowed only
-if that token matches the lock file, the recorded pid is this process
-or a live ancestor, and the purpose is allowlisted. A present token
-with a free lock is a conflict. No token keeps the previous probe.
+if that token matches the lock file's ``writer_token`` field, the
+recorded pid is this process or a live ancestor, and the purpose is
+allowlisted. A present token with a free lock is a conflict. No token
+keeps the previous probe.
 ``SOR_FORCE_LIVE_CHECKS=1`` can turn the live checks on for a path
 that is not the live SoR. Nothing turns them off on the live path.
 
@@ -608,7 +609,7 @@ def _identity_decision(lock: Path, *, child_pid: int | None = None) -> tuple[boo
     """
     token = _identity_token()
     info = wwl.read_lock_info(lock)
-    if token is None or not tokens_equal(info.token or "", token):
+    if token is None or not tokens_equal(info.writer_token or "", token):
         return False, "token mismatch"
     if info.pid is None or not pid_is_live(info.pid):
         return False, "pid not live"

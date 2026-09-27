@@ -2,7 +2,7 @@
 """MAILROOM.md §9.5 exclusive writer lock for mailroom.sqlite.
 
 Sole-writer wrapper: exclusive flock on ~/MailArchive/mailroom.write.lock.
-Writes PID, hostname, purpose, an ISO timestamp, and a random token.
+Writes PID, hostname, purpose, an ISO timestamp, and writer_token.
 The token is passed to the child in the environment and is never
 logged or printed. If the lock is already held (busy) or held more
 than 4 hours, refuse before a second writer — do not steal.
@@ -41,6 +41,8 @@ from typing import IO
 LOCK_TOKEN_ENV = "MAILROOM_WRITER_LOCK_TOKEN"
 LOCK_PID_ENV = "MAILROOM_WRITER_LOCK_PID"
 LOCK_PURPOSE_ENV = "MAILROOM_WRITER_LOCK_PURPOSE"
+# Field inside the lock file. The env names above stay unchanged.
+LOCK_TOKEN_FIELD = "writer_token"
 
 DEFAULT_LOCK = Path.home() / "MailArchive" / "mailroom.write.lock"
 DEFAULT_ACTION_REQUIRED = Path.home() / "MailArchive" / "ACTION_REQUIRED"
@@ -58,7 +60,7 @@ class LockInfo:
     purpose: str
     acquired_at: datetime | None
     raw: str
-    token: str = ""
+    writer_token: str = ""
 
     def age(self, now: datetime) -> timedelta | None:
         if self.acquired_at is None:
@@ -133,7 +135,7 @@ def format_lock_payload(
         % (pid, hostname, purpose, now.isoformat())
     )
     if token:
-        payload = payload + "token=" + token + "\n"
+        payload = payload + LOCK_TOKEN_FIELD + "=" + token + "\n"
     return payload
 
 
@@ -155,7 +157,7 @@ def parse_lock_payload(raw: str) -> LockInfo:
         purpose=fields.get("purpose", ""),
         acquired_at=parse_acquired_at(fields.get("acquired_at", "")),
         raw=raw,
-        token=fields.get("token", ""),
+        writer_token=fields.get(LOCK_TOKEN_FIELD, ""),
     )
 
 
@@ -257,7 +259,7 @@ def run_with_lock(
         now=now,
     )
     try:
-        token = held.info.token
+        token = held.info.writer_token
         if not token:
             raise WriterLockError("writer lock token missing")
         env = os.environ.copy()

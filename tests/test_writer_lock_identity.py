@@ -97,6 +97,21 @@ def _scrub(text, secret):
     return text.replace(secret, "<redacted>")
 
 
+def _replace_field(raw, key, value):
+    prefix = key + "="
+    lines = []
+    found = False
+    for line in raw.splitlines():
+        if line.startswith(prefix):
+            lines.append(prefix + value)
+            found = True
+        else:
+            lines.append(line)
+    if not found:
+        lines.append(prefix + value)
+    return "\n".join(lines) + "\n"
+
+
 class _Capture(logging.Handler):
     def __init__(self):
         logging.Handler.__init__(self)
@@ -175,7 +190,7 @@ class MatrixTests(IdentityCase):
             db = Path(tmp) / "mailroom.sqlite"
             gate.refuse_if_sor_writer_conflict(db, cmdlines=(), lock_path=lock)
             held = wwl.acquire_writer_lock(lock, "rem-legacy")
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             try:
                 out = io.StringIO()
                 err = io.StringIO()
@@ -210,7 +225,7 @@ class MatrixTests(IdentityCase):
             db = Path(tmp) / "rehearsal.sqlite"
             db.write_text("")
             held = wwl.acquire_writer_lock(lock, "att0-migrate")
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             if not token:
                 self.fail("lock file has no token")
             forged = secrets.token_urlsafe(16)
@@ -269,7 +284,7 @@ class MatrixTests(IdentityCase):
             lock = Path(tmp) / "mailroom.write.lock"
             db = Path(tmp) / "rehearsal.sqlite"
             held = wwl.acquire_writer_lock(lock, "att0-migrate")
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             dead = self._dead_pid()
             try:
                 lock.write_text(
@@ -299,7 +314,7 @@ class MatrixTests(IdentityCase):
             lock = Path(tmp) / "mailroom.write.lock"
             db = Path(tmp) / "rehearsal.sqlite"
             held = wwl.acquire_writer_lock(lock, "att0 meta fill")
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             try:
                 os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
                 os.environ[wwl.LOCK_TOKEN_ENV] = token
@@ -323,7 +338,7 @@ class MatrixTests(IdentityCase):
             lock = Path(tmp) / "mailroom.write.lock"
             db = Path(tmp) / "rehearsal.sqlite"
             held = wwl.acquire_writer_lock(lock, "not-a-writer")
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             try:
                 os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
                 os.environ[wwl.LOCK_TOKEN_ENV] = token
@@ -338,10 +353,10 @@ class MatrixTests(IdentityCase):
             lock = Path(tmp) / "mailroom.write.lock"
             held = wwl.acquire_writer_lock(lock, "att0-migrate")
             info = wwl.read_lock_info(lock)
-            token = info.token
+            token = info.writer_token
             try:
-                if "token=" not in info.raw:
-                    self.fail("lock file is missing the token field")
+                if "writer_token=" not in info.raw:
+                    self.fail("lock file is missing the writer_token field")
                 _assert_secret_absent(
                     self, token, info.summary(), str(info), repr(info)
                 )
@@ -355,6 +370,197 @@ class MatrixTests(IdentityCase):
                 _assert_secret_absent(self, token, message, *self._secret_blobs())
             finally:
                 wwl.release_writer_lock(held)
+
+    def test_lock_describers_never_include_writer_token(self):
+        known = "Wt9kQ-known-lock-secret-7f3a"
+        seen = []
+
+        def check(label, *blobs):
+            for blob in blobs:
+                if blob and known in blob:
+                    self.fail("writer token appeared in %s" % label)
+            seen.append(label)
+
+        def expect_reason(label, detail, phrase):
+            check(label, detail)
+            if phrase not in detail:
+                self.fail("%s missing %s (%s)" % (label, phrase, _scrub(detail, known)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / "mailroom.write.lock"
+            db = root / "rehearsal.sqlite"
+            db.write_text("")
+            action = root / "ACTION_REQUIRED"
+            held = wwl.acquire_writer_lock(lock, "att0-migrate")
+            sleeper = None
+            try:
+                payload = wwl.format_lock_payload(
+                    "att0-migrate",
+                    wwl.utcnow(),
+                    os.getpid(),
+                    "test-host",
+                    token=known,
+                )
+                keys = [
+                    line.split("=", 1)[0]
+                    for line in payload.splitlines()
+                    if "=" in line
+                ]
+                if "writer_token" not in keys or "token" in keys:
+                    self.fail("lock file field is not writer_token")
+                if ("writer_token=" + known) not in payload:
+                    self.fail("lock file is missing the writer_token field")
+                lock.write_text(payload, encoding="utf-8")
+                info = wwl.read_lock_info(lock)
+                if info.writer_token != known:
+                    self.fail("parsed writer_token did not match the lock file")
+                if "purpose=att0-migrate" not in info.summary():
+                    self.fail("summary omitted the holder purpose")
+                check("summary", info.summary(), str(info), repr(info))
+
+                try:
+                    wwl.acquire_writer_lock(lock, "second")
+                except wwl.WriterLockError as exc:
+                    expect_reason("busy lock", str(exc), "writer lock held")
+                else:
+                    self.fail("second holder acquired the lock")
+
+                lock.write_text(
+                    _replace_field(payload, "acquired_at", "2020-01-01T00:00:00+00:00"),
+                    encoding="utf-8",
+                )
+                try:
+                    wwl.acquire_writer_lock(lock, "second")
+                except wwl.WriterLockError as exc:
+                    expect_reason("stale lock", str(exc), "no steal")
+                else:
+                    self.fail("stale holder was stolen")
+
+                lock.write_text(payload, encoding="utf-8")
+                probed_held, probed_detail = gate._probe_writer_lock(lock)
+                if not probed_held:
+                    self.fail("probe did not see the held lock")
+                expect_reason("probe", probed_detail, "purpose=att0-migrate")
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("writer_lock_held probe", detail, "purpose=att0-migrate")
+                _held, detail = gate.writer_lock_held(lock, held=True)
+                expect_reason("injected held", detail, "writer lock held (injected)")
+                _held, detail = gate.writer_lock_held(lock, held=False)
+                expect_reason("injected free", detail, "writer lock held (injected)")
+
+                os.environ[wwl.LOCK_TOKEN_ENV] = known + "-other"
+                os.environ[wwl.LOCK_PID_ENV] = str(os.getpid())
+                os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("token mismatch", detail, "token mismatch")
+                os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
+                expect_reason(
+                    "token mismatch refuse",
+                    self._expect_refuse(db, lock),
+                    "token mismatch",
+                )
+
+                os.environ[wwl.LOCK_TOKEN_ENV] = known
+                lock.write_text(
+                    _replace_field(payload, "pid", str(self._dead_pid())),
+                    encoding="utf-8",
+                )
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("pid not live", detail, "pid not live")
+
+                lock.write_text(
+                    _replace_field(payload, "purpose", "not-a-writer"),
+                    encoding="utf-8",
+                )
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("purpose not allowed", detail, "purpose not allowed")
+
+                sleeper = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                lock.write_text(
+                    _replace_field(payload, "pid", str(sleeper.pid)),
+                    encoding="utf-8",
+                )
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("pid not ancestor", detail, "pid not ancestor")
+                with patch(
+                    "sor_writer_gate.ancestor_pids",
+                    side_effect=gate.AncestorWalkError("unreadable"),
+                ):
+                    _held, detail = gate.writer_lock_held(lock)
+                expect_reason("ancestor walk error", detail, "ancestor walk error")
+
+                lock.write_text(payload, encoding="utf-8")
+                _held, detail = gate.writer_lock_held(lock)
+                expect_reason("identity match", detail, "writer lock held by wrapper")
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    try:
+                        gate.refuse_if_sor_writer_conflict(
+                            db, cmdlines=(), lock_path=lock
+                        )
+                    except gate.SorWriterRefuse as exc:
+                        text = str(exc)
+                        check("identity allow", text)
+                        self.fail("matching identity was refused")
+                check("identity allow", out.getvalue(), err.getvalue())
+
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = gate.main(["--db", str(db), "--lock-file", str(lock)])
+                check("gate cli allow", out.getvalue(), err.getvalue())
+                if rc != 0:
+                    self.fail("gate cli refused a matching writer")
+
+                os.environ[wwl.LOCK_TOKEN_ENV] = known + "-other"
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = gate.main(["--db", str(db), "--lock-file", str(lock)])
+                check("gate cli refuse", out.getvalue(), err.getvalue())
+                if rc != gate.CONFLICT_EXIT:
+                    self.fail("gate cli allowed a mismatched token")
+
+                _held, detail = gate.writer_lock_held(lock, held=False)
+                expect_reason("lock not held", detail, "lock not held")
+
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = wwl.main(
+                        [
+                            "--purpose",
+                            "second",
+                            "--lock-file",
+                            str(lock),
+                            "--action-required-file",
+                            str(action),
+                            "--",
+                            sys.executable,
+                            "-c",
+                            "pass",
+                        ]
+                    )
+                check("wrapper cli", out.getvalue(), err.getvalue())
+                if rc != 2:
+                    self.fail("busy wrapper cli did not refuse")
+                check("logs", *self._secret_blobs())
+            finally:
+                if sleeper is not None:
+                    try:
+                        sleeper.kill()
+                    except OSError:
+                        pass
+                    sleeper.wait()
+                wwl.release_writer_lock(held)
+        if len(seen) < 12:
+            self.fail("describer coverage was incomplete")
 
     def _expect_refuse(self, db, lock):
         out = io.StringIO()
@@ -432,13 +638,13 @@ class WrapperProcessTests(IdentityCase):
                 while not paths["ready"].exists():
                     if proc.poll() is not None:
                         out, err = proc.communicate()
-                        token = wwl.read_lock_info(paths["lock"]).token
+                        token = wwl.read_lock_info(paths["lock"]).writer_token
                         _assert_secret_absent(self, token, out, err, paths["result"].read_text() if paths["result"].exists() else "")
                         self.fail("wrapper child exited before the gate allowed it")
                     if time.time() > deadline:
                         self.fail("wrapper child did not become ready")
                     time.sleep(0.05)
-                token = wwl.read_lock_info(paths["lock"]).token
+                token = wwl.read_lock_info(paths["lock"]).writer_token
                 if not token:
                     self.fail("wrapper lock file has no token")
                 self.assertIsNone(os.environ.get(wwl.LOCK_TOKEN_ENV))
@@ -452,7 +658,7 @@ class WrapperProcessTests(IdentityCase):
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         leftover_out, leftover_err = proc.communicate()
-                    token = token or wwl.read_lock_info(paths["lock"]).token
+                    token = token or wwl.read_lock_info(paths["lock"]).writer_token
                     _assert_secret_absent(self, token, leftover_out, leftover_err)
             result = paths["result"].read_text() if paths["result"].exists() else ""
             _assert_secret_absent(self, token, out, err, result, *self._secret_blobs())
@@ -482,7 +688,7 @@ class WrapperProcessTests(IdentityCase):
                     if time.time() > deadline:
                         self.fail("holder did not become ready")
                     time.sleep(0.05)
-                token = wwl.read_lock_info(paths["lock"]).token
+                token = wwl.read_lock_info(paths["lock"]).writer_token
                 if not token:
                     self.fail("holder lock file has no token")
                 sibling_env = self._wrapper_env(paths)
@@ -852,7 +1058,7 @@ class TokenOutputTests(IdentityCase):
                 env=env,
                 check=False,
             )
-            token = wwl.read_lock_info(lock).token
+            token = wwl.read_lock_info(lock).writer_token
             if not token:
                 self.fail("cli lock file has no token")
             _assert_secret_absent(
