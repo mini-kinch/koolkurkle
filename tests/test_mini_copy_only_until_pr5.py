@@ -55,7 +55,7 @@ class MiniCopyOnlyUntilPr5Tests(unittest.TestCase):
         self.assertTrue(data["RunAtLoad"])
         raw = PLIST.read_text(encoding="utf-8")
         self.assertIn("Copy-only until SoR cutover (PR-5)", raw)
-        self.assertIn("mailroom.imap.app-password", raw)
+        self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", raw)
 
     def test_ask_mail_mini_recipes_set_copy_db(self):
         for path in (ASK, README, DAILY, MAILROOM):

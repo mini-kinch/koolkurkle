@@ -168,9 +168,9 @@ the venv once:
 
 Service **name** is pinned: `mailroom.imap.app-password`.
 
-The wrapper does not read `MAILROOM_KEYCHAIN_ITEM`. The LaunchAgent plist
-still sets `MAILROOM_KEYCHAIN_ITEM` to that same pinned name; the wrapper
-ignores it. The wrapper calls
+The wrapper does not read `MAILROOM_KEYCHAIN_ITEM`. The daily LaunchAgent
+plist does not set `MAILROOM_KEYCHAIN_ITEM`; the runner pins the Keychain
+item itself. The wrapper calls
 `/usr/bin/security find-generic-password -s … -w` and exports
 `IMAP_APP_PASSWORD` for child IMAP scripts only after that read. An
 inherited `IMAP_APP_PASSWORD` is unset before the lookup, so a preset
@@ -318,7 +318,7 @@ Plist:
 - Label `com.mailroom.daily` (single existing driver)
 - `MAILROOM_DB=__HOME__/MailArchive/mailroom-copy.sqlite` (or
   `mailroom-daily-copy.sqlite` when rem embed still holds the copy)
-- `MAILROOM_KEYCHAIN_ITEM=mailroom.imap.app-password` (plist still sets this; the wrapper ignores it and uses the pinned name)
+- Keychain item name is pinned in the runner (`mailroom.imap.app-password`); the plist does not set `MAILROOM_KEYCHAIN_ITEM`
 - `OLLAMA_HOST=http://127.0.0.1:11434`
 - `StartCalendarInterval` 20:05 local (precursor Minute 0; 8pm bills
   digest stays a separate agent)

@@ -1032,7 +1032,6 @@ class SourceHygieneTests(unittest.TestCase):
         named = {
             "run_mailroom_daily.sh",
             "README.mailroom-daily.md",
-            "com.mailroom.daily.plist",
             "README.md",
         }
         for path in files:
