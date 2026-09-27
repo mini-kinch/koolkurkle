@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import io
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -1086,11 +1087,16 @@ import sys
 from pathlib import Path
 
 log = os.environ.get("MAILROOM_FAKE_SECURITY_LOG")
+argv_log = os.environ.get("MAILROOM_FAKE_SECURITY_ARGV_LOG")
 items = os.environ.get("MAILROOM_FAKE_SECURITY_ITEMS", "")
 empty = set(os.environ.get("MAILROOM_FAKE_SECURITY_EMPTY", "").split(",")) - {""}
 ok = dict(part.split("=", 1) for part in items.split("|") if "=" in part)
 args = sys.argv[1:]
 svc = args[args.index("-s") + 1] if "-s" in args else ""
+if argv_log:
+    path = Path(argv_log)
+    prev = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(prev + " ".join(sys.argv) + "\n", encoding="utf-8")
 if log:
     path = Path(log)
     prev = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -1102,6 +1108,102 @@ if svc in ok:
     sys.exit(0)
 sys.exit(44)
 """
+DECOY_SECURITY = r"""#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+log = os.environ.get("MAILROOM_DECOY_LOG", "")
+if log:
+    Path(log).write_text("decoy\n", encoding="utf-8")
+sys.stdout.write("DECOY_SHOULD_NOT_RUN\n")
+sys.exit(0)
+"""
+# The real wrapper pins this exact line. Tests copy the script and rewrite
+# only that assignment so the copy execs a stub.
+_PINNED_SECURITY_LINE = 'SECURITY_BIN="/usr/bin/security"'
+
+
+def _line_body_and_ending(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    if line.endswith("\r"):
+        return line[:-1], "\r"
+    return line, ""
+
+
+def _rewrite_one_security_bin_line(source: str, stub: Path) -> str:
+    stub_path = str(stub)
+    if any(ch in stub_path for ch in ("\n", "\r", '"', "'", "\\", "$", "`", " ")):
+        raise AssertionError(
+            "stub path cannot be spliced into the wrapper: %s" % stub_path
+        )
+    replacement = 'SECURITY_BIN="%s"' % stub_path
+    if replacement == _PINNED_SECURITY_LINE:
+        raise AssertionError("stub path must differ from /usr/bin/security")
+    matched = 0
+    out_lines = []
+    for line in source.splitlines(keepends=True):
+        body, ending = _line_body_and_ending(line)
+        if body == _PINNED_SECURITY_LINE:
+            matched += 1
+            out_lines.append(replacement + ending)
+        else:
+            out_lines.append(line)
+    if matched != 1:
+        raise AssertionError(
+            "expected exactly one line %r in scripts/run_mailroom_daily.sh; found %d"
+            % (_PINNED_SECURITY_LINE, matched)
+        )
+    rewritten = "".join(out_lines)
+    old_lines = source.splitlines()
+    new_lines = rewritten.splitlines()
+    if len(old_lines) != len(new_lines):
+        raise AssertionError(
+            "security stub rewrite changed the wrapper line count (%d -> %d)"
+            % (len(old_lines), len(new_lines))
+        )
+    pinned_at = old_lines.index(_PINNED_SECURITY_LINE)
+    changed = [
+        i + 1
+        for i, (old, new) in enumerate(zip(old_lines, new_lines))
+        if old != new
+    ]
+    if changed != [pinned_at + 1]:
+        raise AssertionError(
+            "security stub rewrite changed lines %s" % (changed,)
+        )
+    if new_lines[pinned_at] != replacement:
+        raise AssertionError(
+            "security stub rewrite did not point SECURITY_BIN at the stub"
+        )
+    return rewritten
+
+
+def _install_wrapper_copy(dest: Path, stub: Path) -> None:
+    source_path = SCRIPTS / "run_mailroom_daily.sh"
+    shutil.copyfile(source_path, dest)
+    original = source_path.read_text(encoding="utf-8")
+    if dest.read_text(encoding="utf-8") != original:
+        raise AssertionError(
+            "wrapper copy does not match scripts/run_mailroom_daily.sh"
+        )
+    dest.write_text(
+        _rewrite_one_security_bin_line(original, stub), encoding="utf-8"
+    )
+    dest.chmod(dest.stat().st_mode | stat.S_IEXEC)
+
+
+def _daily_wrapper_command(script: Path) -> list[str]:
+    """Interpreter for the wrapper copy: zsh, or bash when zsh is absent."""
+    for shell in ("/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"):
+        if os.access(shell, os.X_OK):
+            return [shell, str(script)]
+    raise AssertionError("zsh or bash is required to run the daily wrapper copy")
+
+
 DAILY_STUB = r"""
 import hashlib
 import os
@@ -1122,6 +1224,32 @@ def _sha256(value: str) -> str:
 class KeychainFallbackTests(unittest.TestCase):
     """Exercise wrapper Keychain read + legacy fallback. No live Keychain."""
 
+    def _assert_real_wrapper_pins_security_bin(self) -> None:
+        wrapper_path = SCRIPTS / "run_mailroom_daily.sh"
+        wrapper = wrapper_path.read_text(encoding="utf-8")
+        exact = [
+            line for line in wrapper.splitlines() if line == _PINNED_SECURITY_LINE
+        ]
+        hits = []
+        for path in sorted(SCRIPTS.rglob("*")):
+            if path.is_file() and b"MAILROOM_SECURITY_BIN" in path.read_bytes():
+                hits.append(path.relative_to(ROOT).as_posix())
+        problems = []
+        if exact != [_PINNED_SECURITY_LINE]:
+            problems.append(
+                "expected exactly one line %r in %s; found %d"
+                % (
+                    _PINNED_SECURITY_LINE,
+                    wrapper_path.relative_to(ROOT).as_posix(),
+                    len(exact),
+                )
+            )
+        if hits:
+            problems.append(
+                "MAILROOM_SECURITY_BIN appears in scripts/: %s" % ", ".join(hits)
+            )
+        self.assertEqual(problems, [])
+
     def _run(
         self,
         tmp: Path,
@@ -1138,6 +1266,8 @@ class KeychainFallbackTests(unittest.TestCase):
         security = tmp / "fake-security"
         security.write_text(FAKE_SECURITY, encoding="utf-8")
         security.chmod(security.stat().st_mode | stat.S_IEXEC)
+        wrapper = tmp / "run_mailroom_daily.sh"
+        _install_wrapper_copy(wrapper, security)
         log = tmp / "security.log"
         packed = "|".join("%s=%s" % (k, v) for k, v in (items or {}).items())
         env = {
@@ -1146,25 +1276,35 @@ class KeychainFallbackTests(unittest.TestCase):
             "MAILARCHIVE_SCRIPTS": str(scripts),
             "MAILARCHIVE_LOGS": str(logs),
             "MAILROOM_DB": str(archive / "mailroom-copy.sqlite"),
-            "MAILROOM_SECURITY_BIN": str(security),
             "MAILROOM_APPLE_PY": sys.executable,
             "MAILROOM_FAKE_SECURITY_LOG": str(log),
             "MAILROOM_FAKE_SECURITY_ITEMS": packed,
             "MAILROOM_FAKE_SECURITY_EMPTY": ",".join(empty),
         }
-        for key in ("IMAP_APP_PASSWORD", "MAILROOM_KEYCHAIN_ITEM"):
+        for key in (
+            "IMAP_APP_PASSWORD",
+            "MAILROOM_KEYCHAIN_ITEM",
+            "MAILROOM_SECURITY_BIN",
+        ):
             env.pop(key, None)
         if extra_env:
             env.update(extra_env)
         proc = subprocess.run(
-            ["/bin/zsh", str(SCRIPTS / "run_mailroom_daily.sh")],
+            _daily_wrapper_command(wrapper),
             cwd=str(archive),
             env=env,
             capture_output=True,
             text=True,
             check=False,
         )
+        proc.security_bin = str(security)
         proc.security_log = log.read_text(encoding="utf-8") if log.exists() else ""
+        argv_log = env.get("MAILROOM_FAKE_SECURITY_ARGV_LOG", "")
+        proc.argv_log = ""
+        if argv_log:
+            argv_path = Path(argv_log)
+            if argv_path.exists():
+                proc.argv_log = argv_path.read_text(encoding="utf-8")
         return proc
 
     def _assert_no_secret_leak(self, proc: subprocess.CompletedProcess[str]) -> None:
@@ -1323,6 +1463,57 @@ class KeychainFallbackTests(unittest.TestCase):
         self.assertIn("password_loaded=1", proc.stdout)
         self.assertIn("password_sha256=%s" % _sha256(PRESET_PW), proc.stdout)
         self.assertEqual(proc.security_log, "")
+        self._assert_no_secret_leak(proc)
+
+    def test_security_bin_env_does_not_change_binary(self):
+        """Pinned SECURITY_BIN ignores MAILROOM_SECURITY_BIN.
+
+        The real wrapper line is SECURITY_BIN="/usr/bin/security".
+        This run executes a copy whose SECURITY_BIN line points at the stub.
+        The decoy at /tmp/fake is executable; an honored override would
+        run it. Primary item, then the legacy item.
+        """
+        self._assert_real_wrapper_pins_security_bin()
+        decoy = Path("/tmp/fake")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv_log = root / "argv.log"
+            decoy_log = root / "decoy.log"
+            decoy_log.write_text("", encoding="utf-8")
+            _write_executable(decoy, DECOY_SECURITY)
+            try:
+                proc = self._run(
+                    root,
+                    items={LEGACY_KEYCHAIN: OLD_PW},
+                    extra_env={
+                        "MAILROOM_SECURITY_BIN": "/tmp/fake",
+                        "MAILROOM_FAKE_SECURITY_ARGV_LOG": str(argv_log),
+                        "MAILROOM_DECOY_LOG": str(decoy_log),
+                    },
+                )
+                decoy_text = decoy_log.read_text(encoding="utf-8")
+            finally:
+                decoy.unlink(missing_ok=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            proc.argv_log.splitlines(),
+            [
+                "%s find-generic-password -s %s -w" % (proc.security_bin, NEW_KEYCHAIN),
+                "%s find-generic-password -s %s -w"
+                % (proc.security_bin, LEGACY_KEYCHAIN),
+            ],
+        )
+        self.assertEqual(
+            proc.security_log.split(),
+            [NEW_KEYCHAIN, LEGACY_KEYCHAIN],
+        )
+        self.assertEqual(decoy_text, "")
+        self.assertNotIn("DECOY_SHOULD_NOT_RUN", proc.stdout)
+        self.assertNotIn("/tmp/fake", proc.argv_log)
+        self.assertIn("password_loaded=1", proc.stdout)
+        self.assertIn("password_sha256=%s" % _sha256(OLD_PW), proc.stdout)
+        self.assertIn("falling back", proc.stderr)
+        self._assert_real_wrapper_pins_security_bin()
         self._assert_no_secret_leak(proc)
 
 
