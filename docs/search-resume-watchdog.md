@@ -52,13 +52,20 @@ file: one log line, `search resume deadline file malformed`, and no
 
 `+26` means the run was never confirmed. Once the run is committed,
 that checkpoint is moot. Drop it on the first successful writer-lock
-acquire for that run-id. Do not slide the deadline on each phase. Do
-not hold the lock across A2 and A3.
+acquire whose run-id matches `run_id` in the deadline file. Do not
+slide the deadline on each phase. Do not hold the lock across A2
+and A3.
+
+Caller input: `MAILROOM_SEARCH_RESUME_RUN_ID`. That is the only extra
+input. Set it to the `run_id` line in the deadline file. There is no
+second argument. If the variable is unset, the wrapper does not drop.
 
 `scripts/with_writer_lock.py` does the drop. The hook is the delimited
-block immediately after a successful acquire. It runs only when
-`MAILROOM_SEARCH_RESUME_RUN_ID` is set to the run-id. With that
-variable unset, the wrapper behaves as it does today.
+block immediately after a successful acquire, before the child and
+before the identity-token handoff. The first successful acquire whose
+`MAILROOM_SEARCH_RESUME_RUN_ID` matches the file drops `+26`. A later
+acquire with the same run-id is a no-op drop. A value that does not
+match the file refuses the child and leaves the file unchanged.
 
 The drop calls `drop_early_deadline(run_id)` in
 `scripts/search_resume_watchdog.py`. That rewrites the deadline file
@@ -82,9 +89,23 @@ Fallback, in the same scripted breath as the writer start:
 
 `arm --run-id` is that same drop. It is not a card to walk away from.
 
-PR #89 must be rebased after PR #90 merges. PR #90 changes
-`scripts/with_writer_lock.py` (identity handoff). The hook is a small
-delimited block so that rebase stays small.
+This branch is stacked on PR #90 at
+`fe7c076db762b440f0ffc7c524c254223b671434`. Later pushes to
+`cursor/l1-writer-lock-identity-16b2` need another rebase. The hook
+stays a small delimited block. PR #89 must be rebased again after
+PR #90 merges into main.
+
+The restore flow overwrites the deadline file with a new run-id of
+the form `att0-L1-<STAMP>-R`. Its first acquire uses purpose
+`att0-restore` and must set `MAILROOM_SEARCH_RESUME_RUN_ID` to that
+`-R` run-id. A stale S1 run-id no longer matches after the overwrite.
+
+The wrapper accepts purpose `att0-restore` (any non-empty purpose is
+stored). The SoR gate does not. `att0-restore` is not in
+`WRITER_PURPOSE_ALLOWLIST` in `scripts/sor_writer_gate.py` on this
+base. This change does not edit that allowlist. A wrapped child that
+presents the lock token with purpose `att0-restore` is refused
+(`purpose not allowed`) until Mailroom adds that purpose.
 
 ## +50 backstop
 
@@ -117,6 +138,28 @@ The helpers this script provides, which S1 and S2 may call, are:
 
 `<run-id>` is a short id (`A-Za-z0-9`, `.`, `_`, `-`). It is not a
 lock token.
+
+Read-only status, which prints the run-id, both checkpoints, and
+whether `+26` is still live:
+
+```zsh
+/usr/bin/python3 "$HOME/MailArchive/scripts/search_resume_watchdog.py" status
+```
+
+A live file prints four lines and exits 0:
+
+```text
+run_id=att0-L1-EXAMPLE
+deadline_26=100
+deadline_50=200
+plus_26_live=yes
+```
+
+After `+26` is dropped, `deadline_26=absent` and `plus_26_live=no`.
+A missing file prints `deadline file missing` and exits non-zero. An
+unparseable file prints `deadline file unreadable` and exits
+non-zero. `status` does not print a token, does not write, does not
+open sqlite, and does not take the writer lock.
 
 ## AR-R
 

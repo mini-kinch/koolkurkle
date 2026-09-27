@@ -45,10 +45,15 @@ Defaults (override with the env vars):
   SEARCH_RESUME_PLIST          $HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist
   MAILROOM_WRITE_LOCK          $HOME/MailArchive/mailroom.write.lock
 
+The wrapper drops +26 only when the caller sets
+MAILROOM_SEARCH_RESUME_RUN_ID to the run_id in the deadline file.
+That is the only extra input. Unset means do not drop.
+
 Commands:
   search_resume_watchdog.py watch
   search_resume_watchdog.py write --run-id <run-id>
   search_resume_watchdog.py arm --run-id <run-id>
+  search_resume_watchdog.py status
   search_resume_watchdog.py clear
 
 Docs: docs/search-resume-watchdog.md
@@ -82,6 +87,7 @@ USAGE = (
     "usage: search_resume_watchdog.py watch\n"
     "       search_resume_watchdog.py write --run-id <run-id> [--now <epoch>]\n"
     "       search_resume_watchdog.py arm --run-id <run-id>\n"
+    "       search_resume_watchdog.py status\n"
     "       search_resume_watchdog.py clear\n"
 )
 
@@ -274,6 +280,23 @@ def parse_deadline(text: str) -> Optional[Deadline]:
     if deadline_26 < 0:
         return None
     return run_id, deadline_26, deadline_50
+
+
+def format_status(parsed: Deadline) -> str:
+    """Read-only status lines. No token, no file body."""
+    run_id, deadline_26, deadline_50 = parsed
+    if deadline_26 is None:
+        shown = "absent"
+        live = "no"
+    else:
+        shown = str(deadline_26)
+        live = "yes" if deadline_26 < deadline_50 else "no"
+    return (
+        "run_id=%s\n"
+        "deadline_26=%s\n"
+        "deadline_50=%d\n"
+        "plus_26_live=%s\n" % (run_id, shown, deadline_50, live)
+    )
 
 
 def earliest_deadline(parsed: Deadline) -> int:
@@ -601,6 +624,19 @@ def _cmd_clear() -> int:
     return 0
 
 
+def _cmd_status() -> int:
+    """Print deadline checkpoints. Does not write, lock, or open sqlite."""
+    status, parsed = load_deadline(deadline_path())
+    if status == "absent":
+        sys.stderr.write("deadline file missing\n")
+        return 1
+    if status != "ok" or parsed is None:
+        sys.stderr.write("deadline file unreadable\n")
+        return 1
+    sys.stdout.write(format_status(parsed))
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] == "watch":
@@ -612,6 +648,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _cmd_write(args[1:])
     if args[0] == "arm":
         return _cmd_arm(args[1:])
+    if args[0] == "status":
+        if len(args) != 1:
+            sys.stderr.write(USAGE)
+            return 2
+        return _cmd_status()
     if args[0] == "clear":
         if len(args) != 1:
             sys.stderr.write(USAGE)

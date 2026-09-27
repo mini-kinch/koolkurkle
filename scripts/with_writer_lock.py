@@ -237,9 +237,10 @@ def release_writer_lock(held: HeldLock) -> None:
 
 
 def _drop_search_resume_plus_26() -> None:
-    # Isolated hook for the search-resume watchdog (PR #89).
-    # Rebase this block after PR #90 (identity handoff) merges.
-    # No-op unless MAILROOM_SEARCH_RESUME_RUN_ID is set.
+    # Caller input: MAILROOM_SEARCH_RESUME_RUN_ID, or none.
+    # Set it to the deadline file's run_id. The first successful
+    # acquire whose value matches drops +26. Unset does not drop.
+    # A mismatch refuses the child. No other argument is read.
     run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
     if not run_id:
         return

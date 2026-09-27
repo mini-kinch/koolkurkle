@@ -1182,9 +1182,9 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             events.append("drop")
             return real_drop(run_id, path)
 
-        def run(cmd, check=False):
+        def run(cmd, check=False, env=None):
             events.append("child")
-            return real_run(cmd, check=check)
+            return real_run(cmd, check=check, env=env)
 
         body = "run_id=run1\ndeadline_26=%d\ndeadline_50=%d\n" % (
             self.now + 26 * 60,
@@ -1237,7 +1237,7 @@ class SearchResumeWatchdogTests(unittest.TestCase):
             events.append("drop")
             raise watchdog.DeadlineRefusal("deadline file missing")
 
-        def run(cmd, check=False):
+        def run(cmd, check=False, env=None):
             events.append("child")
             raise AssertionError("child ran")
 
@@ -1308,6 +1308,165 @@ class SearchResumeWatchdogTests(unittest.TestCase):
         self.assertNotIn("ran", proc.stdout)
         held = wwl.acquire_writer_lock(self.lock, "later")
         wwl.release_writer_lock(held)
+
+    def test_status_prints_checkpoints_and_refuses_bad_files(self) -> None:
+        body = "run_id=att0-L1-EXAMPLE\ndeadline_26=100\ndeadline_50=200\n"
+        live = self._run(["status"], deadline=body)
+        self.assertEqual(live.returncode, 0, live.stderr)
+        self.assertEqual(
+            live.stdout,
+            "run_id=att0-L1-EXAMPLE\n"
+            "deadline_26=100\n"
+            "deadline_50=200\n"
+            "plus_26_live=yes\n",
+        )
+        self.assertEqual(live.stderr, "")
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), body)
+        self.assertEqual(self._launch(), [])
+        self.assertFalse(self.lock.exists())
+        armed = "run_id=att0-L1-EXAMPLE\ndeadline_50=200\n"
+        dropped = self._run(["status"], deadline=armed)
+        self.assertEqual(dropped.returncode, 0, dropped.stderr)
+        self.assertEqual(
+            dropped.stdout,
+            "run_id=att0-L1-EXAMPLE\n"
+            "deadline_26=absent\n"
+            "deadline_50=200\n"
+            "plus_26_live=no\n",
+        )
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), armed)
+        secret_body = (
+            "run_id=att0-L1-EXAMPLE\n"
+            "deadline_26=100\n"
+            "deadline_50=200\n"
+            "token=%s\n"
+            "writer_token=%s\n" % (SECRET, SECRET)
+        )
+        hidden = self._run(["status"], deadline=secret_body)
+        self.assertEqual(hidden.returncode, 0, hidden.stderr)
+        self.assertNotIn(SECRET, hidden.stdout)
+        self.assertNotIn(SECRET, hidden.stderr)
+        self.assertNotIn("token=", hidden.stdout)
+        missing = self._run(["status"], deadline=None)
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stderr, "deadline file missing\n")
+        self.assertEqual(missing.stdout, "")
+        self.assertFalse(self.deadline.exists())
+        bad = self._run(["status"], deadline="not a deadline\n")
+        self.assertEqual(bad.returncode, 1)
+        self.assertEqual(bad.stderr, "deadline file unreadable\n")
+        self.assertEqual(bad.stdout, "")
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), "not a deadline\n")
+
+    def test_restore_overwrite_then_att0_restore_drops_plus_26(self) -> None:
+        import with_writer_lock as wwl
+
+        s1 = "att0-L1-EXAMPLE"
+        restore = "att0-L1-EXAMPLE-R"
+        d26 = self.now + 26 * 60
+        d50 = self.now + 50 * 60
+        s1_body = "run_id=%s\ndeadline_26=%d\ndeadline_50=%d\n" % (s1, d26, d50)
+        restore_body = "run_id=%s\ndeadline_26=%d\ndeadline_50=%d\n" % (
+            restore,
+            d26,
+            d50,
+        )
+        self.deadline.parent.mkdir(parents=True, exist_ok=True)
+        self.deadline.write_text(s1_body, encoding="utf-8")
+        self.deadline.write_text(restore_body, encoding="utf-8")
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), restore_body)
+        marker = self.home / "restore-ran"
+        stale_marker = self.home / "stale-ran"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MAILROOM_SEARCH_RESUME_RUN_ID": s1,
+                "SEARCH_RESUME_DEADLINE_FILE": str(self.deadline),
+            },
+            clear=False,
+        ):
+            with self.assertRaises(wwl.WriterLockError) as ctx:
+                wwl.run_with_lock(
+                    "att0-restore",
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; Path(%r).write_text('stale')"
+                        % str(stale_marker),
+                    ],
+                    lock_path=self.lock,
+                    action_required_path=self.home / "ACTION_REQUIRED",
+                )
+        self.assertIn("run-id mismatch", str(ctx.exception))
+        self.assertFalse(stale_marker.exists())
+        self.assertEqual(self.deadline.read_text(encoding="utf-8"), restore_body)
+        held = wwl.acquire_writer_lock(self.lock, "after-stale")
+        wwl.release_writer_lock(held)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MAILROOM_SEARCH_RESUME_RUN_ID": restore,
+                "SEARCH_RESUME_DEADLINE_FILE": str(self.deadline),
+            },
+            clear=False,
+        ):
+            rc = wwl.run_with_lock(
+                "att0-restore",
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path(%r).write_text('ok')" % str(marker),
+                ],
+                lock_path=self.lock,
+                action_required_path=self.home / "ACTION_REQUIRED",
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
+        text = self.deadline.read_text(encoding="utf-8")
+        self.assertEqual(
+            text,
+            "run_id=%s\ndeadline_50=%d\n" % (restore, d50),
+        )
+        self.assertNotIn("deadline_26", text)
+        self.assertNotIn(s1 + "\n", text)
+        info = wwl.read_lock_info(self.lock)
+        self.assertEqual(info.purpose, "att0-restore")
+        self.assertNotIn(SECRET, text)
+
+    def test_gate_refuses_att0_restore_purpose(self) -> None:
+        import sor_writer_gate as gate
+        import with_writer_lock as wwl
+        from datetime import datetime, timezone
+
+        self.assertNotIn("att0-restore", gate.WRITER_PURPOSE_ALLOWLIST)
+        self.assertIn("att0-migrate", gate.WRITER_PURPOSE_ALLOWLIST)
+        token = "fixture-token-value"
+        when = datetime(2026, 9, 27, 22, 15, tzinfo=timezone.utc)
+
+        def decide(purpose: str):
+            self.lock.write_text(
+                wwl.format_lock_payload(
+                    purpose=purpose,
+                    now=when,
+                    pid=os.getpid(),
+                    hostname="fixture",
+                    token=token,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ, {wwl.LOCK_TOKEN_ENV: token}, clear=False
+            ):
+                return gate._identity_decision(self.lock, child_pid=os.getpid())
+
+        matched, why = decide("att0-restore")
+        self.assertFalse(matched)
+        self.assertEqual(why, "purpose not allowed")
+        self.assertNotIn(token, why)
+        matched_ok, why_ok = decide("att0-migrate")
+        self.assertTrue(matched_ok)
+        self.assertEqual(why_ok, "match")
+        self.assertNotIn(token, why_ok)
 
 
 if __name__ == "__main__":
