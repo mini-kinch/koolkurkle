@@ -71,7 +71,7 @@ class KeychainNameContractTests(unittest.TestCase):
     def test_name_only_never_secret(self):
         self.assertEqual(bodies.KEYCHAIN_ITEM_NAME, KEYCHAIN)
         raw = PLIST.read_text(encoding="utf-8")
-        self.assertIn(KEYCHAIN, raw)
+        self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", raw)
         self.assertNotIn("IMAP_APP_PASSWORD", raw)
         for path in (DAILY, OPS, README, MAILROOM, ROOT / "scripts" / "imap_fetch_bodies_fts.py"):
             text = path.read_text(encoding="utf-8")
