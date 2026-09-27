@@ -173,11 +173,11 @@ Mac smoke (Mini venv — Apple `/usr/bin/python3` cannot load sqlite-vec).
 Until PR-5, Mini retrieve/ask recipes set
 `MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
 `mailroom-daily-copy.sqlite`). Do not default Mini to
-`mailroom.sqlite` (empty SoR stub). Recipes that use
+`mailroom.sqlite` (Mini is the only SoR writer via the daily job only; the MBP is a non-writer, rollback/read). Recipes that use
 `mailroom.sqlite` name the Mini SoR (the only SoR writer). The MBP is a non-writer.
 
 ```zsh
-# Mini — hybrid retrieve (copy DB until PR-5; Mini SoR is an empty stub)
+# Mini — hybrid retrieve (copy DB until PR-5; Mini is the only SoR writer via the daily job only; the MBP is a non-writer, rollback/read)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py 'SDGE bill'
 ```

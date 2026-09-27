@@ -125,6 +125,26 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         self.assertIn("the only SoR writer", recipes)
         self.assertIn("The MBP is a non-writer", recipes)
         self.assertNotIn("MBP-SoR-only", recipes)
+        default_line = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("`mailroom.sqlite` (") and "Recipes that use" in line
+        )
+        retrieve_line = next(
+            line
+            for line in raw.splitlines()
+            if line.startswith("# Mini — hybrid retrieve (copy DB until PR-5")
+        )
+        smoke_pair = default_line + "\n" + retrieve_line
+        self.assertNotIn("(empty SoR stub)", smoke_pair)
+        self.assertNotIn("Mini SoR is an empty stub", smoke_pair)
+        self.assertNotIn("empty stub", smoke_pair)
+        self.assertIn("copy DB until PR-5", retrieve_line)
+        self.assertIn(
+            "Mini is the only SoR writer via the daily job only",
+            smoke_pair,
+        )
+        self.assertIn("the MBP is a non-writer, rollback/read", smoke_pair)
         hay = raw.replace("/Users/<operator>/", "")
         for needle in PRIVACY_NEEDLES:
             self.assertNotIn(needle, hay)
