@@ -104,8 +104,8 @@ rem-legacy. See [pr0/with_writer_lock_DESIGN.md](pr0/with_writer_lock_DESIGN.md)
 ## Rem-aware SoR writer gate (look-ahead)
 
 Same-sqlite dual-writer HARD DECK: never two-wide writers on one
-`.sqlite`. While rem-legacy is the sole writer on live basename
-`mailroom.sqlite`, classic SoR writers CONFLICT. Look-ahead calendar
+`.sqlite`. rem-legacy may hold the write lock while it runs on live basename
+`mailroom.sqlite`; classic SoR writers CONFLICT. Look-ahead calendar
 jobs: do not run the MBP 8pm chain while rem-legacy is
 alive; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 

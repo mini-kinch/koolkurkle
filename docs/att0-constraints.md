@@ -37,7 +37,7 @@ Body rem uses `message_embeddings` (PK `message_id`). Attachment chunks must **n
 5. Extracted text is untrusted **DATA** (same fence as bodies).
 6. Extract fail ≠ tombstone the parent message. Attachment has its own status/`skip_reason`.
 7. Bot box never holds SoR, live extracts, or attachment blobs.
-8. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover stays gated. Attachment jobs on Mini use copy DB + local extract dir.
+8. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve stays on a copy DB until PR-5; PR-5 cutover / RunAtLoad stays gated. Attachment jobs on Mini use copy DB + local extract dir. `CRM-log/20260924-1201-mini-only-writer-user.md`
 9. No SMB/NFS sqlite. Stage extract trees locally.
 10. Do **not** rebuild/drop `message_embeddings` vec0 to “make room” for chunks.
 

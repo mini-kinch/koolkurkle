@@ -24,7 +24,7 @@ Daily children get `--db` and `$MAILROOM_DB` and honor them through
 path, not an unnamed empty SoR stub. One writer, no SMB/NFS dual-write.
 
 Install, Keychain **name** (`mailroom.imap.app-password`), launchd Keychain
-proof, Mini copy-only notes (`$HOME` only), and phase watermarks:
+proof, Mini copy-only notes (`$HOME` only), and phase watermarks. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve stays on a copy DB until PR-5; PR-5 cutover / RunAtLoad stays gated:
 **[scripts/README.mailroom-daily.md](scripts/README.mailroom-daily.md)**.
 Human Terminal cards, Terminal AR format (one machine, loud MBP or Mini
 banner, one command per copy button, title equals body; no stacked
@@ -39,7 +39,7 @@ SWITCH TO Mini/MBP before a machine-specific Terminal AR
 detect machine only from prompt hostname / Sent-from-machine / pasted proof;
 loud SWITCH TO MBP/Mini callout when last input mismatches the target;
 agents cannot see which Terminal window is focused),
-Mini SoR (sole writer) vs MBP non-writer (Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; no MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4),
+Mini SoR (sole writer) vs MBP non-writer (The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini is the only SoR writer for `mailroom.sqlite` via the daily job only; the MBP is a non-writer; no MBP writers against SoR; PR-5 cutover still gated on rem-legacy EXIT 0; authority CRM-log/20260924-1201-mini-only-writer-user.md:4),
 curl≠gh dial bad-file-descriptor (curl 200 + Homebrew gh `dial tcp … connect: bad file descriptor` is app-level filter on `/opt/homebrew/bin/gh`; do not re-auth blindly; unauthenticated `gh api rate_limit` isolates binary network vs token),
 generate process (`mlx_lm.server` on `127.0.0.1:1234`; canonical python venv-mlx at `~/MailArchive/venv-mlx/bin/python`; not LM Studio; ask_mail UI `http://127.0.0.1:8743/ui`),
 IMAP live checks via `/usr/bin/curl imaps://` (never Python sockets
@@ -66,7 +66,7 @@ Continuous keepgoing (after Done on an authorized chain, immediately issue the n
 After user PASS on a check (ack PASS and proceed to the next AR; do not re-issue the same check),
 IMAP tombstone never STORE Deleted / EXPUNGE (local present_on_server only; refuse IMAP STORE \Deleted, EXPUNGE, Trash-purge),
 with_writer_lock sole-writer wrapper (busy/lock refuse before second writer; shipping this guard is not starting rem-legacy),
-rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run classic MBP SoR 8pm while rem-legacy is alive),
+rem-aware SoR writer gate (look-ahead; rem/lock on live `mailroom.sqlite` → CONFLICT; refuse calendar SoR writers same cycle; skip/rem-safe before the clock; prefer `MAILROOM_DB=copy` until rem EXIT 0; do not run the MBP 8pm chain while rem-legacy is alive. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).),
 mailroom_copy_db rem-gated copy (Mini copy only when rem-legacy is not writing or after EXIT 0; no SMB/NFS dual-write),
 bind_copy_db / daily children honor MAILROOM_DB (argv=None reads sys.argv[1:]; children open the allowlisted DB; SoR basename allowed only when explicitly named and rem-legacy is absent; refuse SoR stub when rem-legacy or the writer lock is held; unset / unknown refuse),
 PR-5 cutover checklist (docs only — do not enable; gated on rem-legacy EXIT 0 + Mini SoR switch steps; this change does not enable cutover or RunAtLoad),
@@ -173,11 +173,11 @@ Mac smoke (Mini venv — Apple `/usr/bin/python3` cannot load sqlite-vec).
 Until PR-5, Mini retrieve/ask recipes set
 `MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
 `mailroom-daily-copy.sqlite`). Do not default Mini to
-`mailroom.sqlite` (Mini is the only SoR writer via the daily job only; the MBP is a non-writer, rollback/read). Recipes that use
+`mailroom.sqlite` (Mini is the only SoR writer via the daily job only). The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Recipes that use
 `mailroom.sqlite` name the Mini SoR (the only SoR writer). The MBP is a non-writer.
 
 ```zsh
-# Mini — hybrid retrieve (copy DB until PR-5; Mini is the only SoR writer via the daily job only; the MBP is a non-writer, rollback/read)
+# Mini — hybrid retrieve (copy DB until PR-5; Mini is the only SoR writer via the daily job only; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python scripts/semantic_search.py 'SDGE bill'
 ```

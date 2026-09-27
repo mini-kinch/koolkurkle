@@ -17,8 +17,7 @@ Shipping guard: lockfile or busy refuse **before** a second
 running rem-legacy job.
 
 Same-sqlite dual-writer HARD DECK: never two-wide writers on one
-`.sqlite`. Look-ahead calendar jobs: while rem-legacy is the sole
-writer on live basename `mailroom.sqlite`, do not run the MBP
+`.sqlite`. Look-ahead calendar jobs: rem-legacy may hold the write lock while it runs on live basename `mailroom.sqlite`; do not run the MBP
 8pm chain; use Mini/copy until rem EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). if rem/writer on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe **before** the clock.
 
 `scripts/sor_writer_gate.py` fail-closes SoR writers when rem-legacy /
@@ -126,9 +125,9 @@ Long MailArchive embeds stay **host-kept foreground** in a host
 Terminal. Do **not** background with `nohup` or `&`.
 Remote Shell vs LaunchAgent lifetime: [ops-terminal.md](ops-terminal.md).
 
-Sole writer is HARD DECK: never two writers on one `.sqlite`. A live
-rem-legacy job on the SoR-named file is that sole writer until EXIT 0.
-Do not start a second `embed_backfill` against the same file.
+One writer per file is HARD DECK: never two writers on one `.sqlite`. A live
+rem-legacy job may hold the write lock while it runs.
+Do not start a second `embed_backfill` against the same file. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
 
 After the foreground PID is known, keep the host awake for that
 process (placeholder `<pid>`, not a live PID):

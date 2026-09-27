@@ -54,10 +54,8 @@ Container. copy-out by sha only. Missing blob =
 `extract_status=blob_missing`, not a second catalog.
 
 `$MAILARCHIVE` is the same logical tree on MBP and Mini (`MailArchive`
-under home). Mini until PR-5: **read/stage only**. New blobs land on
-the SoR host (MBP today). Mini may hold a **copy** of `att-blobs/` next
-to the copy DB; it does not grow a second canonical tree. PR-5 flips
-which machine owns writes; it does not invent `MailArchive-mini/`.
+under home). The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Mini retrieve stays on a copy DB until PR-5. Mini may hold a **copy** of `att-blobs/` next
+to the copy DB; it does not grow a second canonical tree. PR-5 cutover / RunAtLoad stays gated; it does not invent `MailArchive-mini/`.
 `copy_age` covers sqlite **and** blob-tree mtime. No SMB write of
 sqlite; blob stage is copy-then-local.
 
