@@ -1185,9 +1185,14 @@ class SearchCitationTests(unittest.TestCase):
 
 class HermeticBoundaryTests(unittest.TestCase):
     def test_package_has_no_process_embed_or_network_path(self):
+        # fetch_p1.py and p1_worker.py are the ATT-1/ATT-2 P1 path.
+        # Extractors there run out of process, so those two files may
+        # import subprocess. Every other module stays in-process.
+        out_of_process = {"fetch_p1.py", "p1_worker.py"}
         for path in sorted(PKG.glob("*.py")):
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("import subprocess", text, path.name)
+            if path.name not in out_of_process:
+                self.assertNotIn("import subprocess", text, path.name)
             self.assertNotIn("os.system", text, path.name)
             self.assertNotIn("os.popen", text, path.name)
             self.assertNotIn("Popen(", text, path.name)
