@@ -48,6 +48,9 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         self.assertIn("writer lock", text)
         self.assertIn("flock", text)
         self.assertIn("Do not start a second writer against SoR", text)
+        self.assertIn("Do not start a Mini writer against SoR", text)
+        self.assertIn("Do not promote Mini", text)
+        self.assertIn("gated on rem-legacy", text)
         self.assertIn("docs/tests only", text)
         self.assertIn("does not open MailArchive or live sqlite", text)
         self.assertIn("read Keychain", text)
@@ -87,14 +90,18 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         self.assertIn("db_mode=refused", text)
         self.assertIn("writer lock", text)
         self.assertIn("Do not start a second writer against SoR", text)
+        self.assertIn("Do not start a Mini writer against SoR", text)
+        self.assertIn("Do not promote Mini", text)
+        self.assertIn("gated on rem-legacy", text)
+        self.assertNotIn("cutover is not gated", text.lower())
         self.assertNotIn("dual writers are allowed", text.lower())
         self.assertNotIn("MBP may write SoR", text)
         self.assertNotIn("MBP writers against SoR are allowed", text)
         self.assertNotIn("Mini is the live Source of Record", text)
         self.assertNotIn("second writer against SoR is allowed", text.lower())
 
-    def test_writer_other_than_mini_daily_is_refused(self):
-        """A writer other than the Mini daily path is still refused.
+    def test_non_allowlisted_basename_and_second_writer_are_refused(self):
+        """A non-allowlisted basename is refused, and a second SoR writer is refused while the writer lock is held.
 
         Uses bind_copy_db / child_main only. Temp dir and fake basenames.
         Does not open MailArchive or a live sqlite.
