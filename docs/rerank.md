@@ -93,7 +93,7 @@ Until PR-5, Mini SoR is an empty stub. Mini retrieve recipes set
 `MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite` (or
 `mailroom-daily-copy.sqlite`). Do not default Mini to
 `mailroom.sqlite`. Recipes that use `mailroom.sqlite` are
-**MBP-SoR-only**. Apple `/usr/bin/python3` cannot load sqlite-vec;
+**MBP non-writer (rollback, read-only)**. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Apple `/usr/bin/python3` cannot load sqlite-vec;
 use the MailArchive venv.
 
 ```zsh
@@ -117,25 +117,25 @@ $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/rerank_smoke.py
 ```
 
 ```zsh
-# MBP-SoR-only — hybrid retrieve (CrossEncoder when extra is installed; else fail-open)
+# MBP non-writer (rollback, read-only) — hybrid retrieve (CrossEncoder when extra is installed; else fail-open)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'SDGE bill'
 ```
 
 ```zsh
-# MBP-SoR-only — hybrid retrieve JSON (rerank_mode on stderr)
+# MBP non-writer (rollback, read-only) — hybrid retrieve JSON (rerank_mode on stderr)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --json --k 20 'Caddell'
 ```
 
 ```zsh
-# MBP-SoR-only — hybrid retrieve (horse)
+# MBP non-writer (rollback, read-only) — hybrid retrieve (horse)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'horse'
 ```
 
 ```zsh
-# MBP-SoR-only — force rerank_mode=none
+# MBP non-writer (rollback, read-only) — force rerank_mode=none
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py --no-rerank 'SDGE bill'
 ```

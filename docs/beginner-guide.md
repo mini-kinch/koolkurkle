@@ -44,8 +44,8 @@ Three layers:
 
 | Machine | Role today |
 |---|---|
-| **MBP** | Holds the live **Source of Record** (`mailroom.sqlite`). A long rem-legacy embed backfill may be running here. |
-| **Mini** | Daily jobs against a **copy** of that database until a future cutover (PR-5). Must not write the live SoR. |
+| **MBP** | Non-writer (rollback, read-only) for `mailroom.sqlite`. A long rem-legacy embed backfill may be running here; PR-5 cutover stays gated. |
+| **Mini** | The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Until PR-5, that job and Mini retrieve stay on a **copy** (cutover stays gated). |
 
 If a recipe says Mini and points at `mailroom.sqlite`, it is wrong until cutover. Mini uses a **copy** path.
 

@@ -6,7 +6,7 @@ present; otherwise RRF (fail-open; scores not claimed). Mail bodies are
 **DATA**. Drafts only — never send. `ask_audit` stores query + ids +
 model + host, never bodies.
 
-SoR (MBP-SoR-only): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
+SoR (The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).): `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`
 (`Path.home()`). No machine home hardcodes.
 
 Until PR-5, Mini SoR is an empty stub. Mini retrieve/ask recipes use
@@ -98,7 +98,7 @@ Thread expansion is capped as injection control (root + last 3,
 cap 8). Unbounded thread dump is refused.
 
 ```zsh
-# MBP-SoR-only — phase 1: retrieve + rerank (embed resident; CrossEncoder in-process)
+# MBP non-writer (rollback, read-only) — phase 1: retrieve + rerank (embed resident; CrossEncoder in-process)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase retrieve --json 'SDGE bill'
 ```
@@ -109,7 +109,7 @@ ollama stop qwen3-embedding:8b
 ```
 
 ```zsh
-# MBP-SoR-only — phase 2: generate (mlx_lm.server). --fts-only avoids reloading embed 8b
+# MBP non-writer (rollback, read-only) — phase 2: generate (mlx_lm.server). --fts-only avoids reloading embed 8b
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --phase generate --fts-only --json 'SDGE bill'
@@ -208,7 +208,7 @@ Mocks in `tests/test_ask_mail.py`. Live MBP matrix is the operator gate.
 ## CLI
 
 ```zsh
-# MBP-SoR-only — ask (mlx_lm.server when MAILROOM_GENERATE_MODEL is set)
+# MBP non-writer (rollback, read-only) — ask (mlx_lm.server when MAILROOM_GENERATE_MODEL is set)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
 MAILROOM_LM_STUDIO_URL=http://127.0.0.1:1234 \
@@ -237,7 +237,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
 ```
 
 ```zsh
-# MBP-SoR-only — HTTP loopback (8743; 8744 if bound). GET /ui is the thin same-origin UI.
+# MBP non-writer (rollback, read-only) — HTTP loopback (8743; 8744 if bound). GET /ui is the thin same-origin UI.
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --serve
 ```
@@ -292,14 +292,14 @@ GET `/` and `/health` stay JSON (`ui=/ui`, `message=/message`,
 ```
 
 ```zsh
-# MBP-SoR-only — 2. UI + HTTP ask. Open http://127.0.0.1:8743/ui
+# MBP non-writer (rollback, read-only) — 2. UI + HTTP ask. Open http://127.0.0.1:8743/ui
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 MAILROOM_GENERATE_MODEL="$MAILROOM_GENERATE_MODEL" \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --serve
 ```
 
 ```zsh
-# MBP-SoR-only — 3. MCP stdio (four tools; separate process from --serve)
+# MBP non-writer (rollback, read-only) — 3. MCP stdio (four tools; separate process from --serve)
 MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --mcp
 ```
