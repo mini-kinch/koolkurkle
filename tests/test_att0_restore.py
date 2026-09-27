@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -139,6 +141,21 @@ def _temps(directory: Path) -> list[Path]:
     return [path for path in directory.iterdir() if ".att0-restore-" in path.name]
 
 
+def _open_uncheckpointed(path: Path, body: str) -> sqlite3.Connection:
+    """Hold a WAL connection whose latest commit stays in a non-empty -wal."""
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO notes (body) VALUES (?)", (body,))
+    conn.commit()
+    wal = Path(str(path) + "-wal")
+    if not (wal.is_file() and wal.stat().st_size > 0):
+        conn.close()
+        raise AssertionError("expected a non-empty wal")
+    return conn
+
+
 class RestoreCliTests(unittest.TestCase):
     def test_mailroom_without_flag_exits_2_and_leaves_dest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,7 +229,7 @@ class RestoreCliTests(unittest.TestCase):
             self.assertEqual(_row_digest(dest), _row_digest(src))
             self.assertEqual(_temps(root), [])
 
-    def test_live_nonempty_wal_checkpoints_and_does_not_replay(self):
+    def test_live_nonempty_wal_is_not_replayed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / "backup.sqlite"
@@ -442,6 +459,24 @@ class RestoreCliTests(unittest.TestCase):
         self.assertNotIn("$HOME", doc)
         self.assertNotIn("/Users/", doc)
         self.assertNotIn("/home/", doc)
+        self.assertNotIn("wal_checkpoint", doc)
+        self.assertNotIn("wal_checkpoint", source)
+        self.assertIn("immutable=1", doc)
+        self.assertIn("casefold", doc)
+        self.assertIn("refuse: not enough free space", doc)
+        self.assertIn("F_FULLFSYNC", doc)
+        self.assertIn("64 MiB", doc)
+        wal_mv = doc.index(
+            "mv /var/lib/mailroom/mailroom.sqlite-wal "
+            "/var/lib/mailroom/mailroom.sqlite-wal.aside"
+        )
+        main_mv = doc.index(
+            "mv /var/lib/mailroom/mailroom.sqlite.restore-tmp "
+            "/var/lib/mailroom/mailroom.sqlite"
+        )
+        rm_aside = doc.index("rm -f /var/lib/mailroom/mailroom.sqlite-wal.aside")
+        self.assertLess(wal_mv, main_mv)
+        self.assertLess(main_mv, rm_aside)
 
     def test_wrapper_command_restores_and_foreign_lock_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -578,6 +613,675 @@ class RestoreCliTests(unittest.TestCase):
         finally:
             subprocess.run = replaced
             _rearm_hermetic_guard()
+
+
+class RestoreReviewTests(unittest.TestCase):
+    """R1 residual, R4-R9, and R11. Synthetic files only."""
+
+    def _allow(self, src: Path, dest: Path) -> None:
+        restore.restore_database(
+            src,
+            dest,
+            allow_mailroom_sqlite=True,
+            cmdlines=[],
+            lock_held=False,
+        )
+
+    def test_mailroom_basename_casefold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            _make_db(src, "from-src")
+            for name in ("Mailroom.sqlite", "MAILROOM.SQLITE"):
+                dest = root / name
+                if dest.exists():
+                    dest.unlink()
+                _make_db(dest, "live-dest")
+                before = _sha(dest)
+                ino = dest.stat().st_ino
+                stderr = io.StringIO()
+                opened: list[str] = []
+                real_connect = sqlite3.connect
+
+                def track(database, *args, **kwargs):
+                    opened.append(str(database))
+                    return real_connect(database, *args, **kwargs)
+
+                with mock.patch("sqlite3.connect", side_effect=track):
+                    with mock.patch("sys.stderr", stderr):
+                        rc = restore.main(["--src", str(src), "--dest", str(dest)])
+                self.assertEqual(rc, 2, stderr.getvalue())
+                self.assertEqual(opened, [])
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(dest.stat().st_ino, ino)
+                self.assertNotIn(str(root), stderr.getvalue())
+                self.assertIn("mailroom.sqlite", stderr.getvalue())
+                dest.unlink()
+
+            varied = root / "Mailroom.sqlite"
+            _make_db(varied, "live-dest")
+            self._allow(src, varied)
+            self.assertEqual(_row_digest(varied), _row_digest(src))
+            self.assertEqual(_format_versions(varied), (1, 1))
+
+            named = root / "nested" / "Mailroom.sqlite"
+            named.parent.mkdir()
+            _make_db(named, "do-not-copy")
+            named_before = _sha(named)
+            dest = root / "dest.sqlite"
+            _make_db(dest, "keep")
+            dest_before = _sha(dest)
+            with self.assertRaises(restore.RestoreRefuse) as ctx:
+                restore.restore_database(named, dest, cmdlines=[], lock_held=False)
+            self.assertIn("mailroom.sqlite", str(ctx.exception))
+            self.assertEqual(_sha(named), named_before)
+            self.assertEqual(_sha(dest), dest_before)
+            self.assertEqual(_temps(root), [])
+
+    def test_symlink_basename_mailroom_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            real = root / "real.sqlite"
+            link = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            _make_db(real, "live-dest")
+            link.symlink_to(real.name)
+            before = _sha(real)
+            ino = real.stat().st_ino
+            stderr = io.StringIO()
+            with mock.patch("sys.stderr", stderr):
+                rc = restore.main(["--src", str(src), "--dest", str(link)])
+            self.assertEqual(rc, 2, stderr.getvalue())
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(_sha(real), before)
+            self.assertEqual(real.stat().st_ino, ino)
+            self.assertNotIn(str(root), stderr.getvalue())
+            self.assertEqual(_temps(root), [])
+
+    def test_checkpointed_source_gains_no_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_dir = root / "src"
+            src_dir.mkdir()
+            src = src_dir / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            conn = sqlite3.connect(str(src))
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                rows = conn.execute("SELECT body FROM notes").fetchall()
+            finally:
+                conn.close()
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(src) + suffix)
+                if sidecar.exists():
+                    sidecar.unlink()
+            src_hash = _sha(src)
+            seen: list[str] = []
+            real_connect = sqlite3.connect
+
+            def track(database, *args, **kwargs):
+                seen.append(str(database))
+                return real_connect(database, *args, **kwargs)
+
+            with mock.patch("sqlite3.connect", side_effect=track):
+                restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+            src_uri = src.resolve().as_uri()
+            self.assertTrue(any("immutable=1" in item and src_uri in item for item in seen))
+            self.assertFalse(any("mode=ro" in item and src_uri in item for item in seen))
+            self.assertEqual(sorted(path.name for path in src_dir.iterdir()), ["backup.sqlite"])
+            self.assertEqual(_sha(src), src_hash)
+            self.assertFalse(Path(str(src) + "-wal").exists())
+            self.assertFalse(Path(str(src) + "-shm").exists())
+            self.assertEqual(_temps(root), [])
+            got = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                self.assertEqual(got.execute("SELECT body FROM notes").fetchall(), rows)
+            finally:
+                got.close()
+
+    def test_readonly_source_dir_creates_no_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_dir = root / "src"
+            src_dir.mkdir()
+            src = src_dir / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            conn = sqlite3.connect(str(src))
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                src_rows = conn.execute("SELECT body FROM notes").fetchall()
+            finally:
+                conn.close()
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(src) + suffix)
+                if sidecar.exists():
+                    sidecar.unlink()
+            src_hash = _sha(src)
+            os.chmod(src_dir, 0o555)
+            try:
+                restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                self.assertEqual(
+                    sorted(path.name for path in src_dir.iterdir()),
+                    ["backup.sqlite"],
+                )
+                self.assertEqual(_sha(src), src_hash)
+                got = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    self.assertEqual(
+                        got.execute("SELECT body FROM notes").fetchall(),
+                        src_rows,
+                    )
+                finally:
+                    got.close()
+            finally:
+                os.chmod(src_dir, 0o755)
+
+    def test_uncheckpointed_source_wal_row_is_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src_dir = root / "src"
+            dst_dir = root / "dst"
+            src_dir.mkdir()
+            dst_dir.mkdir()
+            src = src_dir / "backup.sqlite"
+            dest = dst_dir / "dest.sqlite"
+            _make_db(dest, "live-dest")
+            held = sqlite3.connect(str(src))
+            # 3.12+ can close without folding the wal into the main file.
+            # A connection left open shares the hardlink inode and rewrites
+            # one wal-index byte in -shm; closing avoids that.
+            can_close = hasattr(held, "setconfig") and hasattr(
+                sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"
+            )
+            if can_close:
+                held.setconfig(sqlite3.SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, True)
+            try:
+                held.execute("PRAGMA journal_mode=WAL")
+                held.execute("PRAGMA wal_autocheckpoint=0")
+                held.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
+                held.execute("INSERT INTO notes (body) VALUES ('checkpointed')")
+                held.commit()
+                held.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                held.execute("INSERT INTO notes (body) VALUES ('wal-only')")
+                held.commit()
+                if can_close:
+                    held.close()
+                    held = None
+                wal = Path(str(src) + "-wal")
+                shm = Path(str(src) + "-shm")
+                self.assertGreater(wal.stat().st_size, 0)
+                imm = sqlite3.connect(src.resolve().as_uri() + "?immutable=1", uri=True)
+                try:
+                    self.assertEqual(
+                        imm.execute("SELECT body FROM notes").fetchall(),
+                        [("checkpointed",)],
+                    )
+                finally:
+                    imm.close()
+                main_hash = _sha(src)
+                wal_hash = _sha(wal)
+                shm_hash = _sha(shm) if shm.is_file() else None
+                names_before = sorted(path.name for path in src_dir.iterdir())
+                seen: list[str] = []
+                real_connect = sqlite3.connect
+
+                def track(database, *args, **kwargs):
+                    seen.append(str(database))
+                    return real_connect(database, *args, **kwargs)
+
+                with mock.patch("sqlite3.connect", side_effect=track):
+                    restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                src_uri = src.resolve().as_uri()
+                self.assertTrue(any("mode=ro" in item and "db.sqlite" in item for item in seen))
+                self.assertFalse(any("immutable=1" in item for item in seen))
+                self.assertFalse(any(src_uri in item for item in seen))
+                self.assertEqual(_sha(src), main_hash)
+                self.assertEqual(_sha(wal), wal_hash)
+                if can_close and shm_hash is not None:
+                    self.assertEqual(_sha(shm), shm_hash)
+                self.assertEqual(sorted(path.name for path in src_dir.iterdir()), names_before)
+                self.assertEqual(_temps(src_dir), [])
+                self.assertEqual(_temps(dst_dir), [])
+                got = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    rows = got.execute(
+                        "SELECT body FROM notes ORDER BY id"
+                    ).fetchall()
+                finally:
+                    got.close()
+                self.assertEqual(rows, [("checkpointed",), ("wal-only",)])
+            finally:
+                if held is not None:
+                    held.close()
+
+    def test_source_stage_failure_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(dest, "live-dest")
+            held = _open_uncheckpointed(src, "from-src")
+            try:
+                before = _sha(dest)
+                src_before = _sha(src)
+                wal_before = _sha(Path(str(src) + "-wal"))
+                stderr = io.StringIO()
+                with mock.patch("os.link", side_effect=OSError("injected link")):
+                    with mock.patch("sys.stderr", stderr):
+                        rc = restore.main(["--src", str(src), "--dest", str(dest)])
+                self.assertEqual(rc, 2, stderr.getvalue())
+                self.assertIn("cannot stage source wal", stderr.getvalue())
+                self.assertNotIn(str(root), stderr.getvalue())
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(_sha(src), src_before)
+                self.assertEqual(_sha(Path(str(src) + "-wal")), wal_before)
+                self.assertEqual(_temps(root), [])
+            finally:
+                held.close()
+
+    def test_dest_path_is_never_passed_to_sqlite_connect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            held = _open_uncheckpointed(dest, "live-row")
+            try:
+                seen: list[str] = []
+                real_connect = sqlite3.connect
+
+                def track(database, *args, **kwargs):
+                    seen.append(str(database))
+                    return real_connect(database, *args, **kwargs)
+
+                with mock.patch("sqlite3.connect", side_effect=track):
+                    self._allow(src, dest)
+                plain = str(dest.resolve())
+                uri = dest.resolve().as_uri()
+                for item in seen:
+                    self.assertNotIn(plain, item)
+                    self.assertNotIn(uri, item)
+                got = sqlite3.connect(uri + "?mode=ro", uri=True)
+                try:
+                    self.assertEqual(
+                        got.execute("SELECT body FROM notes").fetchall(),
+                        [("from-src",)],
+                    )
+                finally:
+                    got.close()
+            finally:
+                held.close()
+
+    def test_fsync_and_replace_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            held = _open_uncheckpointed(dest, "live-row")
+            try:
+                self.assertTrue(Path(str(dest) + "-shm").is_file())
+                events: list[str] = []
+                real_file = restore._fsync_file
+                real_dir = restore._fsync_dir
+                real_replace = os.replace
+
+                def fsync_file(path):
+                    events.append("fsync-file")
+                    return real_file(path)
+
+                def fsync_dir(path):
+                    events.append("fsync-dir")
+                    return real_dir(path)
+
+                def replace(src_path, dst_path):
+                    src_name = os.path.basename(src_path)
+                    dst_name = os.path.basename(dst_path)
+                    if dst_name == dest.name and src_name.endswith(".sqlite"):
+                        events.append("replace-main")
+                    elif src_name.endswith("-wal"):
+                        events.append("replace-wal")
+                    elif src_name.endswith("-shm"):
+                        events.append("replace-shm")
+                    else:
+                        events.append("replace-other")
+                    return real_replace(src_path, dst_path)
+
+                with mock.patch.object(restore, "_fsync_file", fsync_file):
+                    with mock.patch.object(restore, "_fsync_dir", fsync_dir):
+                        with mock.patch("os.replace", side_effect=replace):
+                            self._allow(src, dest)
+                self.assertEqual(
+                    events,
+                    [
+                        "fsync-file",
+                        "fsync-dir",
+                        "replace-wal",
+                        "replace-shm",
+                        "replace-main",
+                        "fsync-dir",
+                    ],
+                )
+            finally:
+                held.close()
+
+    def test_fullfsync_on_darwin_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notes.sqlite"
+            path.write_bytes(b"x")
+            calls: list[int] = []
+
+            class FakeFcntl:
+                F_FULLFSYNC = 99
+
+                @staticmethod
+                def fcntl(fd, op, *args):
+                    calls.append(op)
+                    return 0
+
+            with mock.patch.object(restore, "fcntl", FakeFcntl):
+                with mock.patch.object(restore.sys, "platform", "darwin"):
+                    restore._fsync_file(path)
+                    restore._fsync_dir(Path(tmp))
+            self.assertEqual(calls, [99, 99])
+            calls.clear()
+            with mock.patch.object(restore, "fcntl", FakeFcntl):
+                with mock.patch.object(restore.sys, "platform", "linux"):
+                    restore._fsync_file(path)
+            self.assertEqual(calls, [])
+
+    def test_reader_or_writer_refuse_keeps_dest_main_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            _make_db(src, "from-src")
+            for label, begin_reader in (("writer", False), ("reader", True)):
+                with self.subTest(label=label):
+                    dest = root / ("%s.sqlite" % label)
+                    holder = _open_uncheckpointed(dest, "live-row")
+                    reader = None
+                    try:
+                        if begin_reader:
+                            reader = sqlite3.connect(str(dest))
+                            reader.execute("BEGIN")
+                            reader.execute("SELECT body FROM notes").fetchall()
+                        before = _sha(dest)
+                        ino = dest.stat().st_ino
+                        wal = Path(str(dest) + "-wal")
+                        wal_hash = _sha(wal)
+
+                        def boom(_conn):
+                            raise restore.RestoreRefuse("refuse: integrity_check failed")
+
+                        with mock.patch.object(restore, "_integrity_ok", boom):
+                            with self.assertRaises(restore.RestoreRefuse):
+                                restore.restore_database(
+                                    src, dest, cmdlines=[], lock_held=False
+                                )
+                        self.assertEqual(_sha(dest), before)
+                        self.assertEqual(dest.stat().st_ino, ino)
+                        self.assertTrue(wal.is_file())
+                        self.assertEqual(_sha(wal), wal_hash)
+                        self.assertEqual(_temps(root), [])
+                    finally:
+                        if reader is not None:
+                            reader.close()
+                        holder.close()
+
+    def test_fsync_replace_integrity_failures_keep_wal(self):
+        real_replace = os.replace
+
+        def integrity_boom(_conn):
+            raise restore.RestoreRefuse("refuse: integrity_check failed")
+
+        def fsync_boom(_path):
+            raise OSError("injected fsync")
+
+        def replace_boom(src_path, dst_path, *, dest_name):
+            src_name = os.path.basename(src_path)
+            dst_name = os.path.basename(dst_path)
+            if dst_name == dest_name and src_name.endswith(".sqlite"):
+                raise OSError("injected replace")
+            return real_replace(src_path, dst_path)
+
+        cases = (
+            ("integrity", integrity_boom, None, 2),
+            ("fsync", None, "fsync", 1),
+            ("replace", None, "replace", 1),
+        )
+        for label, integrity, kind, expect_rc in cases:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    src = root / "backup.sqlite"
+                    dest = root / "mailroom.sqlite"
+                    _make_db(src, "from-src")
+                    holder = _open_uncheckpointed(dest, "live-row")
+                    try:
+                        before = _sha(dest)
+                        ino = dest.stat().st_ino
+                        wal = Path(str(dest) + "-wal")
+                        wal_hash = _sha(wal)
+                        wal_ino = wal.stat().st_ino
+                        stderr = io.StringIO()
+                        patches = []
+                        if integrity is not None:
+                            patches.append(
+                                mock.patch.object(restore, "_integrity_ok", integrity)
+                            )
+                        if kind == "fsync":
+                            patches.append(
+                                mock.patch.object(restore, "_fsync_file", fsync_boom)
+                            )
+                        if kind == "replace":
+                            patches.append(
+                                mock.patch(
+                                    "os.replace",
+                                    side_effect=lambda src_path, dst_path: replace_boom(
+                                        src_path, dst_path, dest_name=dest.name
+                                    ),
+                                )
+                            )
+                        with mock.patch("sys.stderr", stderr):
+                            for patch in patches:
+                                patch.start()
+                            try:
+                                rc = restore.main(
+                                    [
+                                        "--src",
+                                        str(src),
+                                        "--dest",
+                                        str(dest),
+                                        "--allow-mailroom-sqlite",
+                                    ]
+                                )
+                            finally:
+                                for patch in reversed(patches):
+                                    patch.stop()
+                        self.assertEqual(rc, expect_rc, stderr.getvalue())
+                        self.assertNotIn(str(root), stderr.getvalue())
+                        self.assertEqual(_sha(dest), before)
+                        self.assertEqual(dest.stat().st_ino, ino)
+                        self.assertTrue(wal.is_file())
+                        self.assertGreater(wal.stat().st_size, 0)
+                        self.assertEqual(_sha(wal), wal_hash)
+                        self.assertEqual(wal.stat().st_ino, wal_ino)
+                        self.assertEqual(_temps(root), [])
+                    finally:
+                        holder.close()
+
+    def test_recreated_dest_wal_refuses_and_restores_aside(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "mailroom.sqlite"
+            _make_db(src, "from-src")
+            holder = _open_uncheckpointed(dest, "live-row")
+            try:
+                before = _sha(dest)
+                ino = dest.stat().st_ino
+                wal = Path(str(dest) + "-wal")
+                wal_hash = _sha(wal)
+                wal_ino = wal.stat().st_ino
+                real_park = restore._park_sidecars
+
+                def park_and_recreate(target):
+                    parked = real_park(target)
+                    Path(str(target) + "-wal").write_bytes(b"recreated-nonempty-wal")
+                    return parked
+
+                stderr = io.StringIO()
+                with mock.patch.object(restore, "_park_sidecars", park_and_recreate):
+                    with mock.patch("sys.stderr", stderr):
+                        rc = restore.main(
+                            [
+                                "--src",
+                                str(src),
+                                "--dest",
+                                str(dest),
+                                "--allow-mailroom-sqlite",
+                            ]
+                        )
+                self.assertEqual(rc, 2, stderr.getvalue())
+                self.assertIn("dest wal recreated", stderr.getvalue())
+                self.assertNotIn(str(root), stderr.getvalue())
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(dest.stat().st_ino, ino)
+                self.assertEqual(_sha(wal), wal_hash)
+                self.assertEqual(wal.stat().st_ino, wal_ino)
+                self.assertEqual(_temps(root), [])
+            finally:
+                holder.close()
+
+    def test_free_space_refuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(dest, "live-dest")
+            holder = _open_uncheckpointed(src, "from-src")
+            try:
+                before = _sha(dest)
+                usage = shutil.disk_usage(root)
+                margin = 64 * 1024 * 1024
+                wal_size = Path(str(src) + "-wal").stat().st_size
+                self.assertGreater(wal_size, 0)
+                need = src.stat().st_size + wal_size + margin
+                short_of_wal = type(usage)(usage.total, usage.used, src.stat().st_size + margin)
+                zero = type(usage)(usage.total, usage.used, 0)
+                exact = type(usage)(usage.total, usage.used, need)
+                one_short = type(usage)(usage.total, usage.used, need - 1)
+                stderr = io.StringIO()
+                seen: list[Path] = []
+
+                def fake_usage(path):
+                    seen.append(Path(path))
+                    return zero
+
+                with mock.patch.object(restore.shutil, "disk_usage", side_effect=fake_usage):
+                    with mock.patch(
+                        "tempfile.mkstemp", side_effect=AssertionError("mkstemp")
+                    ):
+                        with mock.patch("sys.stderr", stderr):
+                            rc = restore.main(["--src", str(src), "--dest", str(dest)])
+                self.assertEqual(rc, 2, stderr.getvalue())
+                self.assertIn("refuse: not enough free space", stderr.getvalue())
+                self.assertNotIn(str(root), stderr.getvalue())
+                self.assertEqual(seen, [dest.parent])
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(_temps(root), [])
+
+                with mock.patch.object(
+                    restore.shutil, "disk_usage", return_value=short_of_wal
+                ):
+                    with self.assertRaises(restore.RestoreRefuse) as ctx:
+                        restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                self.assertIn("not enough free space", str(ctx.exception))
+                self.assertEqual(_sha(dest), before)
+
+                with mock.patch.object(
+                    restore.shutil, "disk_usage", return_value=one_short
+                ):
+                    with self.assertRaises(restore.RestoreRefuse):
+                        restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                self.assertEqual(_sha(dest), before)
+                self.assertEqual(_temps(root), [])
+
+                with mock.patch.object(restore.shutil, "disk_usage", return_value=exact):
+                    restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+                self.assertEqual(_row_digest(dest), _row_digest(src))
+            finally:
+                holder.close()
+
+    def test_preserves_dest_mode_and_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            os.chmod(dest, 0o640)
+            before = dest.stat()
+            restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+            got = dest.stat()
+            self.assertEqual(stat.S_IMODE(got.st_mode), 0o640)
+            self.assertEqual(got.st_uid, before.st_uid)
+            self.assertEqual(got.st_gid, before.st_gid)
+            self.assertNotEqual(got.st_ino, before.st_ino)
+            self.assertEqual(_row_digest(dest), _row_digest(src))
+
+    def test_permission_error_preserving_mode_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            before = _sha(dest)
+            ino = dest.stat().st_ino
+            stderr = io.StringIO()
+
+            def boom(*_args, **_kwargs):
+                raise PermissionError("injected chown")
+
+            with mock.patch("os.chown", side_effect=boom):
+                with mock.patch("sys.stderr", stderr):
+                    rc = restore.main(["--src", str(src), "--dest", str(dest)])
+            self.assertEqual(rc, 2, stderr.getvalue())
+            self.assertIn("cannot preserve dest mode", stderr.getvalue())
+            self.assertNotIn(str(root), stderr.getvalue())
+            self.assertEqual(_sha(dest), before)
+            self.assertEqual(dest.stat().st_ino, ino)
+            self.assertEqual(_temps(root), [])
+
+    def test_post_restore_mode_ro_open_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "backup.sqlite"
+            dest = root / "dest.sqlite"
+            _make_db(src, "from-src")
+            _make_db(dest, "live-dest")
+            restore.restore_database(src, dest, cmdlines=[], lock_held=False)
+            self.assertEqual(_format_versions(dest), (1, 1))
+            self.assertFalse(Path(str(dest) + "-wal").exists())
+            self.assertFalse(Path(str(dest) + "-shm").exists())
+            conn = sqlite3.connect(dest.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                self.assertEqual(
+                    conn.execute("SELECT body FROM notes").fetchall(),
+                    [("from-src",)],
+                )
+                self.assertEqual(
+                    str(conn.execute("PRAGMA integrity_check").fetchone()[0]).lower(),
+                    "ok",
+                )
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

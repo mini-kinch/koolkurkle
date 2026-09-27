@@ -13,16 +13,24 @@ the database. Never modifies or deletes the source file.
 The temp copy is sealed with PRAGMA journal_mode=DELETE before the
 atomic replace. Header bytes 18-19 are then the rollback versions
 (1, 1), so a later mode=ro open does not need a -shm file. The next
-writer sets WAL (scripts/sqlite_pragmas.py). Rebuilding -shm after the
-replace would leave a WAL database plus new sidecars; those sidecars
-are removed so a stale WAL cannot replay onto the restored file.
+writer sets WAL (scripts/sqlite_pragmas.py).
+
+The live destination is left uncheckpointed. Its -wal and -shm are
+renamed aside before the temp file replaces the main file, and renamed
+back if that replace does not happen. A missing or empty source -wal
+is opened immutable=1. A non-empty source -wal is hardlinked into a
+private directory and opened mode=ro there, so the source gains no
+sidecars and uncheckpointed frames are still copied.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
+import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -50,6 +58,8 @@ _TEMP_PREFIX = ".att0-restore-"
 # be opened mode=ro on SQLite 3.51.0 (Apple /usr/bin/python3): that build
 # cannot create the shared-memory file on a read-only connection.
 _ROLLBACK_FORMAT = (1, 1)
+# Source size + source -wal size + this margin must fit in the dest dir.
+_FREE_MARGIN = 64 * 1024 * 1024
 
 
 class RestoreRefuse(RuntimeError):
@@ -58,6 +68,15 @@ class RestoreRefuse(RuntimeError):
 
 def _ro_uri(path: Path) -> str:
     return path.resolve().as_uri() + "?mode=ro"
+
+
+def _immutable_uri(path: Path) -> str:
+    return path.resolve().as_uri() + "?immutable=1"
+
+
+def _is_sor_basename(path: Path) -> bool:
+    """Case-insensitive mailroom.sqlite check (APFS preserves case)."""
+    return path.name.casefold() == SOR_BASENAME.casefold()
 
 
 def _sidecar(path: Path, suffix: str) -> Path:
@@ -114,10 +133,17 @@ def _remove_sqlite_family(path: Path) -> None:
         _unlink_quiet(_sidecar(path, suffix))
 
 
+def _fsync_fd(fd: int) -> None:
+    os.fsync(fd)
+    # Darwin's os.fsync does not push to stable storage. F_FULLFSYNC does.
+    if sys.platform == "darwin" and hasattr(fcntl, "F_FULLFSYNC"):
+        fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+
+
 def _fsync_file(path: Path) -> None:
     fd = os.open(str(path), os.O_RDONLY)
     try:
-        os.fsync(fd)
+        _fsync_fd(fd)
     finally:
         os.close(fd)
 
@@ -125,9 +151,117 @@ def _fsync_file(path: Path) -> None:
 def _fsync_dir(path: Path) -> None:
     fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
     try:
-        os.fsync(fd)
+        _fsync_fd(fd)
     finally:
         os.close(fd)
+
+
+def _lexists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except OSError:
+        return False
+    return True
+
+
+def _wal_nonempty(path: Path) -> bool:
+    wal = _sidecar(path, "-wal")
+    try:
+        st = wal.stat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise RestoreRefuse("refuse: wal unreadable") from None
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+
+def _require_free_space(source: Path, parent: Path) -> None:
+    need = source.stat().st_size + _FREE_MARGIN
+    wal = _sidecar(source, "-wal")
+    if wal.is_file():
+        need += wal.stat().st_size
+    if shutil.disk_usage(parent).free < need:
+        raise RestoreRefuse("refuse: not enough free space")
+
+
+def _copy_bytes(src: Path, dest: Path) -> None:
+    with open(src, "rb") as inp, open(dest, "wb") as out:
+        shutil.copyfileobj(inp, out, length=1024 * 1024)
+
+
+def _remove_private(private: Path | None) -> None:
+    if private is None:
+        return
+    shutil.rmtree(private, ignore_errors=True)
+
+
+def _open_source(source: Path) -> tuple[sqlite3.Connection, Path | None]:
+    """Open source for backup without creating sidecars beside it.
+
+    Missing or empty -wal: immutable=1. That open does not create -wal/-shm
+    and does not see uncheckpointed frames, so it is only used when there
+    are none. Non-empty -wal: hardlink the main file into a private directory
+    on the same filesystem, copy the -wal bytes beside that link, and open
+    the private path mode=ro. immutable=1 is never used in that case.
+    """
+    if not _wal_nonempty(source):
+        return sqlite3.connect(_immutable_uri(source), uri=True), None
+    private: Path | None = None
+    try:
+        private = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=str(source.parent)))
+        staged = private / "db.sqlite"
+        os.link(str(source), str(staged))
+        _copy_bytes(_sidecar(source, "-wal"), _sidecar(staged, "-wal"))
+        conn = sqlite3.connect(_ro_uri(staged), uri=True)
+    except OSError:
+        _remove_private(private)
+        raise RestoreRefuse("refuse: cannot stage source wal") from None
+    except Exception:
+        _remove_private(private)
+        raise
+    return conn, private
+
+
+def _preserve_dest_mode_owner(tmp: Path, dest: Path) -> None:
+    try:
+        st = dest.stat()
+        os.chmod(str(tmp), stat.S_IMODE(st.st_mode))
+        os.chown(str(tmp), st.st_uid, st.st_gid)
+    except PermissionError:
+        raise RestoreRefuse("refuse: cannot preserve dest mode") from None
+
+
+def _aside_path(path: Path) -> Path:
+    token = os.urandom(8).hex()
+    return path.parent / ("%saside-%s-%s" % (_TEMP_PREFIX, token, path.name))
+
+
+def _unpark(parked: list[tuple[Path, Path]]) -> None:
+    for aside, original in reversed(parked):
+        if _lexists(aside):
+            os.replace(str(aside), str(original))
+
+
+def _park_sidecars(dest: Path) -> list[tuple[Path, Path]]:
+    """Rename existing dest -wal and -shm aside. The main inode stays."""
+    parked: list[tuple[Path, Path]] = []
+    try:
+        for suffix in ("-wal", "-shm"):
+            side = _sidecar(dest, suffix)
+            if not _lexists(side):
+                continue
+            aside = _aside_path(side)
+            os.replace(str(side), str(aside))
+            parked.append((aside, side))
+    except Exception:
+        _unpark(parked)
+        raise
+    return parked
+
+
+def _drop_parked(parked: list[tuple[Path, Path]]) -> None:
+    for aside, _original in parked:
+        _unlink_quiet(aside)
 
 
 def _spawned_by_att0_restore_wrapper(lock_path: Path | None) -> bool:
@@ -177,31 +311,6 @@ def _refuse_writer_conflict(
         )
 
 
-def _checkpoint_nonempty_wal(dest: Path) -> None:
-    wal = _sidecar(dest, "-wal")
-    try:
-        nonempty = wal.is_file() and wal.stat().st_size > 0
-    except OSError:
-        nonempty = False
-    if not nonempty:
-        return
-    if not dest.is_file():
-        raise RestoreRefuse("refuse: wal checkpoint busy")
-    conn = sqlite3.connect(str(dest))
-    try:
-        try:
-            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        except sqlite3.OperationalError as exc:
-            text = str(exc).lower()
-            if "busy" in text or "locked" in text:
-                raise RestoreRefuse("refuse: wal checkpoint busy") from None
-            raise
-    finally:
-        conn.close()
-    if row is None or int(row[0]) != 0:
-        raise RestoreRefuse("refuse: wal checkpoint busy")
-
-
 def _apply_journal_mode(conn: sqlite3.Connection, mode: str) -> None:
     row = conn.execute("PRAGMA journal_mode=%s" % mode).fetchone()
     if row is None or str(row[0]).lower() != mode:
@@ -230,7 +339,7 @@ def restore_database(
     """Replace dest with a backup of src. Opens nothing before the writer gate."""
     source = Path(src).expanduser()
     target = Path(dest).expanduser()
-    if target.name == SOR_BASENAME and not allow_mailroom_sqlite:
+    if _is_sor_basename(target) and not allow_mailroom_sqlite:
         raise RestoreRefuse(
             "refuse: basename mailroom.sqlite "
             "(pass --allow-mailroom-sqlite to override)"
@@ -246,14 +355,18 @@ def restore_database(
         raise RestoreRefuse("refuse: dest directory is missing")
     if not source.is_file():
         raise RestoreRefuse("refuse: src is missing")
-    if source.name == SOR_BASENAME:
+    if _is_sor_basename(source):
         raise RestoreRefuse("refuse: src basename is mailroom.sqlite")
     if _same_file(source, target):
         raise RestoreRefuse("refuse: src and dest are the same file")
     if not _is_sqlite_file(source):
         raise RestoreRefuse("refuse: src is not a sqlite database")
+    _require_free_space(source, parent)
 
     tmp_path: Path | None = None
+    private: Path | None = None
+    src_conn: sqlite3.Connection | None = None
+    parked: list[tuple[Path, Path]] = []
     replaced = False
     try:
         fd, tmp_name = tempfile.mkstemp(
@@ -263,7 +376,7 @@ def restore_database(
         )
         os.close(fd)
         tmp_path = Path(tmp_name)
-        src_conn = sqlite3.connect(_ro_uri(source), uri=True)
+        src_conn, private = _open_source(source)
         try:
             tmp_conn = sqlite3.connect(str(tmp_path))
             try:
@@ -278,18 +391,33 @@ def restore_database(
                 tmp_conn.close()
         finally:
             src_conn.close()
+            src_conn = None
+            _remove_private(private)
+            private = None
         if _format_versions(tmp_path) != _ROLLBACK_FORMAT:
             raise RestoreRefuse("refuse: journal_mode mismatch")
         for suffix in ("-wal", "-shm", "-journal"):
             _unlink_quiet(_sidecar(tmp_path, suffix))
-        _checkpoint_nonempty_wal(target)
+        if target.exists():
+            _preserve_dest_mode_owner(tmp_path, target)
         _fsync_file(tmp_path)
+        _fsync_dir(parent)
+        parked = _park_sidecars(target)
+        if _wal_nonempty(target):
+            raise RestoreRefuse("refuse: dest wal recreated")
         os.replace(str(tmp_path), str(target))
         replaced = True
+        _drop_parked(parked)
+        parked = []
         for suffix in ("-wal", "-shm"):
             _unlink_quiet(_sidecar(target, suffix))
         _fsync_dir(parent)
     finally:
+        if src_conn is not None:
+            src_conn.close()
+        _remove_private(private)
+        if parked and not replaced:
+            _unpark(parked)
         if tmp_path is not None and not replaced:
             _remove_sqlite_family(tmp_path)
     return {"src": source.name, "dest": target.name}
@@ -318,8 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-mailroom-sqlite",
         action="store_true",
         help=(
-            "Permit destination basename mailroom.sqlite. "
-            "Required when the dest basename is mailroom.sqlite. "
+            "Permit a destination basename that matches mailroom.sqlite "
+            "in any case. Required when the dest basename matches. "
             "The writer gate still applies."
         ),
     )
