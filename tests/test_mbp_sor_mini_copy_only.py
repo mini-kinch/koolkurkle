@@ -28,6 +28,16 @@ if str(SCRIPTS) not in sys.path:
 import mailroom_copy_db as copy_db  # noqa: E402
 
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
+SOR_HEADING = "## MBP SoR vs Mini copy-only"
+
+
+def sor_section(raw: str) -> str:
+    """Return the SoR section body, stopping at the next heading."""
+    start = raw.index(SOR_HEADING)
+    nxt = raw.find("\n## ", start + len(SOR_HEADING))
+    if nxt == -1:
+        return raw[start:]
+    return raw[start:nxt]
 
 
 class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
@@ -45,6 +55,17 @@ class MbpSorMiniCopyOnlyContractTests(unittest.TestCase):
         self.assertIn("mailroom-daily-copy.sqlite", text)
         self.assertIn("hard refuse", text)
         self.assertIn("db_mode=refused", text)
+        section = sor_section(raw)
+        self.assertIn(
+            "`db_mode=sor` only when `mailroom.sqlite` is explicitly named and rem-legacy is absent.",
+            section,
+        )
+        self.assertIn("explicitly named and rem-legacy is absent", section)
+        self.assertIn(
+            "There is no silent default to `mailroom.sqlite`.",
+            section,
+        )
+        self.assertIn("EXIT 0", section)
         self.assertIn("writer lock", text)
         self.assertIn("flock", text)
         self.assertIn("Do not start a second writer against SoR", text)
