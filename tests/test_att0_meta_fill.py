@@ -3310,20 +3310,24 @@ class CurlTransportTests(unittest.TestCase):
         self.assertIn("second connection", str(ctx.exception))
         self.assertNotIn(SECRET, str(ctx.exception))
 
-    def test_literal_filename_from_real_curl_fixture_is_not_an_error(self):
-        import imap_curl as imap_curl
+    def test_real_curl_fixture_isolates_a_dropped_literal(self):
+        """Captured by: /usr/bin/curl --silent --show-error --fail-early -K - (stdin config, no dump-header). Two blocks joined by a line that is next. Each block sets silent, show-error, connect-timeout = "20", max-time = "20", write-out = "CURL_NUM_CONNECTS:%{num_connects}\\n", cacert = "cert.pem", user = "user@example.invalid:example-secret", url = "imaps://127.0.0.1:PORT/". First request = "EXAMINE \\"INBOX\\"". Second request = "UID FETCH 1,9 (BODYSTRUCTURE)". The local server sends UID 1 as a quoted structure and UID 9 as an {8} filename. The quoted UID parses. The literal UID is literal_dropped."""
+        import imap_curl as mod; read_validity = mod.uidvalidity_from_curl_output; split = mod.parse_fetch_structures
 
         raw = (TESTS / "fixtures" / "curl_imaps_bodystructure_literal.bin").read_bytes()
-        self.assertIn(b"note.pdf", raw)
-        self.assertIn(b"BODYSTRUCTURE {", raw)
+        self.assertNotIn(b"note.pdf", raw)
+        self.assertIn(b'("NAME" {8}', raw)
+        self.assertIn(b"CURL_NUM_CONNECTS:1\n", raw)
+        self.assertIn(b"CURL_NUM_CONNECTS:0\n", raw)
         self.assertNotIn(b"example-secret", raw)
         text = raw.decode("utf-8", "surrogateescape")
         self.assertIn("\r\n", text)
-        self.assertEqual(imap_curl.uidvalidity_from_curl_output(text), 11)
-        found = imap_curl.structures_by_uid(text)
-        parts = bodystructure.parts_from_bodystructure(found["9"])
-        self.assertEqual(parts[0].filename, "note.pdf")
-        self.assertEqual(parts[0].mime, "application/pdf")
+        self.assertEqual(read_validity(text), 11)
+        found, issues = split(text)
+        self.assertEqual(issues.get("9"), "literal_dropped")
+        self.assertNotIn("9", found)
+        sibling = bodystructure.parts_from_bodystructure(found["1"])
+        self.assertEqual(sibling[0].mime, "text/plain")
         sample = (
             "* OK [UIDVALIDITY 5] UIDs valid\r\n"
             "* 1 FETCH (UID 9 BODYSTRUCTURE "
@@ -3333,10 +3337,10 @@ class CurlTransportTests(unittest.TestCase):
             "note.pdf)) NIL NIL))\r\n"
             "* OK [UIDVALIDITY 99] after fetch\r\n"
         )
-        self.assertEqual(imap_curl.uidvalidity_from_curl_output(sample), 5)
-        sample_parts = bodystructure.parts_from_bodystructure(
-            imap_curl.structures_by_uid(sample)["9"]
-        )
+        self.assertEqual(read_validity(sample), 5)
+        sample_found, sample_issues = split(sample)
+        self.assertEqual(sample_issues, {})
+        sample_parts = bodystructure.parts_from_bodystructure(sample_found["9"])
         self.assertEqual(sample_parts[0].filename, "note.pdf")
 
         def runner(argv, config_text, env, timeout):
@@ -3348,7 +3352,10 @@ class CurlTransportTests(unittest.TestCase):
             db = Path(tmp) / "mailroom-copy.sqlite"
             _seed(
                 db,
-                [("ex-pdf", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                [
+                    ("ex-plain", "imap-live", "1", None, None, "synthetic", "INBOX"),
+                    ("ex-lit", "imap-live", "9", None, None, "synthetic", "INBOX"),
+                ],
             )
             with mock.patch("imap_curl.run_subprocess", runner):
                 report = meta.fill_metadata(
@@ -3364,18 +3371,44 @@ class CurlTransportTests(unittest.TestCase):
                     max_messages=0,
                     timeout_s=5,
                 )
-            self.assertEqual(report["errors"], 0, report.get("curl_failures"))
+            self.assertEqual(report["errors"], 1, report.get("curl_failures"))
             self.assertEqual(report["messages"], 1)
+            self.assertEqual(report["literal_dropped"], 1)
+            self.assertEqual(report["literal_truncated"], 0)
             self.assertEqual(report["bytes_stored"], 0)
-            self.assertNotIn(SECRET, str(report))
+            self.assertEqual(
+                report["literal_folders"],
+                [
+                    {
+                        "index": 1,
+                        "literal_dropped": 1,
+                        "literal_truncated": 0,
+                        "dropped_uids": [9],
+                        "truncated_uids": [],
+                    }
+                ],
+            )
+            rendered = meta.format_report(report)
+            self.assertIn("literal_dropped=1", rendered)
+            self.assertIn("literal_folder index=1", rendered)
+            self.assertIn("dropped_uids=9", rendered)
+            self.assertNotIn("INBOX", rendered)
+            self.assertNotIn("ex-plain", rendered)
+            self.assertNotIn("ex-lit", rendered)
+            self.assertNotIn("note.pdf", rendered)
+            self.assertNotIn(SECRET, rendered)
             conn = sqlite3.connect(str(db))
             try:
                 row = conn.execute(
                     "SELECT mime, filename FROM attachments"
                 ).fetchone()
+                scans = conn.execute(
+                    "SELECT message_id FROM attachment_meta_scans"
+                ).fetchall()
             finally:
                 conn.close()
-            self.assertEqual(row, ("application/pdf", "note.pdf"))
+            self.assertEqual(row, ("text/plain", None))
+            self.assertEqual(scans, [("ex-plain",)])
 
     def test_folder_progress_line_is_flushed_without_the_folder_name(self):
         calls = []
@@ -3441,17 +3474,19 @@ class CurlTransportTests(unittest.TestCase):
         self.assertNotIn("boom", str(report))
 
     def test_truncated_literal_counts_as_an_error(self):
-        """A short ``{n}`` literal is a ParseError and is not scanned."""
-        import imap_curl as imap_curl
+        """A short ``{n}`` literal is literal_truncated for that UID only."""
+        import imap_curl as mod
 
         short = (
             "* OK [UIDVALIDITY 5] UIDs valid\r\n"
-            '* 1 FETCH (UID 9 BODYSTRUCTURE ("NAME" {8}\r\n'
+            '* 1 FETCH (UID 1 BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1))\r\n'
+            '* 2 FETCH (UID 9 BODYSTRUCTURE ("NAME" {8}\r\n'
             "note"
         )
-        with self.assertRaises(bodystructure.ParseError) as ctx:
-            imap_curl.structures_by_uid(short)
-        self.assertIn("literal short", str(ctx.exception))
+        found, issues = mod.parse_fetch_structures(short)
+        self.assertIn("1", found)
+        self.assertEqual(issues.get("9"), "literal_truncated")
+        self.assertNotIn("9", found)
         calls = []
 
         def runner(argv, config_text, env, timeout):
@@ -3464,7 +3499,10 @@ class CurlTransportTests(unittest.TestCase):
             db = Path(tmp) / "mailroom-copy.sqlite"
             _seed(
                 db,
-                [("ex-short", "imap-live", "9", None, None, "synthetic", "INBOX")],
+                [
+                    ("ex-ok", "imap-live", "1", None, None, "synthetic", "INBOX"),
+                    ("ex-short", "imap-live", "9", None, None, "synthetic", "INBOX"),
+                ],
             )
             with mock.patch("imap_curl.run_subprocess", runner):
                 report = meta.fill_metadata(
@@ -3480,30 +3518,39 @@ class CurlTransportTests(unittest.TestCase):
                     timeout_s=0,
                 )
             self.assertEqual(len(calls), 1)
-            self.assertEqual(report["messages"], 0)
+            self.assertEqual(report["messages"], 1)
             self.assertEqual(report["capped"], 0)
-            self.assertEqual(report["errors"], report["eligible"])
+            self.assertEqual(report["errors"], 1)
+            self.assertEqual(report["literal_truncated"], 1)
+            self.assertEqual(report["literal_dropped"], 0)
             self.assertEqual(
                 report["messages"] + report["errors"] + report["capped"],
                 report["eligible"],
             )
-            self.assertNotIn(SECRET, str(report))
+            rendered = meta.format_report(report)
+            self.assertIn("literal_truncated=1", rendered)
+            self.assertIn("literal_folder index=1", rendered)
+            self.assertIn("truncated_uids=9", rendered)
+            self.assertNotIn("INBOX", rendered)
+            self.assertNotIn("ex-ok", rendered)
+            self.assertNotIn("ex-short", rendered)
+            self.assertNotIn(SECRET, rendered)
             conn = sqlite3.connect(str(db))
             try:
                 scans = conn.execute(
-                    "SELECT COUNT(*) FROM attachment_meta_scans"
-                ).fetchone()[0]
+                    "SELECT message_id FROM attachment_meta_scans"
+                ).fetchall()
                 stored = conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
             finally:
                 conn.close()
-            self.assertEqual(scans, 0)
-            self.assertEqual(stored, 0)
+            self.assertEqual(scans, [("ex-ok",)])
+            self.assertEqual(stored, 1)
 
     def test_wire_harness_modes(self):
         """Real curl against a fake IMAPS server, one mode at a time.
 
         SELECT is answered ``[READ-WRITE]`` so a regression cannot look
-        read-only. Modes: normal, missing_uid, literal, trunc_literal,
+        read-only. Modes: normal, missing_uid, literal_mixed, trunc_literal,
         login_no, rc 7, rc 21, rc 60.
         """
         import imap_curl as imap_curl
@@ -3611,7 +3658,7 @@ class CurlTransportTests(unittest.TestCase):
                                         b'* 1 FETCH (UID 1 BODYSTRUCTURE ("TEXT" "PLAIN" '
                                         b'NIL NIL NIL "7BIT" 4 1))\r\n'
                                     )
-                                elif current == "literal":
+                                elif current == "literal_mixed":
                                     name = b"note.pdf"
                                     inner = (
                                         b'("APPLICATION" "PDF" ("NAME" {8}\r\n'
@@ -3620,8 +3667,15 @@ class CurlTransportTests(unittest.TestCase):
                                         + name
                                         + b")) NIL NIL)"
                                     )
+                                    quoted = (
+                                        b'* 1 FETCH (UID 1 BODYSTRUCTURE ("TEXT" "PLAIN" '
+                                        b'NIL NIL NIL "7BIT" 4 1))\r\n'
+                                    )
                                     body = (
-                                        b"* 1 FETCH (UID 9 BODYSTRUCTURE " + inner + b")\r\n"
+                                        quoted
+                                        + b"* 2 FETCH (UID 9 BODYSTRUCTURE "
+                                        + inner
+                                        + b")\r\n"
                                     )
                                 elif current == "trunc_literal":
                                     body = (
@@ -3753,6 +3807,10 @@ class CurlTransportTests(unittest.TestCase):
                     report,
                 )
                 self.assertNotIn(password, str(report))
+                shot["messages"] = report["messages"]
+                shot["errors"] = report["errors"]
+                shot["literal_dropped"] = report.get("literal_dropped") or 0
+                shot["literal_truncated"] = report.get("literal_truncated") or 0
                 transcript = "\n".join(seen)
                 self.assertNotIn("SELECT", transcript)
                 self.assertNotIn("READ-WRITE", transcript)
@@ -3774,7 +3832,7 @@ class CurlTransportTests(unittest.TestCase):
                         self.assertIn("max-time", block)
                         self.assertIn("user = ", block)
                 print(
-                    "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s"
+                    "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s messages=%s errors=%s literal_dropped=%s literal_truncated=%s"
                     % (
                         name,
                         shot["processes"],
@@ -3782,6 +3840,10 @@ class CurlTransportTests(unittest.TestCase):
                         shot["logins"],
                         shot["selects"],
                         shot["examines"],
+                        shot["messages"],
+                        shot["errors"],
+                        shot["literal_dropped"],
+                        shot["literal_truncated"],
                     ),
                     flush=True,
                 )
@@ -3841,21 +3903,30 @@ class CurlTransportTests(unittest.TestCase):
                 results.append(shot)
 
                 reset()
-                mode["name"] = "literal"
-                _db, report = run_fill(
-                    [("ex-lit", "imap-live", "9", None, None, "synthetic", "INBOX")],
-                    apply=False,
+                mode["name"] = "literal_mixed"
+                db, report = run_fill(
+                    [
+                        ("ex-plain", "imap-live", "1", None, None, "synthetic", "INBOX"),
+                        ("ex-lit", "imap-live", "9", None, None, "synthetic", "INBOX"),
+                    ],
+                    apply=True,
                     cacert_path=cert,
                 )
-                shot = assert_wire("literal", report, processes=1, examines=1)
+                shot = assert_wire("literal_mixed", report, processes=1, examines=1)
                 self.assertEqual(shot["connections"], 1, shot)
                 self.assertEqual(shot["logins"], 1, shot)
-                if report["messages"] == 1:
-                    self.assertEqual(report["errors"], 0, report)
-                    self.assertGreaterEqual(report["filenames"], 1)
-                else:
-                    self.assertEqual(report["messages"], 0, report)
-                    self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertEqual(report["messages"], 1, report)
+                self.assertEqual(report["errors"], 1, report)
+                self.assertEqual(report["literal_dropped"], 1, report)
+                self.assertEqual(report["literal_truncated"], 0, report)
+                self.assertEqual(report["literal_folders"][0]["index"], 1)
+                self.assertEqual(report["literal_folders"][0]["dropped_uids"], [9])
+                rendered = meta.format_report(report)
+                self.assertIn("dropped_uids=9", rendered)
+                self.assertNotIn("INBOX", rendered)
+                self.assertNotIn("ex-plain", rendered)
+                self.assertNotIn("ex-lit", rendered)
+                self.assertNotIn("note.pdf", calls[0]["stdout"])
                 results.append(shot)
 
                 reset()
@@ -3869,7 +3940,15 @@ class CurlTransportTests(unittest.TestCase):
                 self.assertEqual(shot["connections"], 1, shot)
                 self.assertEqual(shot["logins"], 1, shot)
                 self.assertEqual(report["messages"], 0, report)
-                self.assertEqual(report["errors"], report["eligible"], report)
+                self.assertEqual(report["errors"], 1, report)
+                self.assertEqual(report["literal_truncated"], 1, report)
+                self.assertEqual(report["literal_dropped"], 0, report)
+                self.assertEqual(report["literal_folders"][0]["index"], 1)
+                self.assertEqual(report["literal_folders"][0]["truncated_uids"], [9])
+                rendered = meta.format_report(report)
+                self.assertIn("truncated_uids=9", rendered)
+                self.assertNotIn("INBOX", rendered)
+                self.assertNotIn("ex-trunc", rendered)
                 conn = sqlite3.connect(str(db))
                 try:
                     scans = conn.execute(
@@ -3966,6 +4045,10 @@ class CurlTransportTests(unittest.TestCase):
                     "logins": 0,
                     "selects": 0,
                     "examines": 0,
+                    "messages": report["messages"],
+                    "errors": report["errors"],
+                    "literal_dropped": report.get("literal_dropped") or 0,
+                    "literal_truncated": report.get("literal_truncated") or 0,
                 }
                 self.assertEqual(shot["processes"], 1, shot)
                 self.assertEqual(report["messages"], 0, report)
@@ -3980,13 +4063,19 @@ class CurlTransportTests(unittest.TestCase):
                 self.assertNotIn(password, str(report))
                 self.assertEqual(calls[0]["argv"][0], "/usr/bin/curl")
                 print(
-                    "WIRE rc7 processes=1 connections=0 logins=0 selects=0 examines=0",
+                    "WIRE rc7 processes=1 connections=0 logins=0 selects=0 examines=0 messages=%s errors=%s literal_dropped=%s literal_truncated=%s"
+                    % (
+                        shot["messages"],
+                        shot["errors"],
+                        shot["literal_dropped"],
+                        shot["literal_truncated"],
+                    ),
                     flush=True,
                 )
                 results.append(shot)
                 Path("/tmp/wire-harness-counts.txt").write_text(
                     "\n".join(
-                        "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s"
+                        "WIRE %s processes=%s connections=%s logins=%s selects=%s examines=%s messages=%s errors=%s literal_dropped=%s literal_truncated=%s"
                         % (
                             item["mode"],
                             item["processes"],
@@ -3994,6 +4083,10 @@ class CurlTransportTests(unittest.TestCase):
                             item["logins"],
                             item["selects"],
                             item["examines"],
+                            item["messages"],
+                            item["errors"],
+                            item["literal_dropped"],
+                            item["literal_truncated"],
                         )
                         for item in results
                     )

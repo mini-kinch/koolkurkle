@@ -13,7 +13,11 @@ stops that process on the first transfer error. The first is
 ``EXAMINE`` of the quoted mailbox (``"Deleted Messages"``). Later
 transfers batch UIDs (``UID FETCH 1:50,77 (BODYSTRUCTURE)``) and do not
 change the seen flag. Stdout is read as bytes so CRLF stays intact.
-There is no ``--dump-header``. UIDVALIDITY is the first untagged
+There is no ``--dump-header``. A dropped or truncated ``{n}`` literal is an
+error for that UID only (``literal_dropped`` or ``literal_truncated``).
+Every other UID in the folder still parses. The report counts both
+reasons per folder index and lists those UIDs as numbers.
+UIDVALIDITY is the first untagged
 ``* OK [UIDVALIDITY n]`` in the EXAMINE reply, before any FETCH, and
 is stored per folder on the first ``--apply`` fill, not at ingest. A
 mismatch is counted in ``uidvalidity_mismatch`` (one per row, not per
@@ -576,6 +580,9 @@ def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
         "parts_truncated": 0,
         "uidvalidity_mismatch": 0,
         "curl_failures": [],
+        "literal_dropped": 0,
+        "literal_truncated": 0,
+        "literal_folders": [],
     }
 
 
@@ -583,6 +590,31 @@ _IMAP_NOT_SCANNED = "id NOT IN (SELECT message_id FROM attachment_meta_scans)"
 _IMAP_FOLDER_KEY = (
     "CASE WHEN folder IS NULL OR TRIM(folder) = '' THEN NULL ELSE folder END"
 )
+
+
+def _note_literal_issue(report, folder_literal, exc) -> None:
+    """Count one UID. Folder identity in the report is the index only."""
+    reason = getattr(exc, "reason", None)
+    uid = getattr(exc, "uid", None)
+    if folder_literal is None:
+        return
+    if reason not in ("literal_dropped", "literal_truncated"):
+        return
+    if uid is None or not str(uid).isdigit():
+        return
+    number = int(uid)
+    report[reason] = int(report.get(reason) or 0) + 1
+    folder_literal[reason] = int(folder_literal.get(reason) or 0) + 1
+    key = "dropped_uids" if reason == "literal_dropped" else "truncated_uids"
+    folder_literal[key].append(number)
+
+
+def _store_literal_folder(report, folder_literal) -> None:
+    if not folder_literal:
+        return
+    if not folder_literal["literal_dropped"] and not folder_literal["literal_truncated"]:
+        return
+    report["literal_folders"].append(folder_literal)
 
 
 def _select_rows(conn: sqlite3.Connection, source: str, mailbox: str | None = None):
@@ -966,6 +998,7 @@ def fill_metadata(
         folder_total = len(groups)
         if not login_failed:
           for folder_index, (folder_name, group) in enumerate(groups, start=1):
+            folder_literal = None
             if report["stopped"]:
                 break
             if source == "imap":
@@ -1020,6 +1053,13 @@ def fill_metadata(
                         report["errors"] += 1
                     continue
                 _write_folder_progress(folder_index, folder_total, 0)
+                folder_literal = {
+                    "index": folder_index,
+                    "literal_dropped": 0,
+                    "literal_truncated": 0,
+                    "dropped_uids": [],
+                    "truncated_uids": [],
+                }
             for row in group:
                 if _stop_for_limits(
                     report,
@@ -1042,8 +1082,9 @@ def fill_metadata(
                 except _Oversized:
                     report["capped"] += 1
                     continue
-                except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError):
+                except (ParseError, ValueError, json.JSONDecodeError, OSError, TypeError) as exc:
                     report["errors"] += 1
+                    _note_literal_issue(report, folder_literal, exc)
                     continue
                 full_flag = has_attachments_flag(parts)
                 if max_parts > 0 and len(parts) > max_parts:
@@ -1068,7 +1109,9 @@ def fill_metadata(
                 report["has_attachments"] += flag
                 report["filenames"] += names
             else:
+                _store_literal_folder(report, folder_literal)
                 continue
+            _store_literal_folder(report, folder_literal)
             break
     finally:
         if opened_client and client is not None:
@@ -1108,8 +1151,23 @@ def format_report(report: dict[str, Any]) -> str:
             "parts_truncated=%s" % report.get("parts_truncated"),
             "uidvalidity_mismatch=%s" % report.get("uidvalidity_mismatch"),
             "capped: %s" % report.get("capped"),
+            "literal_dropped=%s" % report.get("literal_dropped", 0),
+            "literal_truncated=%s" % report.get("literal_truncated", 0),
         ]
     )
+    for item in report.get("literal_folders") or []:
+        dropped = ",".join(str(uid) for uid in item.get("dropped_uids") or [])
+        truncated = ",".join(str(uid) for uid in item.get("truncated_uids") or [])
+        lines.append(
+            "literal_folder index=%s literal_dropped=%s literal_truncated=%s dropped_uids=%s truncated_uids=%s"
+            % (
+                item.get("index"),
+                item.get("literal_dropped", 0),
+                item.get("literal_truncated", 0),
+                dropped,
+                truncated,
+            )
+        )
     lines.append("summary_json=%s" % json.dumps(report, sort_keys=True))
     return "\n".join(lines) + "\n"
 

@@ -52,6 +52,8 @@ _DEFAULT_TIMEOUT_S = 30
 UID_BATCH_SIZE = 50
 _UIDVALIDITY_RE = re.compile(r"(?m)^\* OK \[UIDVALIDITY (\d+)\]")
 _FETCH_LINE_RE = re.compile(r"(?im)^\* \d+ FETCH\b")
+_FETCH_START_RE = re.compile(r"(?m)^\* \d+ FETCH\b")
+_BRACE_RE = re.compile(r"\{\d+\}")
 _CONNECT_RE = re.compile(r"^CURL_NUM_CONNECTS:(\d+)$")
 _EXAMINE_RE = re.compile(r'^EXAMINE "(?:[^"\\\r\n\x00]|\\.)*"$')
 _FETCH_RE = re.compile(
@@ -95,6 +97,15 @@ class CurlImapError(RuntimeError):
     def __init__(self, message: str, rc: int | None = None) -> None:
         super().__init__(message)
         self.rc = rc
+
+
+class LiteralFetchError(ValueError):
+    """One UID's structure failed. Other UIDs in the folder still parse."""
+
+    def __init__(self, uid: str, reason: str) -> None:
+        self.uid = str(uid)
+        self.reason = str(reason)
+        super().__init__(self.reason)
 
 
 def quote_imap_mailbox(name: str) -> str:
@@ -394,35 +405,54 @@ def _unwrap_structure(raw: str) -> str:
     return raw
 
 
-def structures_by_uid(text: str) -> dict:
-    """Map UID to BODYSTRUCTURE text, including a ``{n}`` literal."""
+def _literal_reason(segment: str, exc: BaseException) -> str:
+    """Classify one structure. A short remainder is truncated; a brace that
+    ate the following protocol is dropped.
+    """
+    message = str(exc)
+    if (
+        "literal short" in message
+        or "literal newline" in message
+        or "literal length" in message
+    ):
+        return "literal_truncated"
+    if _BRACE_RE.search(segment):
+        return "literal_dropped"
+    return "parse_error"
+
+
+def parse_fetch_structures(text: str):
+    """Return ``(ok_by_uid, reason_by_uid)``.
+
+    Each FETCH line is parsed alone. A dropped or truncated literal records
+    that UID and leaves every other UID in the buffer parseable.
+    """
     cleaned = undouble_untagged(text or "")
+    starts = [match.start() for match in _FETCH_START_RE.finditer(cleaned)]
+    if not starts and "BODYSTRUCTURE" in cleaned.upper():
+        starts = [0]
     found = {}
-    upper = cleaned.upper()
-    start = 0
-    marker = "BODYSTRUCTURE"
-    while True:
-        idx = upper.find(marker, start)
-        if idx < 0:
-            break
-        window = cleaned[max(0, idx - 120) : idx]
-        uids = re.findall(r"UID\s+(\d+)", window, flags=re.IGNORECASE)
+    issues = {}
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(cleaned)
+        segment = cleaned[start:end]
+        uids = re.findall(r"UID\s+(\d+)", segment, flags=re.IGNORECASE)
+        uid = uids[-1] if uids else ""
         try:
-            structure = bodystructure_from_fetch(cleaned[idx:])
-        except ParseError:
-            raise
-        consumed = len(structure)
-        if not uids:
-            after = cleaned[idx : idx + len(marker) + consumed + 40]
-            uids = re.findall(r"UID\s+(\d+)", after, flags=re.IGNORECASE)
-        if uids:
-            found[uids[-1]] = _unwrap_structure(structure)
-        start = idx + len(marker)
-        # Step past this structure so a nested copy is not a second hit.
-        rest = cleaned[idx + len(marker) :]
-        at = rest.find(structure)
-        if at >= 0:
-            start = idx + len(marker) + at + consumed
+            structure = bodystructure_from_fetch(segment)
+        except ParseError as exc:
+            if uid:
+                issues[uid] = _literal_reason(segment, exc)
+            continue
+        if not uid:
+            continue
+        found[uid] = _unwrap_structure(structure)
+    return found, issues
+
+
+def structures_by_uid(text: str) -> dict:
+    """Map UID to BODYSTRUCTURE text. Failures are omitted, not raised."""
+    found, _issues = parse_fetch_structures(text)
     return found
 
 
@@ -508,6 +538,7 @@ class CurlImapsClient:
         self.mailbox: str | None = None
         self.uidvalidity: int | None = None
         self._structures: dict = {}
+        self._issues: dict = {}
         self.last_stderr = ""
 
     def __enter__(self) -> "CurlImapsClient":
@@ -560,6 +591,7 @@ class CurlImapsClient:
         self.mailbox = name
         self.uidvalidity = uidvalidity_from_curl_output(text)
         self._structures = {}
+        self._issues = {}
 
     def open_folder(self, mailbox: str, uids) -> None:
         """One process: EXAMINE, then batched UID FETCH. No per-UID retry."""
@@ -574,13 +606,20 @@ class CurlImapsClient:
         text = self._invoke(commands)
         self.mailbox = name
         self.uidvalidity = uidvalidity_from_curl_output(text)
-        self._structures = structures_by_uid(text) if tokens else {}
+        if tokens:
+            found, issues = parse_fetch_structures(text)
+        else:
+            found, issues = {}, {}
+        self._structures = found
+        self._issues = issues
 
     def fetch_bodystructure(self, uid: str) -> str:
         """Return a structure from the folder batch. Does not start curl."""
         if self.mailbox is None:
             raise CurlImapError("imap mailbox is not selected")
         token = _check_uid(uid)
+        if token in self._issues:
+            raise LiteralFetchError(token, self._issues[token])
         if token not in self._structures:
             raise ValueError("imap uid missing from batch")
         return self._structures[token]
