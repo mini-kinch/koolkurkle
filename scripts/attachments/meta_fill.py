@@ -23,9 +23,10 @@ is pinned to ``/usr/bin/security`` and the item is
 ``mailroom.imap.app-password`` with one legacy fallback. Curl receives
 it only on stdin (``--config -``, ``user = "..."``), never in argv, the
 environment, or a file. TLS verification stays on (no ``-k``). There is
-no password option and no password environment variable.
-``ImapBodystructureClient`` is a test-only ``imaplib.IMAP4_SSL`` double
-on port 993 and is not constructed by the CLI or by ``fill_metadata``.
+no password option and no password environment variable. This
+module does not import the Python IMAP client. The old SSL double
+lives in ``tests/imap_bodystructure_double.py`` and is not imported
+here.
 Option 2 (``--source jsonl``): other rows that already have
 ``jsonl_offset``. Seeks that offset and reads ``jsonl_len`` bytes, then
 parses MIME headers.
@@ -56,12 +57,10 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import imaplib
 import json
 import os
 import re
 import sqlite3
-import ssl
 import sys
 import time
 from pathlib import Path
@@ -74,7 +73,7 @@ if str(SCRIPTS) not in sys.path:
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from imap_keychain import KeychainError, read_imap_app_password  # noqa: E402
+from imap_keychain import read_imap_app_password  # noqa: E402
 from refuse_destructive import DestructiveRefuse, refuse_destructive_cli  # noqa: E402
 from sor_writer_gate import (  # noqa: E402
     SOR_BASENAME,
@@ -101,9 +100,7 @@ except ImportError:  # python3 scripts/attachments/meta_fill.py
         parts_from_rfc822,
     )
 
-_BODYSTRUCTURE_ITEM = "(BODYSTRUCTURE)"
 _IMAP_SOURCE = "imap-live"
-_IMAP_SSL_PORT = 993
 _DEFAULT_MAX_MESSAGES = 200
 _DEFAULT_MAX_PARTS = 100
 _DEFAULT_TIMEOUT_S = 30
@@ -116,106 +113,6 @@ class FillRefuse(RuntimeError):
 
 class _Oversized(Exception):
     """Record longer than the byte cap. Not marked scanned."""
-
-
-class ImapBodystructureClient:
-    """Test-only UID FETCH double over imaplib.IMAP4_SSL port 993.
-
-    The CLI and ``fill_metadata`` do not construct this class. Production
-    IMAP goes through ``/usr/bin/curl imaps://`` (``_CurlProductionClient``).
-    The password comes from Keychain via ``password_fn`` (default
-    ``read_imap_app_password``). This class does not read a password
-    argument or a password environment variable, and it does not put the
-    password in fetch results. Plain IMAP is never constructed.
-    Call ``select`` for each folder before fetching that folder's UIDs.
-    """
-
-    def __init__(
-        self,
-        host: str,
-        user: str | None,
-        *,
-        timeout: float = 30,
-        imap_factory: Any = None,
-        password_fn: Callable[[], str] | None = None,
-    ) -> None:
-        if not host:
-            raise FillRefuse("imap host is required")
-        self.host = host
-        self.user = user or ""
-        self.port = _IMAP_SSL_PORT
-        self.timeout = timeout
-        self._factory = imaplib.IMAP4_SSL if imap_factory is None else imap_factory
-        if self._factory is imaplib.IMAP4:
-            raise FillRefuse("plain IMAP is refused")
-        self._password_fn = password_fn
-        self._conn: Any = None
-        self.mailbox: str | None = None
-        self.uidvalidity: int | None = None
-
-    def __enter__(self) -> "ImapBodystructureClient":
-        fn = self._password_fn or read_imap_app_password
-        try:
-            password = fn()
-        except KeychainError:
-            raise FillRefuse("imap keychain password is missing") from None
-        try:
-            context = ssl.create_default_context()
-            self._conn = self._factory(
-                self.host, 993, timeout=self.timeout, ssl_context=context
-            )
-            self._conn.login(self.user, password)
-        except FillRefuse:
-            self._close()
-            raise
-        except Exception:
-            self._close()
-            raise
-        finally:
-            password = ""
-        return self
-
-    def select(self, mailbox: str, readonly: bool = True) -> None:
-        """EXAMINE one folder. Readonly. The mailbox argument is quoted."""
-        if readonly is not True:
-            raise FillRefuse("imap select must be readonly")
-        if mailbox is None or str(mailbox).strip() == "":
-            raise ValueError("missing mailbox")
-        if self._conn is None:
-            raise RuntimeError("imap select failed")
-        quoted = quote_imap_mailbox(str(mailbox))
-        typ, _data = self._conn.select(quoted, readonly=True)
-        if typ != "OK":
-            raise RuntimeError("imap select failed")
-        self.mailbox = str(mailbox)
-        self.uidvalidity = _uidvalidity_from_conn(self._conn)
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self._close()
-
-    def _close(self) -> None:
-        conn = self._conn
-        self._conn = None
-        if conn is None:
-            return
-        try:
-            conn.logout()
-        except Exception:
-            return
-
-    def fetch_bodystructure(self, uid: str) -> str:
-        if uid is None or str(uid).strip() == "":
-            raise ValueError("missing uid")
-        typ, data = self._conn.uid("FETCH", str(uid), _BODYSTRUCTURE_ITEM)
-        if typ != "OK":
-            raise ValueError("bodystructure fetch failed")
-        return bodystructure_from_fetch(data)
-
-
-def quote_imap_mailbox(name: str) -> str:
-    """IMAP atom quoting. Spaces, quotes, and backslashes stay one mailbox."""
-    escaped = str(name).replace("\\", "\\\\").replace('"', '\\"')
-    return '"' + escaped + '"'
 
 
 def _load_imap_curl():
@@ -269,31 +166,6 @@ class _CurlProductionClient:
             return self._inner.fetch_bodystructure(uid)
         except self._mod.CurlImapError as exc:
             raise FillRefuse(str(exc)) from None
-
-
-def _uidvalidity_from_conn(conn: Any) -> int:
-    """Read UIDVALIDITY after EXAMINE or SELECT has returned.
-
-    ``IMAP4.response`` pops the untagged value collected during that
-    command. Real imaplib returns ``('UIDVALIDITY', [b'42'])``, or
-    ``('UIDVALIDITY', [None])`` when the server did not send one.
-    Call this once, immediately after ``select``, before anything else
-    calls ``response('UIDVALIDITY')``.
-    """
-    responder = getattr(conn, "response", None)
-    if responder is None:
-        raise RuntimeError("imap uidvalidity missing")
-    typ, data = responder("UIDVALIDITY")
-    if typ != "UIDVALIDITY" or not data or data[0] in (None, b"", ""):
-        raise RuntimeError("imap uidvalidity missing")
-    raw = data[0]
-    if isinstance(raw, bytes):
-        text = raw.decode("ascii", "replace").strip()
-    else:
-        text = str(raw).strip()
-    if not text.isdigit():
-        raise RuntimeError("imap uidvalidity missing")
-    return int(text)
 
 
 def _default_now() -> str:
@@ -974,8 +846,8 @@ def fill_metadata(
 
     ``imap_client`` skips curl and Keychain. When it is omitted and the
     source is imap, the CLI builds ``_CurlProductionClient`` (pinned
-    ``/usr/bin/curl imaps://``). That path does not construct imaplib.
-    ``ImapBodystructureClient`` is a test-only double. ``mailbox`` limits
+    ``/usr/bin/curl imaps://``). That path does not import imaplib.
+    ``mailbox`` limits
     IMAP rows to that folder. Omit it to examine every folder that still
     has unscanned rows. ``imap_port`` and ``cacert`` are test injections
     for a local fake IMAPS server. The CLI does not pass them. Production

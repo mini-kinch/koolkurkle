@@ -26,11 +26,15 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+TESTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
 
 import attachments.bodystructure as bodystructure  # noqa: E402
 import attachments.meta_fill as meta  # noqa: E402
+import imap_bodystructure_double as imap_double  # noqa: E402
 import attachments.migrate_att0_schema as mig  # noqa: E402
 import attachments.mime_meta as mime_meta  # noqa: E402
 import imap_keychain  # noqa: E402
@@ -980,11 +984,11 @@ class FillTests(unittest.TestCase):
             raise AssertionError("network is forbidden")
 
         with mock.patch("socket.create_connection", boom), mock.patch(
-            "attachments.meta_fill.imaplib.IMAP4", PlainIMAP
-        ), mock.patch("attachments.meta_fill.imaplib.IMAP4_SSL", FakeSSL), mock.patch(
-            "attachments.meta_fill.read_imap_app_password", return_value=SECRET
+            "imap_bodystructure_double.imaplib.IMAP4", PlainIMAP
+        ), mock.patch("imap_bodystructure_double.imaplib.IMAP4_SSL", FakeSSL), mock.patch(
+            "imap_bodystructure_double.read_imap_app_password", return_value=SECRET
         ):
-            client = meta.ImapBodystructureClient(
+            client = imap_double.ImapBodystructureClient(
                 "imap.example.com",
                 "user@example.com",
                 timeout=5,
@@ -1002,7 +1006,15 @@ class FillTests(unittest.TestCase):
         self.assertNotIn(SECRET, text)
         self.assertTrue(seen["logout"])
         source = (PKG / "meta_fill.py").read_text(encoding="utf-8")
-        self.assertIn("IMAP4_SSL", source)
+        for line in source.splitlines():
+            stripped = line.strip()
+            self.assertFalse(
+                stripped.startswith("import imaplib") or stripped.startswith("from imaplib"),
+                line,
+            )
+        self.assertNotIn("IMAP4_SSL", source)
+        double_src = Path(imap_double.__file__).read_text(encoding="utf-8")
+        self.assertIn("IMAP4_SSL", double_src)
         self.assertNotIn("BODY[]", source)
         self.assertNotIn("BODY.PEEK", source)
         self.assertNotIn("MAILROOM_IMAP_PASSWORD", source)
@@ -1503,9 +1515,9 @@ class FillTests(unittest.TestCase):
                 return "BYE", [b""]
 
         with mock.patch(
-            "attachments.meta_fill.ssl.create_default_context", return_value=context
+            "imap_bodystructure_double.ssl.create_default_context", return_value=context
         ):
-            client = meta.ImapBodystructureClient(
+            client = imap_double.ImapBodystructureClient(
                 "imap.example.com",
                 "user@example.com",
                 timeout=5,
@@ -1533,7 +1545,7 @@ class FillTests(unittest.TestCase):
                     return str(code).upper(), [None]
                 return "UIDVALIDITY", [b"7"]
 
-        client = meta.ImapBodystructureClient(
+        client = imap_double.ImapBodystructureClient(
             "imap.example.com",
             "user@example.com",
             password_fn=lambda: "example-secret",
@@ -1580,7 +1592,7 @@ class FillTests(unittest.TestCase):
             self.assertEqual((again_typ, again_data), ("UIDVALIDITY", [None]))
             probe.logout()
 
-            client = meta.ImapBodystructureClient(
+            client = imap_double.ImapBodystructureClient(
                 "imap.example.com",
                 "user@example.com",
                 timeout=5,
@@ -1596,7 +1608,7 @@ class FillTests(unittest.TestCase):
 
         missing_port, missing_stop, missing_thread = _serve_imap(None)
         try:
-            client = meta.ImapBodystructureClient(
+            client = imap_double.ImapBodystructureClient(
                 "imap.example.com",
                 "user@example.com",
                 timeout=5,
@@ -1695,9 +1707,9 @@ class FillTests(unittest.TestCase):
 
             try:
                 with mock.patch(
-                    "attachments.meta_fill.ssl.create_default_context", spy_context
+                    "imap_bodystructure_double.ssl.create_default_context", spy_context
                 ):
-                    client = meta.ImapBodystructureClient(
+                    client = imap_double.ImapBodystructureClient(
                         "imap.example.com",
                         "user@example.com",
                         timeout=5,
@@ -2086,8 +2098,6 @@ class CliTests(unittest.TestCase):
             with mock.patch("socket.create_connection", boom_socket), mock.patch(
                 "imaplib.IMAP4_SSL", boom_imap
             ), mock.patch(
-                "attachments.meta_fill.imaplib.IMAP4_SSL", boom_imap
-            ), mock.patch(
                 "imap_keychain.subprocess.run", fake_security
             ), mock.patch(
                 "imap_curl.run_subprocess", fake_curl
@@ -2205,8 +2215,8 @@ class DesignAndBoundaryTests(unittest.TestCase):
                 [("ex-plain", "imap-live", "1002", None, None, "synthetic-plain", "INBOX")],
             )
             plain = mock.Mock(side_effect=AssertionError("plain IMAP4"))
-            with mock.patch("attachments.meta_fill.imaplib.IMAP4", plain), mock.patch(
-                "attachments.meta_fill.imaplib.IMAP4_SSL", plain
+            with mock.patch("imaplib.IMAP4", plain), mock.patch(
+                "imaplib.IMAP4_SSL", plain
             ), mock.patch(
                 "attachments.meta_fill.read_imap_app_password", return_value=SECRET
             ), mock.patch("imap_curl.run_subprocess", fake_curl):
@@ -2524,8 +2534,6 @@ class CurlTransportTests(unittest.TestCase):
                 _seed(bare, rows)
                 with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
                     "imaplib.IMAP4_SSL", boom
-                ), mock.patch(
-                    "attachments.meta_fill.imaplib.IMAP4_SSL", boom
                 ), mock.patch("socket.create_connection", boom):
                     with self.assertRaises(meta.FillRefuse) as denied:
                         meta.fill_metadata(
@@ -2542,6 +2550,8 @@ class CurlTransportTests(unittest.TestCase):
                             timeout_s=15,
                         )
                 self.assertNotIn("example-secret", str(denied.exception))
+                self.assertIn("imap curl failed", str(denied.exception))
+                self.assertIn("60", str(denied.exception))
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0]["argv"][0], "/usr/bin/curl")
                 self.assertNotIn("--cacert", calls[0]["argv"])
@@ -2564,8 +2574,6 @@ class CurlTransportTests(unittest.TestCase):
                 _seed(db, rows)
                 with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
                     "imaplib.IMAP4_SSL", boom
-                ), mock.patch(
-                    "attachments.meta_fill.imaplib.IMAP4_SSL", boom
                 ), mock.patch("socket.create_connection", boom):
                     report = meta.fill_metadata(
                         db,
@@ -2673,7 +2681,6 @@ class CurlTransportTests(unittest.TestCase):
         patches = [
             mock.patch("imaplib.IMAP4_SSL", boom),
             mock.patch("socket.create_connection", boom),
-            mock.patch("attachments.meta_fill.imaplib.IMAP4_SSL", boom),
             mock.patch("imap_keychain.subprocess.run", fake_security),
         ]
         try:
@@ -2814,6 +2821,171 @@ class CurlTransportTests(unittest.TestCase):
             self.assertIn("imap curl failed", str(ctx.exception))
             self.assertNotIn(SECRET, str(ctx.exception))
             self.assertIsNone(ctx.exception.__cause__)
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
+
+    def test_missing_curl_binary_fails_closed_without_fallback(self):
+        """Real subprocess against a missing binary. No imaplib fallback."""
+        import imap_curl as imap_curl
+
+        calls = []
+        real_run = imap_curl.run_subprocess
+
+        def spy(argv, config_text, env, timeout):
+            calls.append(list(argv))
+            return real_run(argv, config_text, env, timeout)
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("fill fell back to imaplib or a python socket")
+
+        missing = "/tmp/mailroom-curl-missing"
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
+            )
+            with mock.patch.object(imap_curl, "CURL_BIN", missing), mock.patch(
+                "imap_curl.run_subprocess", spy
+            ), mock.patch("imaplib.IMAP4_SSL", boom), mock.patch(
+                "socket.create_connection", boom
+            ):
+                with self.assertRaises(meta.FillRefuse) as ctx:
+                    meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=True,
+                        host="imap.example.invalid",
+                        user="user@example.invalid",
+                        password_fn=lambda: "example-secret",
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=5,
+                    )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], missing)
+            self.assertIn("failed closed", str(ctx.exception))
+            self.assertNotIn("example-secret", str(ctx.exception))
+            self.assertIsNone(ctx.exception.__cause__)
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
+
+    def test_real_curl_connection_refused_fails_closed_without_retry(self):
+        """Real /usr/bin/curl to a closed local port. One attempt, no fallback."""
+        import imap_curl as imap_curl
+
+        if not os.access("/usr/bin/curl", os.X_OK):
+            self.skipTest("curl is not available")
+        calls = []
+        real_run = imap_curl.run_subprocess
+
+        def spy(argv, config_text, env, timeout):
+            calls.append(list(argv))
+            return real_run(argv, config_text, env, timeout)
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("fill fell back to imaplib or a python socket")
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
+            )
+            with mock.patch("imap_curl.run_subprocess", spy), mock.patch(
+                "imaplib.IMAP4_SSL", boom
+            ), mock.patch("socket.create_connection", boom):
+                with self.assertRaises(meta.FillRefuse) as ctx:
+                    meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=True,
+                        host="127.0.0.1",
+                        user="user@example.invalid",
+                        password_fn=lambda: "example-secret",
+                        imap_port=port,
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=5,
+                    )
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "/usr/bin/curl")
+            self.assertIn("imaps://127.0.0.1:%s/" % port, calls[0][-1])
+            self.assertIn("imap curl failed", str(ctx.exception))
+            self.assertNotIn("example-secret", calls[0])
+            self.assertNotIn("example-secret", str(ctx.exception))
+            conn = sqlite3.connect(str(db))
+            try:
+                scans = conn.execute(
+                    "SELECT COUNT(*) FROM attachment_meta_scans"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(scans, 0)
+
+    def test_real_security_binary_missing_fails_closed_before_curl(self):
+        """Shipped /usr/bin/security read. A miss does not start curl or imaplib."""
+        import imap_curl as imap_curl
+
+        calls = []
+        real_run = imap_curl.run_subprocess
+
+        def spy(argv, config_text, env, timeout):
+            calls.append(list(argv))
+            return real_run(argv, config_text, env, timeout)
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("fill fell back to imaplib or a python socket")
+
+        env = {
+            "IMAP_APP_PASSWORD": "env-secret",
+            "MAILROOM_IMAP_PASSWORD": "env-secret",
+            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "mailroom-copy.sqlite"
+            _seed(
+                db,
+                [("ex-plain", "imap-live", "9", None, None, "synthetic-plain", "INBOX")],
+            )
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch(
+                "imap_curl.run_subprocess", spy
+            ), mock.patch("imaplib.IMAP4_SSL", boom), mock.patch(
+                "socket.create_connection", boom
+            ):
+                with self.assertRaises(meta.FillRefuse) as ctx:
+                    meta.fill_metadata(
+                        db,
+                        source="imap",
+                        apply=True,
+                        host="imap.example.invalid",
+                        user="user@example.invalid",
+                        cmdlines=[],
+                        lock_held=False,
+                        max_messages=0,
+                        timeout_s=5,
+                    )
+            self.assertEqual(calls, [])
+            self.assertIn("keychain", str(ctx.exception))
+            self.assertNotIn("env-secret", str(ctx.exception))
             conn = sqlite3.connect(str(db))
             try:
                 scans = conn.execute(
