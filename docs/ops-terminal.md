@@ -521,13 +521,13 @@ implement / money / external send.
 Post-rem gates before anyone considers enable: rem EXIT, #40 gate
 live, catch-up Done, single-writer HARD DECK, flock free. #40 gates
 **future SoR writes**; live rem refuses; stale dead-PID lock ≠ false
-`CONFLICT`. Mini copy-only until promote GO; refuse SoR stub.
+`CONFLICT`. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated; refuse SoR stub.
 ask_mail default is history; live opt-in; no purge/EXPUNGE in this
 PR. Soft-delete landmines; never-purge; JSONL immutable. Read-only
 integrity / freshness / embed key verify needles. Mini BODY.PEEK
 rails (curl ≥ 8.17, Keychain name only) — no live IMAP this PR.
 Auth hard-gate (`lane=auth`) restated. One cutover + one rollback.
-Topology: SoR=MBP until CoS says; mlx generate localhost; MBP and
+Topology: The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). PR-5 cutover / RunAtLoad enable stays gated; mlx generate localhost; MBP and
 Mini names only.
 
 Fail closed: if rem-legacy has not EXIT 0, do not enable cutover.
