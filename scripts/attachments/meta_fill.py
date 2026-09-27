@@ -5,28 +5,30 @@ Option 1 (``--source imap``): rows with ``source='imap-live'``. UIDs are
 unique per folder, so rows are grouped by ``messages.folder`` and each
 folder is examined before its UID FETCH of ``(BODYSTRUCTURE)``. The
 production transport is pinned ``/usr/bin/curl`` ``imaps://`` (port 993).
-It does not construct ``imaplib`` or a Python socket, and ``CURL_BIN``
-cannot redirect it. Per folder, curl EXAMINEs a URL whose path is the
-mailbox percent-encoded (spaces, quotes, and backslashes). The ``-X``
-command quotes that mailbox (``"Deleted Messages"``). UID FETCH
-``(BODYSTRUCTURE)`` is a second ``-X`` on the same folder URL and does
-not change the seen flag. UIDVALIDITY is parsed from curl's IMAP
-response (``[UIDVALIDITY n]``) and stored per folder on the first
+It does not construct ``imaplib`` or a Python socket. ``CURL_BIN`` is
+not read and Homebrew curl is not a fallback. Per folder, one curl
+process uses the base URL ``imaps://host:993/`` (no mailbox, so curl
+does not SELECT). Transfers are joined by ``next``. The first is
+``EXAMINE`` of the quoted mailbox (``"Deleted Messages"``). Later
+transfers batch UIDs (``UID FETCH 1:50,77 (BODYSTRUCTURE)``) and do not
+change the seen flag. UIDVALIDITY is the untagged
+``* OK [UIDVALIDITY n]`` line and is stored per folder on the first
 ``--apply`` fill, not at ingest. A mismatch is counted in
 ``uidvalidity_mismatch`` (one per row, not per folder) and those rows
 are not written. The ``PARTIAL:`` banner includes
-``uidvalidity_mismatch=N``. A non-zero curl status, an authentication
-failure, or an Errno 9 / bad-file-descriptor error fails closed after
-one attempt. Nothing from that failure is marked scanned. The password
-is read from macOS Keychain (``scripts/imap_keychain.py``). The binary
-is pinned to ``/usr/bin/security`` and the item is
-``mailroom.imap.app-password`` with one legacy fallback. Curl receives
-it only on stdin (``--config -``, ``user = "..."``), never in argv, the
-environment, or a file. TLS verification stays on (no ``-k``). There is
-no password option and no password environment variable. This
-module does not import the Python IMAP client. The old SSL double
-lives in ``tests/imap_bodystructure_double.py`` and is not imported
-here.
+``uidvalidity_mismatch=N``. A non-zero curl status (including 21, 7,
+60, and 67), an authentication failure, or an Errno 9 /
+bad-file-descriptor error fails closed after that one process. UIDs
+are not retried one at a time. Nothing from that failure is marked
+scanned. The password is read from macOS Keychain
+(``scripts/imap_keychain.py``). The binary is pinned to
+``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
+with one legacy fallback. Curl receives it only on stdin (``-K -``,
+``user = "..."``), never in argv, the environment, or a file. TLS
+verification stays on (no ``-k``). There is no password option and no
+password environment variable. This module does not import the Python
+IMAP client. The old SSL double lives in
+``tests/imap_bodystructure_double.py`` and is not imported here.
 Option 2 (``--source jsonl``): other rows that already have
 ``jsonl_offset``. Seeks that offset and reads ``jsonl_len`` bytes, then
 parses MIME headers.
@@ -156,6 +158,15 @@ class _CurlProductionClient:
     def select(self, mailbox: str, readonly: bool = True) -> None:
         try:
             self._inner.select(mailbox, readonly=readonly)
+        except self._mod.CurlImapError as exc:
+            raise FillRefuse(str(exc)) from None
+        self.mailbox = self._inner.mailbox
+        self.uidvalidity = self._inner.uidvalidity
+
+    def open_folder(self, mailbox: str, uids) -> None:
+        """One curl for this folder. A failed batch is not split into UIDs."""
+        try:
+            self._inner.open_folder(mailbox, uids)
         except self._mod.CurlImapError as exc:
             raise FillRefuse(str(exc)) from None
         self.mailbox = self._inner.mailbox
@@ -846,7 +857,8 @@ def fill_metadata(
 
     ``imap_client`` skips curl and Keychain. When it is omitted and the
     source is imap, the CLI builds ``_CurlProductionClient`` (pinned
-    ``/usr/bin/curl imaps://``). That path does not import imaplib.
+    ``/usr/bin/curl imaps://``, one process per folder). That path does
+    not import imaplib.
     ``mailbox`` limits
     IMAP rows to that folder. Omit it to examine every folder that still
     has unscanned rows. ``imap_port`` and ``cacert`` are test injections
@@ -937,7 +949,17 @@ def fill_metadata(
                         report["errors"] += 1
                     continue
                 try:
-                    client.select(folder_name, readonly=True)
+                    if hasattr(client, "open_folder"):
+                        client.open_folder(
+                            folder_name,
+                            [
+                                str(row[1]).strip()
+                                for row in group
+                                if row[1] is not None and str(row[1]).strip()
+                            ],
+                        )
+                    else:
+                        client.select(folder_name, readonly=True)
                     if client.uidvalidity is None:
                         raise RuntimeError("imap uidvalidity missing")
                     if _note_uidvalidity(
