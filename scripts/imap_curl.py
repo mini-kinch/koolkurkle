@@ -6,8 +6,8 @@ with no mailbox, so curl does not SELECT (SELECT is read-write). The
 first transfer is ``EXAMINE "<mailbox>"``. Further transfers are
 ``UID FETCH <uidset> (BODYSTRUCTURE)``, joined by ``next`` so the login
 is reused. ``next`` resets per-transfer options, so every transfer
-repeats ``user``, ``connect-timeout``, ``max-time``, and ``cacert``
-when a test certificate is injected.
+repeats ``user``, ``connect-timeout``, ``max-time``, ``write-out``,
+and ``cacert`` when a test certificate is injected.
 
 The password is written only to that process's stdin as curl config
 (``-K -``, ``user = "..."``). It is not placed in argv, the environment,
@@ -16,8 +16,13 @@ redacted before it is retained. The binary is the literal
 ``/usr/bin/curl``: ``CURL_BIN`` is not read, and Homebrew curl is not a
 fallback.
 
-A non-zero curl status fails closed after that single process. UIDs
-from a failed batch are not retried one at a time.
+Stdout is captured as bytes so a CRLF before a ``{n}`` literal stays
+a CRLF. There is no ``--dump-header``. UIDVALIDITY is the first
+untagged ``* OK [UIDVALIDITY n]`` in the EXAMINE reply, before any
+FETCH line. ``write-out`` records ``num_connects``; more than one new
+connection fails closed. Curl status 7, 21, 28, 60, and 67 become a
+classified message with no stderr and no secret. A failed batch is
+not retried one UID at a time.
 """
 
 from __future__ import annotations
@@ -44,6 +49,8 @@ CURL_BIN = "/usr/bin/curl"
 _DEFAULT_TIMEOUT_S = 30
 UID_BATCH_SIZE = 50
 _UIDVALIDITY_RE = re.compile(r"(?m)^\* OK \[UIDVALIDITY (\d+)\]")
+_FETCH_LINE_RE = re.compile(r"(?im)^\* \d+ FETCH\b")
+_CONNECT_RE = re.compile(r"^CURL_NUM_CONNECTS:(\d+)$")
 _EXAMINE_RE = re.compile(r'^EXAMINE "(?:[^"\\\r\n\x00]|\\.)*"$')
 _FETCH_RE = re.compile(
     r"^UID FETCH (\d+(?::\d+)?(?:,\d+(?::\d+)?)*) \(BODYSTRUCTURE\)$"
@@ -82,6 +89,10 @@ _BLOCKED_ENV = frozenset(
 
 class CurlImapError(RuntimeError):
     """Curl IMAP failed closed. The message never includes a secret."""
+
+    def __init__(self, message: str, rc: int | None = None) -> None:
+        super().__init__(message)
+        self.rc = rc
 
 
 def quote_imap_mailbox(name: str) -> str:
@@ -249,9 +260,9 @@ def transfer_block(
     lines = [
         "silent\n",
         "show-error\n",
-        'dump-header = "-"\n',
         _config_line("connect-timeout", seconds),
         _config_line("max-time", seconds),
+        _config_line("write-out", "CURL_NUM_CONNECTS:%{num_connects}\n"),
     ]
     if cacert:
         lines.append(_config_line("cacert", str(cacert)))
@@ -316,11 +327,11 @@ def redact_stderr(stderr: str, password: str, user: str = "") -> str:
 
 
 def undouble_untagged(text: str) -> str:
-    """Drop a curl dump-header copy of an identical untagged line.
+    """Drop an exact consecutive duplicate of an untagged ``*`` line.
 
-    ``--dump-header -`` writes each ``*`` line twice and then the literal
-    bytes once. Collapsing exact consecutive ``*`` duplicates leaves the
-    ``{n}`` literal in place for the BODYSTRUCTURE parser.
+    A captured curl transcript can repeat those lines. Collapsing them
+    leaves a ``{n}`` literal in place. Production does not set
+    ``dump-header``.
     """
     lines = (text or "").splitlines(keepends=True)
     out = []
@@ -341,11 +352,33 @@ def undouble_untagged(text: str) -> str:
 
 
 def uidvalidity_from_curl_output(text: str) -> int:
-    """Untagged ``* OK [UIDVALIDITY n]`` only. Tagged READ-ONLY is ignored."""
-    found = _UIDVALIDITY_RE.search(undouble_untagged(text or ""))
+    """First untagged UIDVALIDITY in the EXAMINE reply, before FETCH.
+
+    A later ``* OK [UIDVALIDITY n]`` after ``* N FETCH`` is not used.
+    Tagged ``[READ-ONLY]`` text is ignored.
+    """
+    cleaned = undouble_untagged(text or "")
+    fetch_at = _FETCH_LINE_RE.search(cleaned)
+    prefix = cleaned[: fetch_at.start()] if fetch_at else cleaned
+    found = _UIDVALIDITY_RE.search(prefix)
     if not found:
         raise CurlImapError("imap uidvalidity missing")
     return int(found.group(1))
+
+
+def strip_connect_markers(text: str) -> str:
+    """Remove per-transfer connect counts. A second connect fails closed."""
+    counts = []
+    kept = []
+    for line in (text or "").splitlines(keepends=True):
+        match = _CONNECT_RE.match(line.rstrip("\r\n"))
+        if match:
+            counts.append(int(match.group(1)))
+            continue
+        kept.append(line)
+    if counts and sum(counts) != 1:
+        raise CurlImapError("imap curl opened a second connection; not retrying")
+    return "".join(kept)
 
 
 def _unwrap_structure(raw: str) -> str:
@@ -392,45 +425,58 @@ def structures_by_uid(text: str) -> dict:
 
 
 def _raise_for_status(rc: int, stderr: str, password: str, user: str) -> str:
-    """One failure, no retry. The returned stderr is redacted and not raised raw."""
+    """One failure, no retry. Stderr is redacted and is not part of the message."""
     redacted = redact_stderr(stderr, password, user)
     low = redacted.lower()
     if "errno 9" in low or "bad file descriptor" in low:
-        raise CurlImapError("imap curl failed closed (errno 9); not retrying")
+        raise CurlImapError("imap curl failed closed (errno 9); not retrying", int(rc))
     if rc == 67:
-        raise CurlImapError("imap curl authentication failed; not retrying")
+        raise CurlImapError(
+            "imap curl authentication failed (rc 67); not retrying", int(rc)
+        )
     if rc == 21:
-        raise CurlImapError("imap curl failed (rc 21 no or bad); not retrying")
+        raise CurlImapError("imap curl failed (rc 21 no or bad); not retrying", int(rc))
     if rc == 7:
-        raise CurlImapError("imap curl failed (rc 7 connect); not retrying")
+        raise CurlImapError("imap curl failed (rc 7 connect); not retrying", int(rc))
     if rc == 60:
-        raise CurlImapError("imap curl failed (rc 60 certificate); not retrying")
+        raise CurlImapError(
+            "imap curl failed (rc 60 certificate); not retrying", int(rc)
+        )
+    if rc == 28:
+        raise CurlImapError("imap curl failed (rc 28 timeout); not retrying", int(rc))
     if rc != 0:
-        raise CurlImapError("imap curl failed (rc %s); not retrying" % int(rc))
+        raise CurlImapError("imap curl failed (rc %s); not retrying" % int(rc), int(rc))
     return redacted
 
 
 def run_subprocess(argv, config_text, env, timeout):
-    """Run pinned curl once. Config is stdin, never a file."""
+    """Run pinned curl once. Config is stdin bytes, never a file.
+
+    Stdout stays bytes until it is decoded with ``surrogateescape``, so
+    a CRLF in front of a ``{n}`` literal is not turned into LF.
+    """
     guard_curl_argv(argv)
     guard_curl_config(config_text)
     try:
         proc = subprocess.run(
             list(argv),
-            input=config_text,
+            input=config_text.encode("utf-8"),
             capture_output=True,
-            text=True,
             env=env,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        raise CurlImapError("imap curl failed closed (timeout)") from None
+        raise CurlImapError("imap curl failed (rc 28 timeout); not retrying", 28) from None
     except OSError as exc:
         if getattr(exc, "errno", None) == 9:
-            raise CurlImapError("imap curl failed closed (errno 9); not retrying") from None
+            raise CurlImapError(
+                "imap curl failed closed (errno 9); not retrying", 9
+            ) from None
         raise CurlImapError("imap curl failed closed") from None
-    return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+    stdout = (proc.stdout or b"").decode("utf-8", "surrogateescape")
+    stderr = (proc.stderr or b"").decode("utf-8", "replace")
+    return int(proc.returncode), stdout, stderr
 
 
 class CurlImapsClient:
@@ -501,7 +547,7 @@ class CurlImapsClient:
         timeout = per * len(commands) + 5.0
         rc, out, err = self._runner(argv, config, env, timeout)
         self.last_stderr = _raise_for_status(int(rc), err, self._password, self.user)
-        return out
+        return strip_connect_markers(out)
 
     def select(self, mailbox: str, readonly: bool = True) -> None:
         """EXAMINE only. Readonly. A curl failure is not retried."""

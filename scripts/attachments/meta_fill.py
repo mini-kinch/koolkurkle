@@ -11,16 +11,20 @@ process uses the base URL ``imaps://host:993/`` (no mailbox, so curl
 does not SELECT). Transfers are joined by ``next``. The first is
 ``EXAMINE`` of the quoted mailbox (``"Deleted Messages"``). Later
 transfers batch UIDs (``UID FETCH 1:50,77 (BODYSTRUCTURE)``) and do not
-change the seen flag. UIDVALIDITY is the untagged
-``* OK [UIDVALIDITY n]`` line and is stored per folder on the first
-``--apply`` fill, not at ingest. A mismatch is counted in
-``uidvalidity_mismatch`` (one per row, not per folder) and those rows
-are not written. The ``PARTIAL:`` banner includes
-``uidvalidity_mismatch=N``. A non-zero curl status (including 21, 7,
-60, and 67), an authentication failure, or an Errno 9 /
-bad-file-descriptor error fails closed after that one process. UIDs
-are not retried one at a time. Nothing from that failure is marked
-scanned. The password is read from macOS Keychain
+change the seen flag. Stdout is read as bytes so CRLF stays intact.
+There is no ``--dump-header``. UIDVALIDITY is the first untagged
+``* OK [UIDVALIDITY n]`` in the EXAMINE reply, before any FETCH, and
+is stored per folder on the first ``--apply`` fill, not at ingest. A
+mismatch is counted in ``uidvalidity_mismatch`` (one per row, not per
+folder) and those rows are not written. The ``PARTIAL:`` banner
+includes ``uidvalidity_mismatch=N``. A non-zero curl status (including
+21, 7, 28, 60, and 67), an authentication failure, or an Errno 9 /
+bad-file-descriptor error counts that folder's UIDs as errors, records
+the classified message, and continues with later folders. It does not
+retry, and the command still writes the report. Nothing from that
+failure is marked scanned. A second connection fails closed. After
+each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
+no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
 ``/usr/bin/security`` and the item is ``mailroom.imap.app-password``
 with one legacy fallback. Curl receives it only on stdin (``-K -``,
@@ -67,6 +71,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 SCRIPTS = Path(__file__).resolve().parent.parent
 HERE = Path(__file__).resolve().parent
@@ -164,11 +169,12 @@ class _CurlProductionClient:
         self.uidvalidity = self._inner.uidvalidity
 
     def open_folder(self, mailbox: str, uids) -> None:
-        """One curl for this folder. A failed batch is not split into UIDs."""
-        try:
-            self._inner.open_folder(mailbox, uids)
-        except self._mod.CurlImapError as exc:
-            raise FillRefuse(str(exc)) from None
+        """One curl for this folder. A failed batch is not split into UIDs.
+
+        ``CurlImapError`` propagates with its curl status so the fill can
+        count this folder's UIDs as errors and continue. It is not retried.
+        """
+        self._inner.open_folder(mailbox, uids)
         self.mailbox = self._inner.mailbox
         self.uidvalidity = self._inner.uidvalidity
 
@@ -177,6 +183,23 @@ class _CurlProductionClient:
             return self._inner.fetch_bodystructure(uid)
         except self._mod.CurlImapError as exc:
             raise FillRefuse(str(exc)) from None
+
+
+def _progress_rc(exc: BaseException) -> int:
+    rc = getattr(exc, "rc", None)
+    if isinstance(rc, int):
+        return rc
+    return 1
+
+
+def _write_folder_progress(index: int, total: int, rc: int) -> None:
+    """Stall-watcher line. Folder index only, flushed, Pacific time."""
+    now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+    sys.stderr.write(
+        "%02d:%02d PT | folder %s/%s | rc=%s\n"
+        % (now.hour, now.minute, int(index), int(total), int(rc))
+    )
+    sys.stderr.flush()
 
 
 def _default_now() -> str:
@@ -551,6 +574,7 @@ def _empty_report(path: Path, source: str, apply: bool) -> dict[str, Any]:
         "partial_banner": "",
         "parts_truncated": 0,
         "uidvalidity_mismatch": 0,
+        "curl_failures": [],
     }
 
 
@@ -897,6 +921,7 @@ def fill_metadata(
     conn = _connect(path, apply)
     fh = None
     opened_client = False
+    login_failed = False
     client = imap_client
     skipped_other = 0
     try:
@@ -926,17 +951,25 @@ def fill_metadata(
             )
             try:
                 client.__enter__()
-            except FillRefuse:
-                raise
+            except FillRefuse as exc:
+                report["errors"] = report["eligible"]
+                report["curl_failures"].append(str(exc))
+                login_failed = True
             except Exception:
-                raise FillRefuse("imap login failed") from None
-            opened_client = True
+                report["errors"] = report["eligible"]
+                report["curl_failures"].append("imap login failed")
+                login_failed = True
+            else:
+                opened_client = True
         start = tick()
-        for folder_name, group in groups:
+        folder_total = len(groups)
+        if not login_failed:
+          for folder_index, (folder_name, group) in enumerate(groups, start=1):
             if report["stopped"]:
                 break
             if source == "imap":
                 if not folder_name:
+                    _write_folder_progress(folder_index, folder_total, 0)
                     for _row in group:
                         if _stop_for_limits(
                             report,
@@ -966,10 +999,14 @@ def fill_metadata(
                         conn, folder_name, int(client.uidvalidity), apply
                     ):
                         report["uidvalidity_mismatch"] += len(group)
+                        _write_folder_progress(folder_index, folder_total, 0)
                         continue
-                except FillRefuse:
-                    raise
-                except Exception:
+                except Exception as exc:
+                    if type(exc).__name__ in ("FillRefuse", "CurlImapError"):
+                        report["curl_failures"].append(str(exc))
+                    _write_folder_progress(
+                        folder_index, folder_total, _progress_rc(exc)
+                    )
                     for _row in group:
                         if _stop_for_limits(
                             report,
@@ -981,6 +1018,7 @@ def fill_metadata(
                             break
                         report["errors"] += 1
                     continue
+                _write_folder_progress(folder_index, folder_total, 0)
             for row in group:
                 if _stop_for_limits(
                     report,
@@ -1152,8 +1190,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mailbox",
         help=(
-            "Limit IMAP rows to this folder and SELECT only that folder. "
-            "Omit to SELECT every folder that still has unscanned rows."
+            "Limit IMAP rows to this folder and EXAMINE only that folder. "
+            "Omit to EXAMINE every folder that still has unscanned rows."
         ),
     )
     return parser
