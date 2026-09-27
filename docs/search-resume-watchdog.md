@@ -121,9 +121,14 @@ fires only if S2 never happens.
 
 ## S1 commands
 
-TODO: the exact S1 command list comes from CoS before install. It is
-not specified in this document. Do not invent it. Restore does not add
-an enable subcommand unless that list shows S1 disabled the service.
+The exact S1 command list is in
+`docs/heavy/20260927-2227-pr89-heavy-followup-S1-and-AR-R.md`.
+S1 is bootout only. Its launchctl verbs are `print`, `print-disabled`,
+and `bootout`. There is no `disable` or `enable`, and the plist is
+never edited. The watchdog restore adds no enable.
+
+TODO: Heavy has not vetoed or approved the three runbook changes in
+that doc. The S1 and AR-R drafts are not armed.
 
 The helpers this script provides, which S1 and S2 may call, are:
 
@@ -163,11 +168,13 @@ open sqlite, and does not take the writer lock.
 
 ## AR-R
 
-TODO: the AR-R step order, with the restore step marked, comes from
-CoS before install. It is not specified in this document. Do not
-invent it. The same class of bug applies: do not restore search while
-a later write step is still pending. The lock-held guard is not enough
-for a free-lock gap between two writes.
+The AR-R step order, with the restore steps marked, is in
+`docs/heavy/20260927-2227-pr89-heavy-followup-S1-and-AR-R.md`.
+Step 2b writes a fresh `-R` deadline before the write. Step 5 is the
+only write. Step 8 restores search only after step 5 exits, with no
+writer and the lock free. AR-R is terminal. Do not restore search
+while a later write step is still pending. The lock-held guard is not
+enough for a free-lock gap between two writes.
 
 ## What each fire does
 
