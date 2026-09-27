@@ -1908,8 +1908,8 @@ class FillTests(unittest.TestCase):
     def test_keychain_env_cannot_redirect_the_password_fetch(self):
         calls = []
 
-        def runner(binary, service, account):
-            calls.append((binary, service, account))
+        def runner(binary, service):
+            calls.append((binary, service))
             if service == "mailroom.imap.app-password":
                 return 1, ""
             if service == "mailroom.icloud.app-password":
@@ -1917,28 +1917,23 @@ class FillTests(unittest.TestCase):
             return 0, "redirected-secret"
 
         env = {
+            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
             "MAILROOM_KEYCHAIN_ITEM": "other-item",
             "IMAP_APP_PASSWORD": "env-secret",
             "MAILROOM_IMAP_PASSWORD": "env-secret",
         }
         with mock.patch.dict(os.environ, env, clear=False):
-            password = imap_keychain.read_imap_app_password(
-                runner=runner, account="user@example.com"
-            )
+            password = imap_keychain.read_imap_app_password(runner=runner)
         self.assertEqual(
             calls,
             [
-                (
-                    "/usr/bin/security",
-                    "mailroom.imap.app-password",
-                    "user@example.com",
-                ),
-                (
-                    "/usr/bin/security",
-                    "mailroom.icloud.app-password",
-                    "user@example.com",
-                ),
+                ("/usr/bin/security", "mailroom.imap.app-password"),
+                ("/usr/bin/security", "mailroom.icloud.app-password"),
             ],
+        )
+        self.assertLess(
+            calls.index(("/usr/bin/security", "mailroom.imap.app-password")),
+            calls.index(("/usr/bin/security", "mailroom.icloud.app-password")),
         )
         self.assertEqual(password, "legacy-secret")
         source = (SCRIPTS / "imap_keychain.py").read_text(encoding="utf-8")
@@ -1962,32 +1957,69 @@ class FillTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False), mock.patch(
             "imap_keychain.subprocess.run", fake_run
         ):
-            password = imap_keychain.read_imap_app_password(account="user@example.com")
+            password = imap_keychain.read_imap_app_password()
         self.assertEqual(password, "keychain-secret")
-        self.assertTrue(seen)
-        self.assertEqual(seen[0][0], "/usr/bin/security")
-        self.assertNotIn("/tmp/not-security", seen[0])
         self.assertEqual(
-            seen[0],
+            seen,
             [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-s",
-                "mailroom.imap.app-password",
-                "-a",
-                "user@example.com",
-                "-w",
+                [
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-s",
+                    "mailroom.imap.app-password",
+                    "-w",
+                ]
             ],
         )
 
+    def test_primary_argv_matches_main_and_precedes_legacy(self):
+        """Primary argv is main's list. Legacy is the next call only."""
+        seen = []
+
+        def fake_run(args, check=False, capture_output=False, text=False):
+            seen.append(list(args))
+            proc = mock.Mock()
+            proc.stderr = ""
+            if len(seen) == 1:
+                proc.returncode = 1
+                proc.stdout = ""
+            else:
+                proc.returncode = 0
+                proc.stdout = "legacy-secret\n"
+            return proc
+
+        primary = [
+            "/usr/bin/security",
+            "find-generic-password",
+            "-s",
+            "mailroom.imap.app-password",
+            "-w",
+        ]
+        legacy = [
+            "/usr/bin/security",
+            "find-generic-password",
+            "-s",
+            "mailroom.icloud.app-password",
+            "-w",
+        ]
+        with mock.patch("imap_keychain.subprocess.run", fake_run):
+            password = imap_keychain.read_imap_app_password()
+        self.assertEqual(seen, [primary, legacy])
+        self.assertEqual(password, "legacy-secret")
+
     def test_empty_imap_user_does_not_call_security(self):
+        import imap_curl
+
         def boom(*_args, **_kwargs):
             raise AssertionError("security was called")
 
         with mock.patch("imap_keychain.subprocess.run", boom):
-            for account in ("", None, "   "):
-                with self.assertRaises(imap_keychain.KeychainError) as ctx:
-                    imap_keychain.read_imap_app_password(account=account)
+            for user in ("", None, "   "):
+                client = imap_curl.CurlImapsClient(
+                    "imap.example.invalid", user, password_fn=None
+                )
+                with self.assertRaises(imap_curl.CurlImapError) as ctx:
+                    client.__enter__()
                 self.assertIn("imap user is required", str(ctx.exception))
                 self.assertNotIn("secret", str(ctx.exception))
 
@@ -2209,8 +2241,6 @@ class CliTests(unittest.TestCase):
                     "find-generic-password",
                     "-s",
                     "mailroom.imap.app-password",
-                    "-a",
-                    "user@example.com",
                     "-w",
                 ],
             )
@@ -3152,7 +3182,7 @@ class CurlTransportTests(unittest.TestCase):
                     timeout_s=5,
                 )
             rc, out = imap_keychain._run_security(
-                missing, "mailroom.imap.app-password", "user@example.invalid"
+                missing, "mailroom.imap.app-password"
             )
             self.assertNotEqual(rc, 0)
             self.assertEqual(out, "")

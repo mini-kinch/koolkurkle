@@ -544,13 +544,7 @@ class CurlImapsClient:
     def __enter__(self) -> "CurlImapsClient":
         if not str(self.user or "").strip():
             raise CurlImapError("imap user is required")
-        if self._password_fn is None:
-            account = self.user
-
-            def fn():
-                return read_imap_app_password(account=account)
-        else:
-            fn = self._password_fn
+        fn = read_imap_app_password if self._password_fn is None else self._password_fn
         try:
             password = fn()
         except KeychainError:
