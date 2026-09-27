@@ -20,17 +20,14 @@ lock free). The driver **refuses** to start (non-zero, `db_mode=refused`,
 no IMAP/embed) if the variable is unset or the basename is anything else.
 There is no silent default to `mailroom.sqlite`.
 
-**Why:** `mailroom.sqlite` is the SoR name. Until PR-5 cutover, prefer a
-copy while rem embed may still hold `mailroom-copy`. A silent default
-to `mailroom.sqlite` would write the empty SoR or race the rem job.
-Copy-only keeps one writer on the live rem copy and leaves SoR promotion
-to PR-5 (out of scope here). Rem-gated copy: copy from live SoR only when
-rem-legacy is not writing, or after rem-legacy EXIT 0. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Do not mount
+**Why:** `mailroom.sqlite` is the SoR name. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Until PR-5 cutover, retrieve stays on a copy (cutover stays gated) while rem embed may still hold `mailroom-copy`. A silent default
+to `mailroom.sqlite` would race the rem job. The copy-only guard still applies to retrieve until cutover. PR-5 cutover / RunAtLoad enable stays gated. Rem-gated copy: copy from live SoR only when
+rem-legacy is not writing, or after rem-legacy EXIT 0. Do not mount
 the live SQLite over SMB/NFS and do not dual-write. No live copy from MBP to Mini
 copy is required from this tree. Look-ahead calendar jobs: if rem/writer
 on live SoR → refuse calendar SoR writers same cycle; skip/rem-safe
 before the clock. Do not run the MBP 8pm chain while
-rem-legacy is alive. The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).
+rem-legacy is alive.
 
 ### Daily children use the same copy path
 
@@ -373,7 +370,7 @@ Recipes, probe, and DoD: **[docs/ask_mail.md](../docs/ask_mail.md)**.
 MAILROOM sync: **[MAILROOM.md](../docs/MAILROOM.md)**.
 
 ```zsh
-# Mini — ask_mail (copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
+# Mini, ask_mail on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/ask_mail.py --json 'SDGE bill'
 ```

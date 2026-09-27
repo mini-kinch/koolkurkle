@@ -141,7 +141,7 @@ MAILROOM_DB=$HOME/MailArchive/mailroom.sqlite \
 ```
 
 ```zsh
-# Mini — hybrid retrieve (copy DB until PR-5; The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).)
+# Mini, hybrid retrieve on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.
 MAILROOM_DB=$HOME/MailArchive/mailroom-copy.sqlite \
   $HOME/MailArchive/.venv/bin/python $HOME/MailArchive/scripts/semantic_search.py 'SDGE bill'
 ```

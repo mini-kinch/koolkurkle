@@ -88,6 +88,11 @@ class SorWriterWordingDocsTests(unittest.TestCase):
             "**MBP (non-writer, rollback, read-only).** " + CANONICAL,
             text,
         )
+        self.assertIn(
+            "A Mini retrieve recipe must point at a **copy** path, not `mailroom.sqlite`",
+            text,
+        )
+        self.assertIn("wrong until PR-5 cutover", text)
         self.assertNotIn("host", mbp.lower())
         self.assertNotIn("host", mini.lower())
         self.assertNotIn("cutover is done", text.lower())
@@ -101,9 +106,10 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         self.assertNotIn("MBP-SoR-only", text)
         self.assertNotIn("empty stub", text)
         self.assertIn(
-            "copy DB until PR-5; " + CANONICAL,
+            "# Mini, hybrid retrieve on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
             text,
         )
+        self.assertNotIn("copy DB until PR-5; " + CANONICAL, text)
         for comment in RERANK_COMMENTS:
             self.assertIn("# %s — %s" % (MBP_LABEL, comment), text)
         for command in RERANK_COMMANDS:
@@ -120,10 +126,17 @@ class SorWriterWordingDocsTests(unittest.TestCase):
         self.assertNotIn("MBP-SoR-only", text)
         self.assertNotIn("empty stub", text)
         self.assertNotIn("Live MBP", text)
+        self.assertIn("The MBP live matrix is the operator gate.", text)
+        self.assertNotIn("MBP probe matrix", text)
         self.assertIn(
-            "copy DB until PR-5; " + CANONICAL,
+            "# Mini, phase 1: retrieve only on a copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
             text,
         )
+        self.assertIn(
+            "# Copy DB until PR-5. Mini daily job = sole SoR writer; MBP = non-writer.",
+            text,
+        )
+        self.assertNotIn("copy DB until PR-5; " + CANONICAL, text)
         self.assertIn(
             "%s SoR: `$MAILROOM_DB` or `$HOME/MailArchive/mailroom.sqlite`"
             % (CANONICAL,),

@@ -227,9 +227,16 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("$HOME/Desktop/Heavy-Bot/to-bot", text)
         self.assertIn("/workspace", text)
         self.assertIn("before box read", text)
+        dry_run = (
+            "Every brief and fix round runs `git push --dry-run` at the start of the run and again right before the real push, and on an auth failure stops and reports the exact error without retrying."
+        )
+        cloud = text.split("### repositories() before CloudAgent", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(dry_run, cloud)
+        heavy = text.split("## Heavy packets", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("git push --dry-run", heavy)
         self.assertIn(
-            "Every brief and fix round runs `git push --dry-run` at the start of the run and again right before the real push, and on an auth failure stops and reports the exact error without retrying.",
-            text,
+            "`/workspace`. A Desktop file that was never synced is not visible to",
+            heavy,
         )
         self.assertIn("ollama stop qwen3-embedding:8b", text)
         self.assertIn("--phase retrieve", text)

@@ -47,7 +47,7 @@ Three layers:
 | **MBP** | Non-writer (rollback, read-only) for `mailroom.sqlite`. A long rem-legacy embed backfill may be running here; PR-5 cutover stays gated. |
 | **Mini** | The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Until PR-5, that job and Mini retrieve stay on a **copy** (cutover stays gated). |
 
-The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). Until PR-5, Mini retrieve uses a **copy** path (cutover stays gated).
+The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only). If a recipe says Mini and points at `mailroom.sqlite`, it is wrong until PR-5 cutover. A Mini retrieve recipe must point at a **copy** path, not `mailroom.sqlite` (cutover stays gated).
 
 ---
 

@@ -30,6 +30,11 @@ class RepositoriesBeforeCloudAgentGateTests(unittest.TestCase):
         self.assertIn(LIVE.lower(), text)
         self.assertIn("before any cloudagent launch", text)
         self.assertIn("does not add cloudagent tooling", text)
+        cloud = raw.split("### repositories() before CloudAgent", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(
+            "Every brief and fix round runs `git push --dry-run` at the start of the run and again right before the real push, and on an auth failure stops and reports the exact error without retrying.",
+            cloud,
+        )
         self.assertIn("does not change rem-legacy", text)
         self.assertIn("parked/historical", text)
         self.assertIn(PARKED, raw)
