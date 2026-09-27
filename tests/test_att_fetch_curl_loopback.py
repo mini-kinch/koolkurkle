@@ -9,6 +9,7 @@ the client receives that CA through the test port/CA hook.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -63,6 +64,71 @@ def _literal_payload(tag: str) -> bytes:
     return b"\r\n".join(parts)
 
 
+# The probe literal. ``A004 OK`` is fixed (it is also what curl 8.5.0 uses
+# for the fourth command on a fresh connection). 64 bytes.
+FIXED_LITERAL = _literal_payload("A004")
+assert len(FIXED_LITERAL) == 64
+
+_BODY_RE = re.compile(
+    r"(BODY\.PEEK\[[^\]]*\](?:<\d+\.\d+>)?"
+    r"|BODY\[[^\]]*\](?:<\d+\.\d+>)?"
+    r"|RFC822\.PEEK|RFC822(?:\.HEADER|\.TEXT|\.SIZE)?)",
+    re.IGNORECASE,
+)
+_LITERAL_RE = re.compile(rb"\{(\d+)(\+)?\}$")
+
+
+def _nonpeek_spec(spec: str) -> bool:
+    """True for BODY[] / RFC822 forms that set \\Seen on a read-write mailbox.
+
+    BODY.PEEK and RFC822.PEEK do not. ``BODY[PEEK]`` is a section name, not
+    the PEEK form, so it does.
+    """
+    folded = spec.upper().replace(" ", "")
+    if folded.startswith("BODY.PEEK") or folded.startswith("RFC822.PEEK"):
+        return False
+    if folded.startswith("BODY[") or folded.startswith("RFC822"):
+        return True
+    return False
+
+
+def _response_item(spec: str) -> str:
+    """FETCH response data item. The response uses BODY, not BODY.PEEK."""
+    if not spec:
+        return "BODY[]"
+    match = re.match(
+        r"(BODY\.PEEK|BODY|RFC822\.PEEK|RFC822)(\[[^\]]*\])?(?:<(\d+)\.\d+>)?",
+        spec,
+        re.IGNORECASE,
+    )
+    if not match:
+        return "BODY[]"
+    kind = match.group(1).upper()
+    section = match.group(2) or ""
+    if kind.startswith("RFC822"):
+        base = "RFC822" + section
+    else:
+        base = "BODY" + (section or "[]")
+    origin = match.group(3)
+    if origin is not None:
+        return "%s<%s>" % (base, origin)
+    return base
+
+
+class _ConnLog(list):
+    """Command bodies (redacted) plus verbatim client lines and \\Seen state."""
+
+    def __init__(self):
+        list.__init__(self)
+        self.verbatim = []
+        self.access = ""
+        self.seen = False
+        self.nonpeek = False
+        self.peek = False
+        self.fetch_specs = []
+        self.closed = threading.Event()
+
+
 def _command_body(line: bytes) -> str:
     text = line.decode("ascii", "replace")
     if " " not in text:
@@ -107,7 +173,14 @@ def _trio(commands: list) -> bool:
 
 
 class _LoopbackImap:
-    """One-shot IMAPS stub. Speaks just enough for curl's LOGIN/EXAMINE/FETCH."""
+    """Loopback IMAPS stub.
+
+    Logs every client command verbatim (password redacted) and answers
+    SELECT, EXAMINE, FETCH, and UID FETCH, including BODY[] / BODY.PEEK[]
+    with ``<partial>``. SELECT opens read-write. EXAMINE opens read-only.
+    A non-PEEK BODY[] or RFC822 fetch sets \\Seen only on a read-write
+    mailbox (RFC 3501). The literal is the fixed 64-byte probe payload.
+    """
 
     def __init__(self, certfile: str, keyfile: str) -> None:
         self._certfile = certfile
@@ -153,52 +226,80 @@ class _LoopbackImap:
             worker.start()
 
     def _handle(self, raw: socket.socket, context: ssl.SSLContext) -> None:
-        commands: list = []
+        commands = _ConnLog()
         with self._lock:
             self.connections.append(commands)
-        examined = False
+        tls = None
         try:
-            tls = context.wrap_socket(raw, server_side=True)
-        except ssl.SSLError as exc:
-            with self._lock:
-                self.errors.append("tls: %s" % exc.__class__.__name__)
-            raw.close()
-            return
-        try:
-            tls.settimeout(8.0)
-            tls.sendall(b"* OK IMAP4rev1 ready\r\n")
-            buf = b""
-            while not self._stop.is_set():
-                try:
-                    chunk = tls.recv(65536)
-                except socket.timeout:
-                    break
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\r\n" in buf:
-                    line, buf = buf.split(b"\r\n", 1)
-                    if not line:
-                        continue
-                    examined = self._on_line(tls, line, commands, examined)
-        except (ssl.SSLError, OSError, ConnectionError) as exc:
-            with self._lock:
-                self.errors.append("conn: %s" % exc.__class__.__name__)
-        finally:
             try:
-                tls.close()
-            except OSError:
-                pass
+                tls = context.wrap_socket(raw, server_side=True)
+            except ssl.SSLError as exc:
+                with self._lock:
+                    self.errors.append("tls: %s" % exc.__class__.__name__)
+                raw.close()
+                return
+            try:
+                tls.settimeout(8.0)
+                tls.sendall(b"* OK IMAP4rev1 ready\r\n")
+                buf = b""
+                pending = 0
+                deferred = None
+                while not self._stop.is_set():
+                    try:
+                        chunk = tls.recv(65536)
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        if pending:
+                            if len(buf) < pending:
+                                break
+                            buf = buf[pending:]
+                            pending = 0
+                            if buf.startswith(b"\r\n"):
+                                buf = buf[2:]
+                            if deferred is not None:
+                                tls.sendall(deferred)
+                                deferred = None
+                            continue
+                        if b"\r\n" not in buf:
+                            break
+                        line, buf = buf.split(b"\r\n", 1)
+                        if not line:
+                            continue
+                        literal = _LITERAL_RE.search(line)
+                        if literal:
+                            self._remember(line, commands)
+                            pending = int(literal.group(1))
+                            space = line.find(b" ")
+                            tag = line[:space] if space > 0 else b"A000"
+                            deferred = tag + b" NO refused\r\n"
+                            if not literal.group(2):
+                                tls.sendall(b"+ continue\r\n")
+                            continue
+                        self._on_line(tls, line, commands)
+            except (ssl.SSLError, OSError, ConnectionError) as exc:
+                with self._lock:
+                    self.errors.append("conn: %s" % exc.__class__.__name__)
+        finally:
+            if tls is not None:
+                try:
+                    tls.close()
+                except OSError:
+                    pass
+            commands.closed.set()
 
-    def _on_line(
-        self,
-        tls: ssl.SSLSocket,
-        line: bytes,
-        commands: list,
-        examined: bool,
-    ) -> bool:
+    def _remember(self, line: bytes, commands: _ConnLog) -> str:
+        redacted = line.replace(SECRET.encode("ascii"), b"***")
+        commands.verbatim.append(redacted)
         body = _command_body(line)
         commands.append(body)
+        return body
+
+    def _on_line(self, tls: ssl.SSLSocket, line: bytes, commands: _ConnLog) -> None:
+        body = self._remember(line, commands)
         space = line.find(b" ")
         tag = line[:space].decode("ascii", "replace") if space > 0 else "A000"
         verb = _verb(body)
@@ -206,25 +307,46 @@ class _LoopbackImap:
             tls.sendall(
                 b"* CAPABILITY IMAP4rev1\r\n" + tag.encode("ascii") + b" OK CAPABILITY\r\n"
             )
-            return examined
+            return
         if verb == "LOGIN":
             tls.sendall(tag.encode("ascii") + b" OK LOGIN\r\n")
-            return examined
+            return
+        if verb == "SELECT":
+            commands.access = "read-write"
+            tls.sendall(
+                b"* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1] UIDs valid\r\n"
+                + tag.encode("ascii")
+                + b" OK [READ-WRITE] SELECT completed\r\n"
+            )
+            return
         if verb == "EXAMINE":
+            commands.access = "read-only"
             tls.sendall(
                 b"* 1 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 1] UIDs valid\r\n"
                 + tag.encode("ascii")
                 + b" OK [READ-ONLY] EXAMINE completed\r\n"
             )
-            return True
-        if verb == "UID FETCH":
-            if not examined:
-                tls.sendall(tag.encode("ascii") + b" NO not examined\r\n")
-                return examined
-            payload = _literal_payload(tag)
+            return
+        if verb in ("UID FETCH", "FETCH"):
+            found = _BODY_RE.search(body)
+            spec = found.group(1) if found else ""
+            commands.fetch_specs.append(spec)
+            if spec and _nonpeek_spec(spec):
+                commands.nonpeek = True
+            elif spec:
+                commands.peek = True
+            if not commands.access:
+                tls.sendall(tag.encode("ascii") + b" NO not selected\r\n")
+                return
+            sets_seen = bool(spec) and _nonpeek_spec(spec) and commands.access == "read-write"
+            if sets_seen:
+                commands.seen = True
+            payload = FIXED_LITERAL
             with self._lock:
                 self.served = payload
-            header = ("* 1 FETCH (BODY[1]<0> {%d}\r\n" % len(payload)).encode("ascii")
+            item = _response_item(spec)
+            flags = "FLAGS (\\Seen) " if sets_seen else ""
+            header = ("* 1 FETCH (%s%s {%d}\r\n" % (flags, item, len(payload))).encode("ascii")
             tls.sendall(
                 header
                 + payload
@@ -232,15 +354,21 @@ class _LoopbackImap:
                 + tag.encode("ascii")
                 + b" OK FETCH completed\r\n"
             )
-            return examined
+            return
         if verb == "LOGOUT":
             tls.sendall(b"* BYE\r\n" + tag.encode("ascii") + b" OK LOGOUT\r\n")
-            return examined
-        if verb in _FORBIDDEN or verb in ("UID STORE", "UID EXPUNGE"):
+            return
+        if verb in ("LIST", "LSUB"):
+            tls.sendall(
+                b'* LIST (\\Unmarked) "/" INBOX\r\n'
+                + tag.encode("ascii")
+                + b" OK LIST completed\r\n"
+            )
+            return
+        if verb in _FORBIDDEN or verb in ("UID STORE", "UID EXPUNGE", "APPEND"):
             tls.sendall(tag.encode("ascii") + b" NO refused\r\n")
-            return examined
+            return
         tls.sendall(tag.encode("ascii") + b" BAD unknown\r\n")
-        return examined
 
 
 def _redact(blob: bytes) -> str:
