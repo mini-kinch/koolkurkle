@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- FAIL-OPEN FOR SEARCH AVAILABILITY, FAIL-CLOSED FOR THE SOR.
+     Persistent search-resume watchdog. StartInterval 60 seconds.
+     Does not set KeepAlive on com.mailroom.ask-mail-serve and does not
+     edit that agent's plist. Substitute __HOME__ with $HOME at install
+     (launchd does not expand $HOME).
+     CODE AND PLIST TEMPLATE ONLY, NO INSTALL.
+     Nothing loads until an operator bootstraps the installed copy. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.mailroom.search-resume-watchdog</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>__HOME__/MailArchive/scripts/search_resume_watchdog.py</string>
+		<string>watch</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>__HOME__/MailArchive/logs/search-resume-watchdog.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/MailArchive/logs/search-resume-watchdog.launchd.log</string>
+</dict>
+</plist>
