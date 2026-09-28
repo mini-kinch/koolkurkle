@@ -66,6 +66,8 @@ _FORBIDDEN_ARGV = frozenset(
         "--trace",
         "--trace-ascii",
         "--trace-time",
+        "--output",
+        "-o",
         "-k",
         "--insecure",
         "--user",
@@ -78,6 +80,7 @@ _FORBIDDEN_CONFIG = frozenset(
         "trace",
         "trace-ascii",
         "trace-time",
+        "output",
         "insecure",
     }
 )
@@ -217,7 +220,9 @@ def guard_curl_argv(argv) -> None:
 
     Mirrors the tombstone rule that the secret never rides in argv:
     binary is ``/usr/bin/curl``, config is ``-K -``, and verbose, trace,
-    insecure, ``--user``, and Homebrew paths are rejected.
+    ``--output``, insecure, ``--user``, and Homebrew paths are rejected.
+    ``--output`` and ``--trace-ascii`` do not recover a custom-request
+    FETCH literal, and a trace records the login secret.
     """
     args = [str(item) for item in list(argv or [])]
     if not args or args[0] != CURL_BIN:
@@ -310,7 +315,7 @@ def config_blocks(config_text: str) -> list:
 
 
 def guard_curl_config(config_text: str) -> None:
-    """Reject verbose, trace, and insecure options in the stdin config."""
+    """Reject verbose, trace, output, and insecure options in the stdin config."""
     for line in (config_text or "").splitlines():
         name = line.split("=", 1)[0].strip().lower()
         if name in _FORBIDDEN_CONFIG:
