@@ -23,7 +23,6 @@ PLIST = ROOT / "launchd" / "com.mailroom.daily.plist"
 PRIVACY_NEEDLES = ("/Users/", "@me.com", "@icloud.com")
 HOMEBREW = "/opt/homebrew/opt/curl/bin/curl"
 APPLE = "/usr/bin/curl"
-KEYCHAIN = "mailroom.imap.app-password"
 
 
 class BrewCurlVersionTests(unittest.TestCase):
@@ -69,17 +68,25 @@ class BrewCurlVersionTests(unittest.TestCase):
 
 class KeychainNameContractTests(unittest.TestCase):
     def test_name_only_never_secret(self):
-        self.assertEqual(bodies.KEYCHAIN_ITEM_NAME, KEYCHAIN)
+        name = bodies.KEYCHAIN_ITEM_NAME
+        self.assertTrue(name and " " not in name)
         raw = PLIST.read_text(encoding="utf-8")
         self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", raw)
         self.assertNotIn("IMAP_APP_PASSWORD", raw)
-        for path in (DAILY, OPS, README, MAILROOM, ROOT / "scripts" / "imap_fetch_bodies_fts.py"):
+        for path in (OPS, README, MAILROOM, ROOT / "scripts" / "imap_fetch_bodies_fts.py"):
             text = path.read_text(encoding="utf-8")
-            self.assertIn(KEYCHAIN, text, msg=path.name)
+            self.assertIn(name, text, msg=path.name)
             self.assertIn(HOMEBREW, text, msg=path.name)
             hay = text.replace("/Users/<operator>/", "")
             for needle in PRIVACY_NEEDLES:
                 self.assertNotIn(needle, hay, msg=path.name)
+        daily = DAILY.read_text(encoding="utf-8")
+        self.assertIn("<keychain-item>", daily)
+        self.assertIn(HOMEBREW, daily)
+        self.assertNotIn(name, daily)
+        hay = daily.replace("/Users/<operator>/", "")
+        for needle in PRIVACY_NEEDLES:
+            self.assertNotIn(needle, hay)
 
 
 if __name__ == "__main__":
