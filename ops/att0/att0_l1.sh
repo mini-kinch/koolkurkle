@@ -250,7 +250,11 @@ env_check() {
         MAILROOM_IMAP_MAILBOX PYTHONPATH PYTHONHOME IMAP_APP_PASSWORD MAILROOM_IMAP_PASSWORD; do
         eval "_set=\${$_v+x}"
         if [ -n "$_set" ]; then
-            say "STOP-env-set ${_v}"
+            if [ "$_v" = "SOR_FORCE_LIVE_CHECKS" ]; then
+                say FLAG_EXPORTED_STOP
+            else
+                say "STOP-env-set ${_v}"
+            fi
             return 1
         fi
     done
@@ -422,6 +426,7 @@ locks_ok() {
 
 no_action_required() {
     if [ -e "$MA/ACTION_REQUIRED" ] || [ -L "$MA/ACTION_REQUIRED" ]; then
+        say ACTION_REQUIRED_PRESENT
         say STOP-action-required
         return 1
     fi
@@ -451,12 +456,12 @@ sor_1c() {
     fi
     _st=$("$STAT" -f '%HT %l' "$SOR" 2>/dev/null || true)
     case "$_st" in
-        "Regular File 1") ;;
+        "Regular File 1") say "Regular File 1" ;;
         *) say STOP-sor-stat; return 1 ;;
     esac
     _rp=$("$PYTHON" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SOR" 2>/dev/null || true)
     case "$_rp" in
-        */MailArchive/mailroom.sqlite) ;;
+        */MailArchive/mailroom.sqlite) say "…/MailArchive/mailroom.sqlite" ;;
         *) say STOP-realpath; return 1 ;;
     esac
     say SOR-1C-OK
@@ -1026,21 +1031,75 @@ search_loaded() {
 }
 
 search_not_disabled() {
-    _out=$("$LAUNCHCTL" print-disabled "gui/$(uid_now)" 2>&1)
-    _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-        say STOP-print-disabled
+    _pd=$("$LAUNCHCTL" print-disabled "gui/$(uid_now)" 2>&1)
+    _prc=$?
+    _lines=$(printf '%s\n' "$_pd" | "$GREP" -F '"com.mailroom.ask-mail-serve"' || true)
+    _n=$(printf '%s' "$_lines" | "$GREP" -c . || true)
+    if [ "$_prc" -ne 0 ] || ! text_has "$_pd" "disabled services = {" || ! text_has "$_pd" "=>"; then
+        say "DISABLED_STATE_UNCLEAR rc=${_prc}"
         return 1
     fi
-    if printf '%s\n' "$_out" | "$AWK" '{
-        gsub(/^[ \t]+|[ \t]+$/, "")
-        if ($0 == "\"com.mailroom.ask-mail-serve\" => disabled" || $0 == "\"com.mailroom.ask-mail-serve\" => true") found = 1
-    } END { exit found ? 0 : 1 }'; then
-        say STOP-search-disabled
+    if [ "${_n:-0}" -eq 0 ]; then
+        say NOT_DISABLED
+        return 0
+    fi
+    if [ "$_n" -ne 1 ]; then
+        say "DISABLED_STATE_UNCLEAR lines=${_n}"
         return 1
     fi
-    say SEARCH-NOT-DISABLED
+    if text_has "$_lines" "=> disabled" || text_has "$_lines" "=> true"; then
+        say DISABLED_STOP
+        return 1
+    fi
+    if text_has "$_lines" "=> enabled" || text_has "$_lines" "=> false"; then
+        say NOT_DISABLED
+        return 0
+    fi
+    say "DISABLED_STATE_UNCLEAR line"
+    return 1
+}
+
+say_search_state() {
+    case "$1" in
+        loaded) say SEARCH_LOADED ;;
+        unloaded) say SEARCH_NOT_LOADED ;;
+        *) say "SEARCH_STATE_UNCLEAR" ;;
+    esac
+}
+
+deadline_26_margin_ok() {
+    _slog="$LOGS/att0w-d26-${STAMP}.log"
+    if [ -e "$_slog" ]; then
+        _slog="$LOGS/att0w-d26-${STAMP}-$$.log"
+    fi
+    if ! run_group 30 "$_slog" "$PYTHON" "$S_DIR/search_resume_watchdog.py" status; then
+        say STOP-deadline-status
+        return 1
+    fi
+    if ! has_line "$_slog" "run_id=${RUN_ID}"; then
+        say STOP-deadline-run-id
+        return 1
+    fi
+    if ! has_line "$_slog" "d26_live=yes"; then
+        say STOP-deadline-26-not-live
+        return 1
+    fi
+    _d26=$("$AWK" -F= '/^deadline_26=/ { print $2; exit }' "$_slog")
+    case "$_d26" in
+        ''|*[!0-9]*) say STOP-deadline-26-margin; return 1 ;;
+    esac
+    _now=$(now_epoch) || return 1
+    _left=$((_d26 - _now))
+    if [ "$_left" -lt 120 ]; then
+        say STOP-deadline-26-margin
+        return 1
+    fi
+    say "DEADLINE-26-MARGIN left=${_left}"
     return 0
+}
+
+schema_sha() {
+    "$SQLITE" -readonly "$1" "SELECT type||'|'||name||'|'||tbl_name||'|'||coalesce(sql,'') FROM sqlite_master ORDER BY type,name;" | "$SHASUM" -a 256 | "$AWK" '{print $1; exit}'
 }
 
 health_ok() {
@@ -1067,8 +1126,12 @@ s2_body() {
         return 1
     fi
     _plist="$HOME/Library/LaunchAgents/com.mailroom.ask-mail-serve.plist"
-    if ! "$LAUNCHCTL" bootstrap "gui/$(uid_now)" "$_plist"; then
+    _brc=0
+    "$LAUNCHCTL" bootstrap "gui/$(uid_now)" "$_plist" || _brc=$?
+    say "bootstrap_rc=${_brc}"
+    if [ "$_brc" != "0" ]; then
         _st=$(search_loaded)
+        say_search_state "$_st"
         if [ "$_st" != "loaded" ]; then
             say STOP-s2-bootstrap
             SEARCH_STATUS=not-restored
@@ -1091,6 +1154,12 @@ s2_body() {
         SEARCH_STATUS=not-restored
         return 1
     fi
+    if [ -e "$MA/state/search_resume_after.epoch" ]; then
+        say DEADLINE_STILL_PRESENT_STOP
+        SEARCH_STATUS=not-restored
+        return 1
+    fi
+    say deadline_cleared
     SEARCH_RESTORED=1
     SEARCH_STATUS=restored
     SEARCH_DOWN=0
@@ -1251,8 +1320,8 @@ arr_body() {
 sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
 import sor_writer_gate as g
 h = g.rem_process_hits()
-sys.stdout.write("hits_count=%d\n" % len(h))' 2>/dev/null || true)
-    if [ "$_hits" != "hits_count=0" ]; then
+sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev/null || true)
+    if [ "$_hits" != "hits_count=0 pids=[]" ]; then
         say ROLLBACK-NEEDED
         ARR_STATUS=needed
         return 1
@@ -1412,11 +1481,11 @@ hits_clear() {
 sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
 import sor_writer_gate as g
 h = g.rem_process_hits()
-sys.stdout.write("hits_count=%d\n" % len(h))'; then
+sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))'; then
         say STOP-hits
         return 1
     fi
-    if ! has_line "$_log" "hits_count=0"; then
+    if ! has_line "$_log" "hits_count=0 pids=[]"; then
         say STOP-hits
         return 1
     fi
@@ -1595,13 +1664,19 @@ do_window() {
         WANTED_RC=1
         return
     fi
-    if ! "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$RUN_ID"; then
+    _wrc=0
+    "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$RUN_ID" || _wrc=$?
+    say "write_rc=${_wrc}"
+    if [ "$_wrc" != "0" ]; then
         say STOP-deadline-write
         WANTED_RC=1
         return
     fi
     say DEADLINE-OK
-    if ! "$LAUNCHCTL" bootout "$(gui_target com.mailroom.ask-mail-serve)"; then
+    _brc=0
+    "$LAUNCHCTL" bootout "$(gui_target com.mailroom.ask-mail-serve)" || _brc=$?
+    say "bootout_rc=${_brc}"
+    if [ "$_brc" != "0" ]; then
         say STOP-bootout
         WANTED_RC=1
         return
@@ -1609,12 +1684,17 @@ do_window() {
     SEARCH_DOWN=1
     SEARCH_STATUS=down
     _st=$(search_loaded)
+    say_search_state "$_st"
     if [ "$_st" != "unloaded" ]; then
         say STOP-search-still-loaded
         WANTED_RC=1
         return
     fi
     say SEARCH-BOOTED-OUT
+    if ! deadline_26_margin_ok; then
+        WANTED_RC=1
+        return
+    fi
     if ! printf '%s\n' "s_epoch=${S_EPOCH}" "run_id=${RUN_ID}" > "/tmp/att0w-s1-${STAMP}"; then
         say STOP-s1-write
         WANTED_RC=1
@@ -1626,7 +1706,7 @@ do_window() {
     if ! MAILROOM_SEARCH_RESUME_RUN_ID="$RUN_ID" run_group "$A2_TIMEOUT_S" "$_a2log" \
         "$PYTHON" "$S_DIR/with_writer_lock.py" --purpose att0-migrate -- \
         "$ENVBIN" MAILROOM_SEARCH_RESUME_RUN_ID="$RUN_ID" \
-        SOR_FORCE_LIVE_CHECKS=1 PYTHONPATH="${S_DIR}:${S_DIR}/attachments" PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="${S_DIR}:${S_DIR}/attachments" PYTHONDONTWRITEBYTECODE=1 \
         "$PYTHON" "$S_DIR/attachments/migrate_att0_schema.py" --db "$SOR" --allow-mailroom-sqlite
     then
         wait_lock_free || true
@@ -1639,6 +1719,31 @@ do_window() {
         return
     fi
     say A2-OK
+    _a2rlog="$LOGS/att0w-a2-rerun-${STAMP}.log"
+    if ! run_group "$A2_TIMEOUT_S" "$_a2rlog" \
+        "$PYTHON" "$S_DIR/with_writer_lock.py" --purpose att0-migrate -- \
+        "$ENVBIN" -u MAILROOM_SEARCH_RESUME_RUN_ID \
+        PYTHONPATH="${S_DIR}:${S_DIR}/attachments" PYTHONDONTWRITEBYTECODE=1 \
+        "$PYTHON" "$S_DIR/attachments/migrate_att0_schema.py" --db "$SOR" --allow-mailroom-sqlite
+    then
+        wait_lock_free || true
+        say STOP-a2-rerun
+        WANTED_RC=3
+        return
+    fi
+    if ! log_ok_migrate "$_a2rlog" rerun; then
+        WANTED_RC=3
+        return
+    fi
+    say A2-RERUN-OK
+    _live_schema=$(schema_sha "$SOR") || { WANTED_RC=3; return; }
+    _reh_schema=$(schema_sha "$REH_DB") || { WANTED_RC=3; return; }
+    if [ -z "$_live_schema" ] || [ "$_live_schema" != "$_reh_schema" ]; then
+        say STOP-schema-sha
+        WANTED_RC=3
+        return
+    fi
+    say SCHEMA-SHA-OK
     # Free-lock gap before A3. A2's writer-lock drop already removed +26.
     # Do not call watchdog arm or schedule here. The only remaining
     # deadline is the S+50 file plus the S+51 budget check below.
@@ -1654,6 +1759,13 @@ do_window() {
         return
     fi
     say GAP-D26-DROPPED
+    _st=$(search_loaded)
+    say_search_state "$_st"
+    if [ "$_st" != "unloaded" ]; then
+        say STOP-a3-search-loaded
+        WANTED_RC=3
+        return
+    fi
     _a3t=$(a3_timeout)
     if [ "$_a3t" -lt 1 ]; then
         say STOP-a3-no-time
@@ -1666,7 +1778,7 @@ do_window() {
         "$ENVBIN" MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
         "$PYTHON" "$S_DIR/with_writer_lock.py" --purpose 'att0 meta fill' -- \
         "$ENVBIN" -u MAILROOM_SEARCH_RESUME_RUN_ID \
-        SOR_FORCE_LIVE_CHECKS=1 MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
+        MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
         PYTHONPATH="${S_DIR}:${S_DIR}/attachments" PYTHONDONTWRITEBYTECODE=1 \
         "$PYTHON" "$S_DIR/attachments/meta_fill.py" --db "$SOR" --source imap \
         --max-messages 0 --timeout 0 --apply --allow-mailroom-sqlite

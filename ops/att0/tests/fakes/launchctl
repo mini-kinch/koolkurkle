@@ -40,12 +40,16 @@ case "$cmd" in
         exit 113
         ;;
     print-disabled)
+        echo 'disabled services = {'
         if [ ! -f "${ATT0_STATE}/daily_enabled" ]; then
             echo '"com.mailroom.daily" => disabled'
+        else
+            echo '"com.mailroom.daily" => enabled'
         fi
         if [ -f "${ATT0_STATE}/search_disabled" ]; then
             echo '"com.mailroom.ask-mail-serve" => disabled'
         fi
+        echo '}'
         exit 0
         ;;
     bootout)
