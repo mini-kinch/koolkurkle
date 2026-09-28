@@ -8,9 +8,11 @@ scripts/. scripts/path_a_bench.py calls socket.create_connection for the
 local Ollama port only. It does not name imap.mail.me.com or port 993,
 so it is not an IMAP hit and is not allowlisted.
 
-ALLOWLIST is empty on purpose. Add a file here only when main already
-contains an IMAP-socket hit this PR must not edit. Name the file in the
-comment above the constant.
+ALLOWLIST is empty on purpose. The only path that may ever be listed is
+the ATT-1 part-byte module ``scripts/attachments/imaplib_part.py``.
+A second Python IMAP socket, including the ATT-0 metadata fill, fails
+this guard. Name that file in the comment above the constant before
+adding it, and only after that file exists on this branch.
 """
 
 from __future__ import annotations
@@ -22,7 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
-# No pre-existing IMAP-socket hits outside meta_fill.py. Leave this empty.
+# Empty until the ATT-1 part-byte module lands. One name, or none.
+PERMITTED_IMAP_SOCKET = "scripts/attachments/imaplib_part.py"
 ALLOWLIST: tuple[str, ...] = ()
 
 _IMPORT_IMAPLIB = re.compile(r"(?m)^\s*(?:import\s+imaplib\b|from\s+imaplib\b)")
@@ -94,6 +97,24 @@ class RepoNoPythonImapSocketsTests(unittest.TestCase):
         self.assertEqual(imap_socket_violations(curl_only), [])
         ollama = "sock = socket.create_connection((host, 11434), timeout=1.0)\n"
         self.assertEqual(imap_socket_violations(ollama), [])
+
+    def test_allowlist_is_the_att1_file_or_empty(self):
+        self.assertLessEqual(len(ALLOWLIST), 1)
+        for rel in ALLOWLIST:
+            self.assertEqual(rel, PERMITTED_IMAP_SOCKET)
+            self.assertTrue((ROOT / rel).is_file(), rel)
+        meta = (SCRIPTS / "attachments" / "meta_fill.py").read_text(encoding="utf-8")
+        self.assertEqual(imap_socket_violations(meta), [])
+
+    def test_a_second_socket_path_cannot_be_allowlisted(self):
+        banned = (
+            "scripts/attachments/meta_fill.py",
+            "scripts/imap_curl.py",
+            "scripts/ask_mail.py",
+        )
+        for rel in banned:
+            self.assertNotIn(rel, ALLOWLIST)
+        self.assertNotEqual(len(ALLOWLIST), 2)
 
 
 if __name__ == "__main__":
