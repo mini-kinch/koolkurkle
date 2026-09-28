@@ -44,7 +44,7 @@ No curl flag tried here both returns the literal and sends `EXAMINE` plus `BODY.
 
 `imaplib.py` `_get_response` matches `{size}` at the end of a line and `read(size)` takes those bytes before the next protocol line, so tag-like text stays data. Observed returns: `{0}` is `(header, b'')`; `BODY[1] ""` and `BODY[1] NIL` are single bytes lines. `parse_fetch_literal` on the PR #80 head already accepts imaplib’s tuple. NIL and the quoted empty string still need R4: empty at offset 0 is an error, empty later is a clean end, and a NIL match must be the FETCH item itself. That policy is not implemented.
 
-Credentials stay on `password_fn`, default `read_imap_app_password` (`scripts/imap_keychain.py`, `/usr/bin/security`, item `mailroom.imap.app-password`, one fallback name). No new Keychain item, flag, or environment variable. `login` keeps the password in-process on the TLS session and must not log it.
+Credentials stay on `password_fn`, default `read_imap_app_password` (`scripts/imap_keychain.py`, `/usr/bin/security`, item `<keychain-item>`, one fallback name). No new Keychain item, flag, or environment variable. `login` keeps the password in-process on the TLS session and must not log it.
 
 Timeouts: `IMAP4_SSL(..., timeout=)` is a per-read socket timeout via `socket.create_connection`, not curl’s whole-transfer `--max-time`. A stall should still become `FetchRefuse` with nothing stored.
 

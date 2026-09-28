@@ -8,6 +8,14 @@
 4. Do `--output` or `--trace-ascii` recover literal bytes that the custom-request reader dropped, or do they observe the same truncated read?
 5. Is stdlib `imaplib.IMAP4_SSL` with `select(readonly=True)` a correct reader for partial `BODY.PEEK` literals (binary, CR/LF, embedded tag-like lines)? What pitfalls matter here: per-read socket timeout versus a whole-transfer deadline, empty / NIL replies, SSL environment variables, and a historical Errno 9 when a Python socket dials the live host?
 6. Which option should ATT-1 use (native curl URL, some other curl workaround, stdlib imaplib, or defer), and which tests must pass before any live run?
+7. Q7 (issue 1): For the search service that writes the system of record, is a read-only window marker that pauses those writes during a lock hold, and never takes write.lock, the right long-term model, or should that service move to a sidecar database?
+8. Q8 (issue 2): The Mini daily shell and daily Python driver have drifted from the repo copies. Promote the Mini bytes into the repo, or reinstall the repo copy? What diff review is required first?
+9. Q9 (issue 6): Already covered by questions 1 through 6. The choice is the same one as question 6: a curl URL-form workaround, or unhold AR-B imaplib. No second question.
+10. Q10 (issue 7): The literal drop reproduced on Mini curl 8.7.1 and on this cloud curl 8.5.0. The native URL-form results are only for 8.5.0. Should CI pin or emulate the Mini curl?
+11. Q11 (issue 13): The first daily after the gap is about 41 hours of backlog. Should urgent texts and bill reminders on that catch-up have a per-run cap and an age limit?
+12. Q12 (issue 18): A Keychain failure currently leaves the metadata fill at exit 0 with a non-empty failure list, and only a report gate requires that list to be empty. Should the fill exit non-zero on auth failure?
+13. Q13 (issue 20): The Keychain read has no subprocess timeout. Add a timeout and a distinct exit code, and should an interactive prompt fail fast?
+14. Q14 (issue 21): Pin the Keychain item in the daily wrapper and remove the legacy fallback, or keep the fallback with a loud warning that the code itself treats as a stop?
 
 ## Problem
 
@@ -131,3 +139,46 @@ The decision is still the owner's: allow imaplib for ATT-1 and record the rule e
 ## Scope note
 
 This is ATT-1 attachment-part byte fetch only. It does not affect the ATT-0 headers-only metadata fill. That fill uses `BODYSTRUCTURE`, not part bytes, and a dropped or truncated `{n}` literal is a hard gate for that message (`literal_dropped` or `literal_truncated`). Those gates stay as they are.
+
+## Other known open issues
+
+Source: the scrubbed known-open-issues list (19 items) plus four added here. CRM-log names are opaque citation labels. Times are PT. `<archive>` is the mail archive directory.
+
+1. **ask-mail-serve is a second system-of-record writer, and its install has drifted.** The search service writes the system of record (`ask_audit`, `drafts`), which breaks the single-writer rule. The installed copy is not repo main. Evidence: plan L1 v1.17 finding (20260927-1615-att0-L1-plan-v1.17); H8 design note PR #93 (head f2409c7d, docs only). Status: L1 works around it by booting search out from S1 to S2. #93 is not yet verified by Mailroom (queued after the window PR). Heavy Q: Q7.
+2. **The Mini-local daily chain has drifted.** The Mini daily shell (blob 3babd69f) and `mailroom_daily.py` (abc7d3ca) are not the repo copies. Evidence: 20260927-2145 review (B1); 20260928-0112 remaining steps. Status: the gate change does not affect the daily (it carries no writer token). Reconciling needs a Mac read. All repo reviews of the daily (H2) cover repo bytes only. Heavy Q: Q8.
+3. **The 20:19 Phase P P5 backup may be truncated.** The 2026-09-27 20:19 Phase P attempt stopped (P3 ancestor-walk EPERM). Its P5 backup `backups/mailroom-pre-att0-live-20260927-2019.sqlite`, and any sidecars, may be partial. Evidence: 20260927-2023 P3 STOP diagnosis; 20260927-2024 RESTORE card (a2) check. Status: left in place, no deletes. The valid backup is Phase P 01:18 (BK sha12 05efefc8872e). Cleanup needs its own approval. Heavy Q: none beyond retention and cleanup policy.
+4. **#92 install leftovers.** The worktree `/tmp/pr92-gate-473b59a0bc85-20260928-010242` (registered in a /tmp repo), the `/tmp/pr92-*` markers, and `backups/pr92-473b59a0bc85/` all remain. Evidence: 20260928-0115 C3 install output (37/37 OK); 20260928-0112. Status: harmless. Cleanup needs its own approval (deletes).
+5. **#81 restore helper needs rework and a re-gate.** `att0_restore.py` is not installed, and L1 uses the manual `sqlite3 .backup` recipe only (CoS 00:40 09-27). A re-gate against current main was deferred because it depends on the #80 transport. Evidence: plan v1.17 line on the AR-R route; 20260928-0130 handoff H4. Status: HOLD behind #80.
+6. **#80 curl IMAP transport: tag-like lines in a literal get truncated or dropped.** The real-curl loopback test at head 1d1e4fed shows UID FETCH literals that contain tag-like lines are dropped. The code fails closed (`FetchRefuse`, returns None, stores nothing). Evidence: gate 6 CHANGES REQUESTED at 87397f7a (20260927-0105); 20260927-0124 cloud probe; 20260927-0136 Mini probe. Status: H3 is not relaunched and waits on a CoS transport ruling. L1 is not affected: the metadata fill fetches `BODYSTRUCTURE` only and gates `literal_dropped` / `literal_truncated` at 0 (the Phase P fill had both at 0). Heavy Q: Q9, which points at questions 1-6 rather than repeating them.
+7. **Mini curl versus cloud curl.** The Mini `/usr/bin/curl` is 8.7.1 (x86_64-apple-darwin25.0, SecureTransport, LibreSSL 3.3.6). This cloud VM's curl is 8.5.0 (Ubuntu, OpenSSL 3.0.13). The #80 literal-drop reproduced on both (20260927-0136). The option-C libcurl URL-form templates were probed only on 8.5.0 (20260927-0210) and are unconfirmed on 8.7.1. Cloud tests do not prove Mini TLS behavior. Heavy Q: Q10.
+8. **#88: do not merge.** Curl's built-in URL fetch always SELECTs (read-write) and downloads the body, which marks mail read. Evidence: AR-A3 v5 note (20260927-1210). Status: HELD, do not merge. Caveat: nobody has watched the read/unread flag on real mail during any run. The no-mark-read claim for the installed EXAMINE path rests on code reading and loopback tests.
+9. **PR-8 gate regime: PR-8 helper import (bc-67c649c9).** Status: held and not gating L1 (plan v1.17). The PR-8 lesson: stubs masked the real imaplib UIDVALIDITY tuple (PR68, 09-25).
+10. **AR-2: the #91 option A caller guards plus N2.** Status: reviewed PASS (20260927-1843, sha12 1a7e3c499337) at PIN 7a0da9f7. Install HELD for a CoS Desk announcement, and now needs a re-check against 473b59a0.
+11. **AR-J1 and AR-J2: jsonl attachment metadata.** J1 copies the frozen jsonl to the Mini with a sha check. J2 writes jsonl attachment metadata into the Mini database. Evidence: 20260927-0146 AR-J2 v2 DRAFT and the RJ rollback draft. Status: DRAFT, NOT ARMED, held.
+12. **AR-B imaplib: a one-message read-only live read.** Evidence: 20260927-0148 DRAFT NOT ARMED. Status: held. It is the alternative to the curl transport in #80.
+13. **First daily catch-up burst risk (H2).** No ingest since 2026-09-26 (last header pull 08:50, last full daily 16:51), so about 41 hours or more of backlog. The first chain after the restore may send a burst of stale urgent texts, reminders for past-due bills, and a large tombstone pass. Evidence: 20260928-0130 H2. Status: review plus a `post_restore_check` in cloud agent bc-a71fe74e. Not landed. It covers repo bytes only (see item 2). The daily stays held until after L1 PASS or AR-R. Heavy Q: Q11.
+14. **Phase P script review: DEFECTS 3 (bc-6906af14).** Three defects: a 300 s alarm orphans the metadata fill and curl with the lock dropped; the two-file `lsof` rc test fails open for a held write.lock; `curl.*imap` never matches the pinned curl argv because the URL is on stdin. Evidence: review sha256 6f052a8a…caf93a; 20260928-0142 response. Status: the Phase P PASS (STAMP 20260928-011821) stands on independent evidence. Fixes W22 to W24 are required in the window PR bc-5ff50896 and in the contingency phaseP_v2 (bc-742a0e1e). Both are not yet verified. Related: Developer's SAFE-STATE `SS-LOCKS-FREE` used the same two-file lsof.
+15. **Writer-pattern self-match (new, 01:4x).** `[r]un_mailroom_daily` contains an unguarded `mailroom_daily`, so any check whose pattern appears in its own argv (`bash -c`, `python -c`) always sees a writer. Evidence: 20260928-0144 fallback card FINAL (f064c26ed200). Status: fixed in the fallback card and forwarded to bc-5ff50896 (an idle no-false-writer test is required).
+16. **Exit code ambiguity.** The wrapper returns 2 for both `WriterLockError` and argparse errors. Status: documented and pinned in PR #96 (`docs/exit-codes.md`, https://github.com/mini-kinch/koolkurkle/pull/96) without a behavior change. H6 (bc-196a9813) is that note. A distinct busy code is only a proposal there (opt-in, default stays 2, because deployed callers already branch on 2). No Heavy Q. The probe-versus-gate split is item 22, and it is explained.
+17. **#82 CI.** The re-run could not be triggered ("Resource not accessible by integration"). Status: the existing CI on head 5df780b86467 is green, and a local re-run gave 1053 OK. The Actions permission for agents is open.
+18. **Keychain failure is not an exit code.** A Keychain read failure (curl rc 36/51) makes the metadata fill exit 0 with `curl_failures` non-empty. Evidence: phaseP review, Keychain section. Status: handled only by report gates (`curl_failures=[]` required). Heavy Q: Q12.
+19. **The window and remaining ARs are not done.** The L1 live window (A2 migrate, A3 fill), the done report, the daily restore, and AR-84 are all pending. The window PR bc-5ff50896 is not delivered or verified. The A5 limit on the Phase P stamp is 13:18 on 09-28, after which Phase P must re-run with v2.
+20. **Keychain read has no timeout.** In `scripts/imap_keychain.py`, the read is `/usr/bin/security find-generic-password -s <service> -w` with no `-a`, no `env` override, and no `timeout`. If Keychain prompts or hangs, the metadata fill blocks indefinitely. Only an outer process-group timer bounds it. The call is:
+
+```python
+def _run_security(binary: str, service: str) -> tuple[int, str]:
+    try:
+        proc = subprocess.run(
+            [binary, "find-generic-password", "-s", service, "-w"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return 1, ""
+```
+
+`meta_fill` calls `read_imap_app_password()` on that path with no timeout of its own. The `timeout_s` on the fill applies to the IMAP transfer, not to this subprocess. Heavy Q: Q13.
+21. **Silent Keychain item fallback (K2b backlog).** The same module tries the default item, then the legacy item. The daily wrapper does not pin which item to use via env (`MAILROOM_KEYCHAIN_ITEM` is not read). On a legacy hit the code writes a stderr line containing "falling back" and still returns the password. A fallback is a STOP only under run-script log rules that watch for that line, not under the code. Item names are omitted here on purpose. Heavy Q: Q14.
+22. **Probe versus gate exit status.** Explained, pending reviewer verification of #96. `_probe_writer_lock` in `scripts/sor_writer_gate.py` returns `(True, 'writer lock held: ...')` when another process holds the flock. `True` is a `bool`, and `bool` is an `int` with `True == 1`, so `sys.exit(True)` is status 1. The gate CLI returns `CONFLICT_EXIT` = 2 for that same flock on a live system-of-record basename. Both behave as coded. PR #96 (`docs/exit-codes.md`) pins that split and does not change either status. No Heavy Q. Item 16 is the separate fact that status 2 is also argparse.
+23. **Parked backlog (status only).** The post.py fail-faster PR, the path_a_status.sh PR, the #42 CI watch, the follow-up (i) docs PR, the daily LaunchAgent plist template fix, and drafts #85-#87 and the #80 fix rounds are all parked behind the ATT-0 L1 run. No Heavy Q.
