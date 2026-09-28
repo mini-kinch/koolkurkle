@@ -1222,19 +1222,6 @@ r1_after() {
     return 1
 }
 
-# Read-only URI for a copied DB that may be WAL with no -wal or -shm.
-# immutable does not create those side files. ?, #, and % are URI
-# delimiters; a path that contains one fails closed.
-backup_ro_uri() {
-    _uri_path=$1
-    case "$_uri_path" in
-        *'?'*|*'#'*|*'%'*)
-            return 1
-            ;;
-    esac
-    printf '%s\n' "file:${_uri_path}?mode=ro&immutable=1"
-}
-
 copy_db() {
     _src=$1
     _dest=$2
@@ -1913,13 +1900,7 @@ if [ -e "$STAGE" ]; then
     printf '%s\n' REFUSE-STAGE-EXISTS
     exit 1
 fi
-case "$BK" in
-    *'?'*|*'#'*|*'%'*)
-        printf '%s\n' STOP-backup-uri
-        exit 1
-        ;;
-esac
-"$SQLITE" "file:${BK}?mode=ro&immutable=1" ".backup '${STAGE}'" || exit 1
+"$SQLITE" -readonly "$BK" ".backup '${STAGE}'" || exit 1
 "$SQLITE" "$STAGE" "PRAGMA journal_mode=DELETE;" || exit 1
 for side in wal shm journal; do
     src="$SOR-$side"
@@ -2434,9 +2415,17 @@ do_window() {
         WANTED_RC=1
         return
     fi
+    # The backup keeps WAL mode but has no -wal or -shm, so sqlite3 -readonly
+    # cannot open it (SQLITE_CANTOPEN). Switch it to rollback mode before
+    # its sha is taken; restore sets WAL back on the live SoR.
+    _bjm=$("$SQLITE" "$BK" "PRAGMA journal_mode=DELETE;") || _bjm=
+    if [ "$_bjm" != "delete" ] || [ -e "${BK}-wal" ] || [ -e "${BK}-shm" ]; then
+        say STOP-backup-journal
+        WANTED_RC=1
+        return
+    fi
     BK_SHA=$("$SHASUM" -a 256 "$BK" | "$AWK" '{print $1; exit}') || { WANTED_RC=1; return; }
-    _bkuri=$(backup_ro_uri "$BK") || { say STOP-backup-uri; WANTED_RC=1; return; }
-    if ! "$SQLITE" "$_bkuri" "PRAGMA quick_check;" | "$AWK" 'BEGIN{ok=0} $0=="ok"{ok=1} END{exit ok?0:1}'; then
+    if ! "$SQLITE" -readonly "$BK" "PRAGMA quick_check;" | "$AWK" 'BEGIN{ok=0} $0=="ok"{ok=1} END{exit ok?0:1}'; then
         say STOP-backup-quick
         WANTED_RC=1
         return
