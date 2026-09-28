@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import ctypes
+import errno
 import inspect
 import io
 import logging
@@ -1058,6 +1059,145 @@ class AncestorWalkTests(IdentityCase):
         with self.assertRaises(gate.AncestorWalkError) as ctx:
             gate.ancestor_pids(10, ppid_fn=negative)
         self.assertEqual(ctx.exception.code, "negative-ppid")
+
+
+class DarwinEpermAncestorTests(IdentityCase):
+    """PROC_PIDTBSDINFO EPERM above the holder. The syscall is injected.
+
+    Same-uid hops return a real parent. The different-uid hop returns 0
+    with errno EPERM, which darwin_ppid turns into syscall. The walk must
+    query that pid. A stub that never fails is not this test.
+    """
+
+    def _tree(self, holder, child):
+        shell = 2_100_000_002
+        foreign = 2_100_000_003
+        if len({child, holder, shell, foreign}) != 4:
+            self.fail("pid collision in the simulated tree")
+        parents = {child: holder, holder: shell, shell: foreign}
+        queried = []
+
+        def fake(pid, flavor, arg, info, size):
+            queried.append(pid)
+            self.assertEqual(flavor, gate.PROC_PIDTBSDINFO)
+            self.assertEqual(arg, 0)
+            self.assertEqual(size, ctypes.sizeof(gate.ProcBsdInfo))
+            if pid == foreign:
+                ctypes.set_errno(errno.EPERM)
+                return 0
+            if pid not in parents:
+                ctypes.set_errno(errno.ESRCH)
+                return 0
+            info.pbi_pid = pid
+            info.pbi_ppid = parents[pid]
+            return size
+
+        def ppid(pid):
+            return gate.darwin_ppid(pid, proc_pidinfo=fake)
+
+        return child, foreign, queried, ppid
+
+    def test_eperm_above_holder_matches_and_foreign_callers_refuse(self):
+        sleeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        foreign_holder = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            holder = sleeper.pid
+            child, foreign_pid, queried, ppid = self._tree(holder, os.getpid())
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lock = root / "mailroom.write.lock"
+                db = root / "mailroom.sqlite"
+                db.write_bytes(b"")
+                held = wwl.acquire_writer_lock(lock, "att0-migrate")
+                token = held.info.writer_token
+                try:
+                    payload = lock.read_text(encoding="utf-8")
+                    lock.write_text(
+                        _replace_field(payload, "pid", str(holder)),
+                        encoding="utf-8",
+                    )
+                    os.environ[wwl.LOCK_TOKEN_ENV] = token
+                    os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
+                    os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
+                    with patch("sor_writer_gate.ppid_of", ppid):
+                        matched, why = gate._identity_decision(lock, child_pid=child)
+                        self.assertTrue(matched, why)
+                        self.assertEqual(why, "match")
+                        self.assertIn(foreign_pid, queried)
+                        self.assertIn(holder, queried)
+                        gate.refuse_if_sor_writer_conflict(
+                            db,
+                            cmdlines=(),
+                            lock_path=lock,
+                            lock_held=True,
+                        )
+                        before = len(queried)
+                        forged = token + "x"
+                        os.environ[wwl.LOCK_TOKEN_ENV] = forged
+                        matched, why = gate._identity_decision(lock, child_pid=child)
+                        self.assertFalse(matched)
+                        self.assertEqual(why, "token mismatch")
+                        self.assertEqual(len(queried), before)
+                        os.environ[wwl.LOCK_TOKEN_ENV] = token
+                        lock.write_text(
+                            _replace_field(
+                                lock.read_text(encoding="utf-8"),
+                                "pid",
+                                str(foreign_holder.pid),
+                            ),
+                            encoding="utf-8",
+                        )
+                        matched, why = gate._identity_decision(lock, child_pid=child)
+                        self.assertFalse(matched)
+                        self.assertEqual(why, "pid not ancestor")
+                        self.assertIn(foreign_pid, queried)
+                        os.environ.pop(wwl.LOCK_TOKEN_ENV, None)
+                        calls_before = len(queried)
+                        refused, detail = gate.writer_lock_held(lock, held=True)
+                        self.assertTrue(refused)
+                        self.assertNotIn("ancestor walk error", detail)
+                        self.assertIn("writer lock held", detail)
+                        self.assertEqual(len(queried), calls_before)
+                        with self.assertRaises(gate.SorWriterRefuse) as ctx:
+                            gate.refuse_if_sor_writer_conflict(
+                                db,
+                                cmdlines=(),
+                                lock_path=lock,
+                                lock_held=True,
+                            )
+                        message = str(ctx.exception)
+                        self.assertIn("writer lock held", message)
+                        self.assertNotIn("ancestor walk error", message)
+                        self.assertNotIn(token, message)
+                        self.assertNotIn(forged, message)
+                finally:
+                    wwl.release_writer_lock(held)
+        finally:
+            for proc in (sleeper, foreign_holder):
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()
+
+    def test_eperm_on_the_first_hop_still_refuses(self):
+        def fake(pid, flavor, arg, info, size):
+            self.assertEqual(flavor, gate.PROC_PIDTBSDINFO)
+            ctypes.set_errno(errno.EPERM)
+            return 0
+
+        def ppid(pid):
+            return gate.darwin_ppid(pid, proc_pidinfo=fake)
+
+        with self.assertRaises(gate.AncestorWalkError) as ctx:
+            gate.ancestor_pids(2_100_000_010, ppid_fn=ppid)
+        self.assertEqual(ctx.exception.code, "syscall")
 
 
 class InventoryTests(IdentityCase):

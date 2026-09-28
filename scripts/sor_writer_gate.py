@@ -427,8 +427,11 @@ def ancestor_pids(
     """Parent chain, not including ``pid``. Max depth 32. Fail-closed.
 
     Stops at pid 0 or after including pid 1. A missing start pid raises
-    ``no-such-process``. Any later error, cycle, or depth overflow raises
-    a different code so callers can refuse.
+    ``no-such-process``. A ``syscall`` error after at least one ancestor
+    was read returns that prefix and does not append a parent for the
+    failed pid. That is the Darwin ``proc_pidinfo(PROC_PIDTBSDINFO)``
+    ``EPERM`` result for a different-uid process. Any other later error,
+    a cycle, or a depth overflow still raises so callers can refuse.
     """
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise AncestorWalkError("bad-pid")
@@ -446,6 +449,11 @@ def ancestor_pids(
                 raise
             if exc.code == "no-such-process":
                 raise AncestorWalkError("walk-error") from exc
+            # EPERM on PROC_PIDTBSDINFO arrives as syscall (written <= 0,
+            # errno is not ESRCH). Keep the pids already read. Do not
+            # treat the unreadable pid as an ancestor.
+            if exc.code == "syscall" and ancestors:
+                return ancestors
             raise
         except Exception as exc:
             raise AncestorWalkError("ppid-failed") from exc
