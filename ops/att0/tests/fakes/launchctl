@@ -1,0 +1,105 @@
+#!/bin/bash
+printf '%s\n' "$*" >> "${ATT0_STATE}/launchctl.log"
+cmd=${1:-}
+shift || true
+case "$cmd" in
+    print)
+        target=${1:-}
+        case "$target" in
+            */com.mailroom.daily)
+                if [ ! -f "${ATT0_STATE}/daily_loaded" ]; then
+                    echo "Could not find service" >&2
+                    exit 113
+                fi
+                if [ -f "${ATT0_STATE}/daily_running" ]; then
+                    echo "state = running"
+                    echo "pid = 4242"
+                else
+                    echo "state = not running"
+                fi
+                echo "last exit code = 0"
+                echo "runs = 1"
+                exit 0
+                ;;
+            */com.mailroom.search-resume-watchdog)
+                echo "state = not running"
+                exit 0
+                ;;
+            */com.mailroom.ask-mail-serve)
+                if [ -f "${ATT0_STATE}/search_down" ]; then
+                    echo "Could not find service" >&2
+                    exit 113
+                fi
+                echo "state = running"
+                echo "pid = 99"
+                echo "path = ask-mail-serve"
+                exit 0
+                ;;
+        esac
+        echo "Could not find service" >&2
+        exit 113
+        ;;
+    print-disabled)
+        _pn=0
+        if [ -f "${ATT0_STATE}/pdis_n" ]; then
+            _pn=$(cat "${ATT0_STATE}/pdis_n")
+        fi
+        _pn=$((_pn + 1))
+        printf '%s\n' "$_pn" > "${ATT0_STATE}/pdis_n"
+        if [ -n "${ATT0_PDIS_FAIL_AFTER:-}" ] && [ "$_pn" -gt "$ATT0_PDIS_FAIL_AFTER" ]; then
+            echo "print-disabled failed" >&2
+            exit 9
+        fi
+        echo 'disabled services = {'
+        if [ ! -f "${ATT0_STATE}/daily_enabled" ]; then
+            echo '"com.mailroom.daily" => disabled'
+        else
+            echo '"com.mailroom.daily" => enabled'
+        fi
+        if [ -f "${ATT0_STATE}/search_disabled" ]; then
+            echo '"com.mailroom.ask-mail-serve" => disabled'
+        fi
+        echo '}'
+        exit 0
+        ;;
+    bootout)
+        case "${1:-}" in
+            */com.mailroom.ask-mail-serve)
+                touch "${ATT0_STATE}/search_down"
+                exit 0
+                ;;
+        esac
+        exit 1
+        ;;
+    bootstrap)
+        joined=$*
+        case "$joined" in
+            *ask-mail-serve*)
+                rm -f "${ATT0_STATE}/search_down"
+                exit 0
+                ;;
+            *com.mailroom.daily*)
+                touch "${ATT0_STATE}/daily_loaded"
+                touch "${ATT0_STATE}/daily_running"
+                exit 0
+                ;;
+        esac
+        exit 1
+        ;;
+    enable)
+        case "${1:-}" in
+            */com.mailroom.daily)
+                touch "${ATT0_STATE}/daily_enabled"
+                exit 0
+                ;;
+        esac
+        exit 1
+        ;;
+    kickstart)
+        echo "kickstart-called" >> "${ATT0_STATE}/launchctl.log"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac

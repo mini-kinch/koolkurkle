@@ -1,0 +1,20 @@
+#!/bin/bash
+printf '%s\n' "$*" >> "${ATT0_STATE}/pgrep.log"
+pat=$*
+case "$pat" in
+    *ailroom_daily*)
+        if [ -f "${ATT0_STATE}/daily_loaded" ]; then
+            n=$(cat "${ATT0_STATE}/daily_pgrep" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            printf '%s\n' "$n" > "${ATT0_STATE}/daily_pgrep"
+            if [ "$n" -eq 1 ]; then
+                echo "4242 mailroom_daily"
+                exit 0
+            fi
+            touch "${ATT0_STATE}/stamp_moved"
+            rm -f "${ATT0_STATE}/daily_running"
+        fi
+        exit 1
+        ;;
+esac
+exit 1

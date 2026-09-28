@@ -1,0 +1,58 @@
+#!/bin/bash
+# Stand-in that reproduces the Phase P fail-open: lsof of two files
+# exits 1 when ANY listed file is not open, and prints nothing.
+# One file keeps the real meaning: a pid line and rc 0 means held,
+# rc 1 and empty output means not open, anything else is an error.
+set -u
+printf '%s\n' "$*" >> "${ATT0_LSOF_LOG:?}"
+if [ "${ATT0_LSOF_ERROR:-0}" = "1" ]; then
+    printf '%s\n' "lsof: error" >&2
+    exit 2
+fi
+if [ "${ATT0_LSOF_GARBAGE:-0}" = "1" ]; then
+    printf '%s\n' "not-a-pid"
+    exit 0
+fi
+files=""
+nfiles=0
+endopt=0
+for a in "$@"; do
+    if [ "$endopt" = "1" ]; then
+        files="${files} ${a}"
+        nfiles=$((nfiles + 1))
+        continue
+    fi
+    if [ "$a" = "--" ]; then
+        endopt=1
+        continue
+    fi
+    case "$a" in
+        -*) ;;
+        *)
+            files="${files} ${a}"
+            nfiles=$((nfiles + 1))
+            ;;
+    esac
+done
+held_out=""
+any_closed=0
+for f in $files; do
+    base=${f##*/}
+    if [ "$base" = "mailroom.write.lock" ] && [ "${ATT0_WRITE_HELD:-0}" = "1" ]; then
+        held_out="${held_out}4242
+"
+    elif [ "$base" = "mailroom.daily.lock" ] && [ "${ATT0_DAILY_HELD:-0}" = "1" ]; then
+        held_out="${held_out}4343
+"
+    else
+        any_closed=1
+    fi
+done
+if [ "$nfiles" -gt 1 ] && [ "$any_closed" = "1" ]; then
+    exit 1
+fi
+if [ -n "$held_out" ]; then
+    printf '%s' "$held_out"
+    exit 0
+fi
+exit 1
