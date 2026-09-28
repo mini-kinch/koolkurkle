@@ -1,0 +1,25 @@
+#!/bin/bash
+if [ "${1:-}" != "-a" ] || [ "${2:-}" != "256" ]; then
+    echo "shasum fake: bad args" >&2
+    exit 1
+fi
+shift 2
+gate=505382b4e23dfed9f746d70fc6f3a79626524be37168aed955ac7bd8872d8345
+wrapper=1e7f5aeee8dd05bca363e8f517e046cc68e22d25c18c7c4dc487d4121dba4f77
+watchdog=bae404ccae07857d0dcb47cbc47a107f68e367c3fe7edff07eb202a01aeb8d43
+migrate=b13b3c97d968c994955c1db313707dd1db372d47668f1d301b6b7c3febcbf95d
+fill=20f3d997dfa353f738b365542b468ded85cd27e871c166beef62ff7307968f8b
+plist=660616d94c5600000000000000000000000000000000000000000000000000
+for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+        sor_writer_gate.py) h=$gate ;;
+        with_writer_lock.py) h=$wrapper ;;
+        search_resume_watchdog.py) h=$watchdog ;;
+        migrate_att0_schema.py) h=$migrate ;;
+        meta_fill.py) h=$fill ;;
+        com.mailroom.daily.plist) h=$plist ;;
+        *) h=$(/usr/bin/sha256sum "$f" | /usr/bin/awk '{print $1; exit}') ;;
+    esac
+    printf '%s  %s\n' "$h" "$f"
+done

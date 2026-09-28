@@ -1,0 +1,14 @@
+#!/bin/bash
+real=/tmp/att0-real-perl
+if [ -n "${ATT0_TEST_MAX_ALARM:-}" ] && [ -n "${1:-}" ] && [ -f "$1" ]; then
+    helper=$1
+    alarm=$2
+    log=$3
+    tw=$4
+    shift 4
+    if [ "$alarm" -gt "$ATT0_TEST_MAX_ALARM" ]; then
+        alarm=$ATT0_TEST_MAX_ALARM
+    fi
+    exec "$real" "$helper" "$alarm" "$log" "$tw" "$@"
+fi
+exec "$real" "$@"
