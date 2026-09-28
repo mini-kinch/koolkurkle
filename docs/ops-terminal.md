@@ -154,6 +154,19 @@ connect to `imap.mail.me.com`, does not run curl against IMAP, does
 not read Keychain, does not open MailArchive or live sqlite, and does
 not change rem-legacy.
 
+One exact-path exception, which does not replace the rule above. The
+only allowlisted Python IMAP client is `scripts/attachments/imaplib_part.py`,
+and only for read-only `EXAMINE` plus `BODY.PEEK` partial reads, with
+TLS verified. The password is never on argv or env. Every other live
+IMAP check still uses `/usr/bin/curl imaps://`. Python sockets to the
+live host have historically failed with **Errno 9** (bad file
+descriptor) on these machines (MBP and Mini). The first live use
+requires a separate user-approved read-only one-message check that
+STOPs on Errno 9 with no retry and no fallback. The Mini daily job is
+the sole SoR writer; the MBP is a non-writer (rollback, read-only).
+Name the machines as MBP and Mini only. Never a login, home path, or
+email.
+
 ## One command per fence
 
 Put each Terminal command in its own fenced code block. Chat copy

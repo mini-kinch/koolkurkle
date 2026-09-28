@@ -74,6 +74,37 @@ class ImapViaCurlImapsNeverPythonSocketsTests(unittest.TestCase):
         self.assertNotIn("sockets are ok", low)
         self.assertNotIn("assume the tool exists", low)
 
+    def test_one_file_exception_stays_narrow(self):
+        raw = OPS.read_text(encoding="utf-8")
+        text = " ".join(raw.split())
+        self.assertIn("IMAP live checks use `/usr/bin/curl imaps://`", raw)
+        self.assertIn("Never open a Python socket client", raw)
+        self.assertIn("does not replace the rule above", text)
+        self.assertIn("scripts/attachments/imaplib_part.py", raw)
+        self.assertIn("read-only `EXAMINE` plus `BODY.PEEK` partial reads", text)
+        self.assertIn("TLS verified", text)
+        self.assertIn("The password is never on argv or env.", text)
+        self.assertIn(
+            "Every other live IMAP check still uses `/usr/bin/curl imaps://`",
+            text,
+        )
+        self.assertIn(
+            "Python sockets to the live host have historically failed with **Errno 9**",
+            text,
+        )
+        self.assertIn("on these machines (MBP and Mini)", text)
+        self.assertIn(
+            "separate user-approved read-only one-message check that STOPs on Errno 9",
+            text,
+        )
+        self.assertIn("no retry and no fallback", text)
+        self.assertIn(
+            "The Mini daily job is the sole SoR writer; the MBP is a non-writer (rollback, read-only).",
+            raw,
+        )
+        self.assertIn("Name the machines as MBP and Mini only", raw)
+        self.assertIn("Never a login, home path, or email", text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,27 +3,36 @@
 
 Scanned origin/main (9c8a454 and dd2f47c) scripts/**/*.py. The only
 import of imaplib, IMAP4_SSL, or Python ssl connection to port 993 was
-scripts/attachments/meta_fill.py. This branch removes that client from
+scripts/attachments/meta_fill.py, and that client was removed from
 scripts/. scripts/path_a_bench.py calls socket.create_connection for the
 local Ollama port only. It does not name imap.mail.me.com or port 993,
 so it is not an IMAP hit and is not allowlisted.
 
-ALLOWLIST is empty on purpose. Add a file here only when main already
-contains an IMAP-socket hit this PR must not edit. Name the file in the
-comment above the constant.
+ALLOWLIST is an explicit exact-match tuple of repo-relative paths.
+No globs and no directory allow. The only entry is
+scripts/attachments/imaplib_part.py (read-only EXAMINE plus BODY.PEEK
+partials). A missing allowlisted file is not a failure. Every other
+file under scripts/ still fails.
 """
 
 from __future__ import annotations
 
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
-# No pre-existing IMAP-socket hits outside meta_fill.py. Leave this empty.
-ALLOWLIST: tuple[str, ...] = ()
+# Exact-match allowlist. No globs. No directory allow.
+# One path only: scripts/attachments/imaplib_part.py
+# (read-only EXAMINE plus BODY.PEEK partials). The file is not required
+# to exist; a missing allowlisted path is not a failure. Every other
+# path under scripts/ still fails.
+ALLOWLIST: tuple[str, ...] = (
+    "scripts/attachments/imaplib_part.py",
+)
 
 _IMPORT_IMAPLIB = re.compile(r"(?m)^\s*(?:import\s+imaplib\b|from\s+imaplib\b)")
 _IMAP4 = re.compile(r"\bimaplib\s*\.\s*IMAP4\b|\bIMAP4_SSL\b")
@@ -55,20 +64,105 @@ def imap_socket_violations(text: str) -> list[str]:
     return reasons
 
 
+def collect_imap_socket_hits(scripts_dir: Path, root: Path) -> list[str]:
+    """Scan ``scripts_dir`` for Python IMAP sockets outside ALLOWLIST.
+
+    Comparison is exact (``rel in ALLOWLIST``). No glob and no directory
+    prefix. A path that is not on disk is not a hit, including a missing
+    allowlisted file.
+    """
+    hits = []
+    if not scripts_dir.is_dir():
+        return hits
+    for path in sorted(scripts_dir.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel in ALLOWLIST:
+            continue
+        reasons = imap_socket_violations(path.read_text(encoding="utf-8"))
+        if reasons:
+            hits.append("%s: %s" % (rel, ", ".join(reasons)))
+    return hits
+
+
 class RepoNoPythonImapSocketsTests(unittest.TestCase):
     def test_scripts_tree_has_no_python_imap_socket(self):
-        hits = []
-        for path in sorted(SCRIPTS.rglob("*.py")):
-            rel = path.relative_to(ROOT).as_posix()
-            if rel in ALLOWLIST:
-                continue
-            reasons = imap_socket_violations(path.read_text(encoding="utf-8"))
-            if reasons:
-                hits.append("%s: %s" % (rel, ", ".join(reasons)))
-        self.assertEqual(hits, [])
-        for rel in ALLOWLIST:
-            self.assertTrue((ROOT / rel).is_file(), rel)
-            self.assertTrue(rel.startswith("scripts/"), rel)
+        self.assertEqual(collect_imap_socket_hits(SCRIPTS, ROOT), [])
+
+    def test_allowlist_has_exactly_one_entry(self):
+        self.assertEqual(
+            ALLOWLIST,
+            ("scripts/attachments/imaplib_part.py",),
+        )
+        self.assertEqual(len(ALLOWLIST), 1)
+        entry = ALLOWLIST[0]
+        self.assertEqual(entry, "scripts/attachments/imaplib_part.py")
+        self.assertTrue(entry.startswith("scripts/"))
+        self.assertTrue(entry.endswith(".py"))
+        self.assertFalse(entry.endswith("/"))
+        self.assertFalse(any(ch in entry for ch in "*?[]"))
+        self.assertNotIn("scripts/attachments", ALLOWLIST)
+        self.assertNotIn("scripts/attachments/", ALLOWLIST)
+        self.assertNotIn("scripts/attachments/*.py", ALLOWLIST)
+
+    def test_missing_allowlisted_file_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scripts = root / "scripts" / "attachments"
+            scripts.mkdir(parents=True)
+            (scripts / "clean.py").write_text("print('curl only')\n", encoding="utf-8")
+            self.assertFalse((root / "scripts/attachments/imaplib_part.py").exists())
+            self.assertEqual(collect_imap_socket_hits(root / "scripts", root), [])
+
+    def test_allowlisted_path_passes(self):
+        body = (
+            "import imaplib\n"
+            "imaplib.IMAP4_SSL('imap.mail.me.com', 993)\n"
+        )
+        self.assertTrue(imap_socket_violations(body))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed = root / "scripts" / "attachments" / "imaplib_part.py"
+            allowed.parent.mkdir(parents=True)
+            allowed.write_text(body, encoding="utf-8")
+            self.assertEqual(collect_imap_socket_hits(root / "scripts", root), [])
+
+    def test_sibling_importing_imaplib_still_fails(self):
+        body = "import imaplib\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed = root / "scripts" / "attachments" / "imaplib_part.py"
+            sibling = root / "scripts" / "attachments" / "other.py"
+            allowed.parent.mkdir(parents=True)
+            allowed.write_text(body, encoding="utf-8")
+            sibling.write_text(body, encoding="utf-8")
+            hits = collect_imap_socket_hits(root / "scripts", root)
+            self.assertEqual(
+                hits,
+                ["scripts/attachments/other.py: imports imaplib"],
+            )
+
+    def test_renamed_or_copied_file_still_fails(self):
+        body = "import imaplib\n"
+        renamed = "scripts/attachments/imaplib_fetch.py"
+        copied = "scripts/attachments/imaplib_part_copy.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel in (
+                "scripts/attachments/imaplib_part.py",
+                renamed,
+                copied,
+            ):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
+            hits = collect_imap_socket_hits(root / "scripts", root)
+            self.assertEqual(
+                hits,
+                [
+                    "%s: imports imaplib" % renamed,
+                    "%s: imports imaplib" % copied,
+                ],
+            )
 
     def test_scanner_flags_imaplib_and_ignores_curl_urls(self):
         self.assertIn("imports imaplib", imap_socket_violations("import imaplib\n"))
