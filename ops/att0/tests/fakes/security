@@ -1,6 +1,0 @@
-#!/bin/bash
-if [ -n "${ATT0_STATE:-}" ]; then
-    printf '%s\n' "$0 $*" >> "${ATT0_STATE}/security.log"
-fi
-printf '%s\n' "CANARY-SECRET-VALUE"
-exit "${ATT0_FAKE_SECURITY_RC:-0}"
