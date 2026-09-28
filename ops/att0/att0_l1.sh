@@ -8,7 +8,10 @@
 #   /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
 #   /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
 #   /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
+#   /bin/bash /tmp/att0_l1.sh keychain-primer
 #
+# keychain-primer is never called by another mode. It execs the same
+# Keychain argv meta_fill uses, discards the output, and writes nothing.
 # report is read-only. It does not open the network, the Keychain, or a
 # writer. The +26 search-resume deadline is written once, before search
 # bootout, and dropped when A2 takes the writer lock. Nothing between
@@ -26,8 +29,9 @@
 #
 # The first output line is "<PFX> STAMP=<STAMP>". The last line is
 # "<PFX> SUMMARY stamp=<STAMP> exit=<rc>".
-# No human prompt, no sudo, no Keychain binary invocation in this file.
-# IMAP and Keychain are reached only by meta_fill.py's own production path.
+# No human prompt and no sudo. window, rollback, restore-daily, and
+# report never invoke the Keychain binary. keychain-primer is the one
+# exec of the meta_fill argv, and it discards that process's output.
 
 set -u
 set -o pipefail
@@ -2007,6 +2011,42 @@ do_report() {
     WANTED_RC=0
 }
 
+# Same argv as imap_keychain._run_security at the pinned commit.
+# Binary, find-generic-password, -s, the imap app-password item, -w.
+# No -a, -l, or keychain path. Output is discarded. No file, lock, or db.
+do_primer() {
+    MODE=keychain-primer
+    STAMP=$(new_stamp) || { WANTED_RC=1; return; }
+    printf '%s\n' "${PFX} STAMP=${STAMP}"
+    _rc=0
+    /usr/bin/perl -e 'alarm shift; exec @ARGV or die' 120 \
+        /usr/bin/security find-generic-password -s mailroom.imap.app-password -w \
+        >/dev/null 2>&1 || _rc=$?
+    case "$_rc" in
+        0)
+            _meaning="access OK"
+            WANTED_RC=0
+            ;;
+        142)
+            _meaning="timed out waiting for a click"
+            WANTED_RC=1
+            ;;
+        36|51)
+            _meaning="user interaction is not allowed in this session"
+            WANTED_RC=1
+            ;;
+        44)
+            _meaning="item not found"
+            WANTED_RC=1
+            ;;
+        *)
+            _meaning="other"
+            WANTED_RC=1
+            ;;
+    esac
+    say "PRIMER rc=${_rc} meaning=${_meaning}"
+}
+
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -2063,8 +2103,20 @@ case "${1:-}" in
         printf '%s\n' "${PFX} SUMMARY stamp=${STAMP:-unknown} exit=${WANTED_RC}"
         exit "$WANTED_RC"
         ;;
+    keychain-primer)
+        PFX=ATT0K
+        if [ -n "${2:-}" ]; then
+            printf '%s\n' "usage: /bin/bash /tmp/att0_l1.sh keychain-primer"
+            printf '%s\n' "ATT0K SUMMARY stamp=unknown exit=2"
+            exit 2
+        fi
+        load_tools
+        do_primer
+        printf '%s\n' "${PFX} SUMMARY stamp=${STAMP:-unknown} exit=${WANTED_RC}"
+        exit "$WANTED_RC"
+        ;;
     *)
-        printf '%s\n' "usage: /bin/bash /tmp/att0_l1.sh window P_STAMP | rollback WINDOW_STAMP | restore-daily WINDOW_STAMP | report WINDOW_STAMP"
+        printf '%s\n' "usage: /bin/bash /tmp/att0_l1.sh window P_STAMP | rollback WINDOW_STAMP | restore-daily WINDOW_STAMP | report WINDOW_STAMP | keychain-primer"
         printf '%s\n' "ATT0 SUMMARY stamp=unknown exit=2"
         exit 2
         ;;

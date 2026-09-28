@@ -18,9 +18,14 @@ fail() {
 if /usr/bin/grep -n -E 'declare -A|mapfile|readarray|\[\[ -v|wait -n|\|&|\$\{[A-Za-z_][A-Za-z0-9_]*,,|\$\{[A-Za-z_][A-Za-z0-9_]*\^\^' "$SCRIPT"; then
     fail "forbidden construct"
 fi
-if /usr/bin/grep -n '/usr/bin/security\|/Users/\|unlock-keychain\|set-generic-password' "$SCRIPT"; then
-    fail "forbidden path or keychain call"
+if /usr/bin/grep -n '/Users/\|unlock-keychain\|set-generic-password\|partition-list' "$SCRIPT"; then
+    fail "forbidden path or keychain workaround"
 fi
+_secc=$(/usr/bin/grep -c '/usr/bin/security' "$SCRIPT" || true)
+if [ "$_secc" != "1" ]; then
+    fail "security binary count ${_secc}"
+fi
+/usr/bin/grep -n '/usr/bin/security find-generic-password -s mailroom.imap.app-password -w' "$SCRIPT" >/dev/null || fail "primer argv"
 if /usr/bin/grep -n -E '(^|[^a-zA-Z])rm( |$)' "$SCRIPT"; then
     fail "rm in script"
 fi
@@ -51,7 +56,8 @@ if [ "${ATT0_HARNESS_INNER:-}" != "1" ]; then
     mkdir -p /tmp/att0-ov/upper /tmp/att0-ov/work /tmp/att0-ov/merged
     cp "$FAKES/perl-wrapper" /tmp/att0-ov/upper/perl
     cp "$FAKES/curl" /tmp/att0-ov/upper/curl
-    chmod +x /tmp/att0-ov/upper/perl /tmp/att0-ov/upper/curl
+    cp "$FAKES/security" /tmp/att0-ov/upper/security
+    chmod +x /tmp/att0-ov/upper/perl /tmp/att0-ov/upper/curl /tmp/att0-ov/upper/security
     exec unshare --user --map-root-user --mount bash -c '
         mount -t overlay overlay -o lowerdir=/usr/bin,upperdir=/tmp/att0-ov/upper,workdir=/tmp/att0-ov/work /tmp/att0-ov/merged &&
         mount --bind /tmp/att0-ov/merged /usr/bin &&
@@ -179,6 +185,7 @@ expect_rc "$rc" 0 /tmp/att0-happy
 /usr/bin/grep -q 'SUMMARY stamp=20260928-120001 exit=0' /tmp/att0-happy || fail "happy summary"
 /usr/bin/grep -q 'kickstart' "${ATT0_STATE}/launchctl.log" && fail "happy kickstart"
 test -f /tmp/att0w-done-20260928-120001.OK || fail "happy marker"
+test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'GAP-D26-DROPPED' /tmp/att0-happy || fail "happy gap"
 /usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-happy || fail "happy write lock"
 /usr/bin/grep -q 'LOCK-DAILY-FREE' /tmp/att0-happy || fail "happy daily lock"
@@ -322,5 +329,47 @@ rc=$(run_mode /tmp/att0-usage)
 expect_rc "$rc" 2 /tmp/att0-usage
 /usr/bin/grep -q 'exit=2' /tmp/att0-usage || fail "usage summary"
 printf '%s\n' "USAGE-OK"
+
+P_STAMP=20260928-010009
+ATT0_FAKE_STAMP=20260928-120009
+export ATT0_FAKE_STAMP
+unset ATT0_FAKE_SECURITY_RC
+setup_tree primer
+_before=$(/usr/bin/find "$HOME/MailArchive" -type f | /usr/bin/wc -l)
+rc=$(run_mode /tmp/att0-primer keychain-primer)
+expect_rc "$rc" 0 /tmp/att0-primer
+/usr/bin/grep -q 'PRIMER rc=0 meaning=access OK' /tmp/att0-primer || fail "primer ok"
+/usr/bin/grep -q 'SUMMARY stamp=20260928-120009 exit=0' /tmp/att0-primer || fail "primer summary"
+/usr/bin/grep -q 'find-generic-password -s mailroom.imap.app-password -w' "${ATT0_STATE}/security.log" || fail "primer argv"
+_after=$(/usr/bin/find "$HOME/MailArchive" -type f | /usr/bin/wc -l)
+if [ "$_before" != "$_after" ]; then
+    fail "primer wrote files"
+fi
+printf '%s\n' "PRIMER-OK"
+
+ATT0_FAKE_STAMP=20260928-120010
+export ATT0_FAKE_STAMP ATT0_FAKE_SECURITY_RC=51
+setup_tree primer51
+rc=$(run_mode /tmp/att0-primer51 keychain-primer)
+expect_rc "$rc" 1 /tmp/att0-primer51
+/usr/bin/grep -q 'PRIMER rc=51 meaning=user interaction is not allowed in this session' /tmp/att0-primer51 || fail "primer 51"
+/usr/bin/grep -q 'SUMMARY stamp=20260928-120010 exit=1' /tmp/att0-primer51 || fail "primer 51 summary"
+printf '%s\n' "PRIMER-DENIED-OK"
+
+ATT0_FAKE_STAMP=20260928-120012
+export ATT0_FAKE_STAMP ATT0_FAKE_SECURITY_RC=142
+setup_tree primer142
+rc=$(run_mode /tmp/att0-primer142 keychain-primer)
+expect_rc "$rc" 1 /tmp/att0-primer142
+/usr/bin/grep -q 'PRIMER rc=142 meaning=timed out waiting for a click' /tmp/att0-primer142 || fail "primer 142"
+unset ATT0_FAKE_SECURITY_RC
+printf '%s\n' "PRIMER-TIMEOUT-OK"
+
+/usr/bin/perl -e 'alarm shift; exec @ARGV or die' 1 /bin/sleep 3 >/dev/null 2>&1
+_arc=$?
+if [ "$_arc" != "142" ]; then
+    fail "alarm rc ${_arc}"
+fi
+printf '%s\n' "ALARM-142-OK"
 
 printf '%s\n' "ALL-OK"
