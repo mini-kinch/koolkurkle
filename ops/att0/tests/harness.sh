@@ -199,6 +199,8 @@ export ATT0_FAKE_STAMP
 rc=$(run_mode /tmp/att0-second window "$P_STAMP")
 expect_rc "$rc" 1 /tmp/att0-second
 /usr/bin/grep -q 'STOP-window-already-claimed' /tmp/att0-second || fail "second claim"
+/usr/bin/grep -q 'SAFE-STATE' /tmp/att0-second || fail "second safe"
+/usr/bin/grep -q 'SEARCH-BOOTED-OUT' /tmp/att0-second && fail "second bootout"
 printf '%s\n' "SECOND-WINDOW-OK"
 
 P_STAMP=20260928-010002
@@ -224,6 +226,7 @@ rc=$(run_mode /tmp/att0-fallback window "$P_STAMP")
 expect_rc "$rc" 1 /tmp/att0-fallback
 /usr/bin/grep -q 'STOP-falling-back' /tmp/att0-fallback || fail "fallback stop"
 /usr/bin/grep -q 'bootout' "${ATT0_STATE}/launchctl.log" && fail "fallback bootout"
+/usr/bin/grep -q 'SAFE-STATE' /tmp/att0-fallback || fail "fallback safe"
 unset ATT0_FAKE_FALLBACK
 printf '%s\n' "FALLBACK-OK"
 
@@ -265,6 +268,7 @@ expect_rc "$rc" 3 /tmp/att0-hang
 /usr/bin/grep -q 'harness=timeout-term-kill' /tmp/att0-hang || fail "hang harness"
 /usr/bin/grep -q 'ROLLBACK-DONE' /tmp/att0-hang || fail "hang rollback"
 /usr/bin/grep -q 'RESULT ar-r=ran search=restored' /tmp/att0-hang || fail "hang result"
+/usr/bin/grep -q 'SAFE-STATE' /tmp/att0-hang || fail "hang safe"
 /usr/bin/grep -q 'SUMMARY stamp=20260928-120006 exit=3' /tmp/att0-hang || fail "hang summary"
 unset ATT0_FAKE_A3_HANG ATT0_TEST_MAX_ALARM
 printf '%s\n' "HANG-OK"
