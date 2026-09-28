@@ -1451,4 +1451,77 @@ if /bin/ps -ax -o command= | /usr/bin/awk 'index($0, "/bin/sleep 30") && index($
 fi
 printf '%s\n' "ORPHAN-SIGNAL-OK"
 
+# Sidecar-less WAL copy. SQLite 3.22+ recreates -wal/-shm when the
+# directory is writable, so the copy sits where those files cannot be
+# created. The old -readonly open fails. The URI open does not need them.
+_wdir=$(mktemp -d /tmp/att0-wal.XXXXXX)
+_wsrc="${_wdir}/src.sqlite"
+_wro="${_wdir}/ro"
+_wok="${_wdir}/ok"
+mkdir -p "$_wro" "$_wok/ma/backups"
+/usr/bin/sqlite3 "$_wsrc" "PRAGMA journal_mode=WAL; CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('walrow');" >/dev/null
+/usr/bin/sqlite3 -readonly "$_wsrc" ".backup '${_wro}/bk.sqlite'" >/dev/null
+rm -f "${_wsrc}-wal" "${_wsrc}-shm" "${_wro}/bk.sqlite-wal" "${_wro}/bk.sqlite-shm"
+_hex=$(od -An -t x1 -j 18 -N 2 "${_wro}/bk.sqlite" | tr -d ' \n')
+[ "$_hex" = "0202" ] || fail "wal header ${_hex}"
+test ! -e "${_wro}/bk.sqlite-wal" || fail "wal side file remained"
+test ! -e "${_wro}/bk.sqlite-shm" || fail "shm side file remained"
+chmod 555 "$_wro"
+if /usr/bin/touch "${_wro}/probe-write" 2>/dev/null; then
+    fail "wal copy dir still writable"
+fi
+(
+    set +e
+    /usr/bin/sqlite3 -readonly "${_wro}/bk.sqlite" "PRAGMA quick_check;" >"${_wok}/old-qc.out" 2>"${_wok}/old-qc.err"
+    echo $? > "${_wok}/old-qc.rc"
+    /usr/bin/sqlite3 -readonly "${_wro}/bk.sqlite" ".backup '${_wok}/old-stage.sqlite'" >"${_wok}/old-bk.out" 2>"${_wok}/old-bk.err"
+    echo $? > "${_wok}/old-bk.rc"
+)
+_oldqc=$(cat "${_wok}/old-qc.rc")
+_oldbk=$(cat "${_wok}/old-bk.rc")
+[ "$_oldqc" != "0" ] || fail "old quick_check passed"
+[ "$_oldbk" != "0" ] || fail "old backup passed"
+/usr/bin/grep -q 'unable to open database file\|attempt to write a readonly database' "${_wok}/old-qc.err" || {
+    cat "${_wok}/old-qc.err" >&2
+    fail "old quick_check error"
+}
+(
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    _uri=$(backup_ro_uri "${_wro}/bk.sqlite") || exit 1
+    printf '%s\n' "$_uri" > "${_wok}/uri"
+    backup_ro_uri "${_wro}/a?b" && exit 1
+    backup_ro_uri "${_wro}/a#b" && exit 1
+    backup_ro_uri "${_wro}/a%b" && exit 1
+    /usr/bin/sqlite3 "$_uri" "PRAGMA quick_check;" > "${_wok}/new-qc.out" 2>"${_wok}/new-qc.err" || exit 1
+    /usr/bin/sqlite3 "$_uri" ".backup '${_wok}/new-stage.sqlite'" >"${_wok}/new-bk.out" 2>"${_wok}/new-bk.err" || exit 1
+    write_restore_sh "${_wok}/restore.sh" || exit 1
+) || fail "new wal path"
+/usr/bin/grep -q '^ok$' "${_wok}/new-qc.out" || fail "new quick_check"
+/usr/bin/sqlite3 "${_wok}/new-stage.sqlite" "SELECT v FROM t;" | /usr/bin/grep -q '^walrow$' || fail "new backup row"
+/usr/bin/grep -q 'file:.*mode=ro&immutable=1' "${_wok}/restore.sh" || fail "restore uri"
+/usr/bin/grep -q 'STOP-backup-uri' "${_wok}/restore.sh" || fail "restore stop"
+if /usr/bin/grep -q -- '-readonly "\$BK"' "${_wok}/restore.sh"; then
+    fail "restore still uses readonly BK"
+fi
+/usr/bin/sqlite3 "${_wok}/ma/mailroom.sqlite" "CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('live');"
+/bin/bash "${_wok}/restore.sh" \
+    "${_wro}/bk.sqlite" \
+    "${_wok}/ma/backups/stage.sqlite" \
+    "${_wok}/ma/mailroom.sqlite" \
+    "${_wok}/ma" \
+    walstamp \
+    /usr/bin/sqlite3 \
+    /usr/bin/stat \
+    /usr/bin/awk >"${_wok}/restore.out" 2>"${_wok}/restore.err" || {
+    cat "${_wok}/restore.out" "${_wok}/restore.err" >&2
+    fail "restore script"
+}
+/usr/bin/grep -q '^RESTORE-SWAPPED$' "${_wok}/restore.out" || fail "restore swapped"
+/usr/bin/sqlite3 "${_wok}/ma/mailroom.sqlite" "SELECT v FROM t;" | /usr/bin/grep -q '^walrow$' || fail "restore row"
+test ! -e "${_wro}/bk.sqlite-wal" || fail "uri created wal"
+test ! -e "${_wro}/bk.sqlite-shm" || fail "uri created shm"
+printf '%s\n' "WAL-RO-OK"
+
 printf '%s\n' "ALL-OK"
