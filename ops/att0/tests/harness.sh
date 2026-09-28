@@ -919,7 +919,7 @@ expect_rc "$rc" 1 /tmp/att0-age-s
 /usr/bin/grep -q 'A2-OK' /tmp/att0-age-s && fail "age at S wrote A2"
 /usr/bin/grep -q 'write_rc=' /tmp/att0-age-s && fail "age at S wrote deadline"
 /usr/bin/grep -q 'SEARCH-BOOTED-OUT' /tmp/att0-age-s && fail "age at S bootout"
-/usr/bin/grep -q 'RESULT ar-r=not-run search=restored' /tmp/att0-age-s || fail "age at S result"
+/usr/bin/grep -q 'RESULT ar-r=not-run search=left-up' /tmp/att0-age-s || fail "age at S result"
 unset ATT0_FAKE_S_LATE
 printf '%s\n' "AGE-AT-S-OK"
 
