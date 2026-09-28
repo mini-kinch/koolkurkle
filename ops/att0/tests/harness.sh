@@ -69,11 +69,15 @@ CREATE TABLE messages (
   id INTEGER PRIMARY KEY,
   source TEXT,
   folder TEXT,
-  present_on_server INTEGER
+  present_on_server INTEGER,
+  has_attachments INTEGER
 );
 CREATE TABLE attachment_meta_scans (message_id INTEGER);
-INSERT INTO messages (id, source, folder, present_on_server)
-SELECT n, 'imap-live', 'box', CASE WHEN n <= 992 THEN 0 ELSE 1 END
+INSERT INTO messages (id, source, folder, present_on_server, has_attachments)
+SELECT n, 'imap-live',
+  CASE WHEN n <= 992 THEN 'g' ELSE 'p' || (n - 992) END,
+  CASE WHEN n <= 992 THEN 0 ELSE 1 END,
+  0
 FROM (
   WITH RECURSIVE c(n) AS (
     SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 1063
@@ -173,6 +177,12 @@ rc=$(run_mode /tmp/att0-happy window "$P_STAMP")
 expect_rc "$rc" 0 /tmp/att0-happy
 /usr/bin/grep -q 'ATT0W STAMP=20260928-120001' /tmp/att0-happy || fail "happy stamp"
 /usr/bin/grep -q 'D-CHECK-OK' /tmp/att0-happy || fail "happy d-check"
+/usr/bin/grep -q 'auto (rule A2)' /tmp/att0-happy || fail "happy a2 auto"
+/usr/bin/grep -q 'auto (rule A3)' /tmp/att0-happy || fail "happy a3 auto"
+/usr/bin/grep -q 'D_late=0' /tmp/att0-happy || fail "happy d-late"
+/usr/bin/grep -q 'A3-D-OK' /tmp/att0-happy || fail "happy a3 d"
+/usr/bin/grep -q 'A4-OK' /tmp/att0-happy || fail "happy a4"
+/usr/bin/grep -q 'source=phasep-scratch' /tmp/att0-happy || fail "happy dp source"
 /usr/bin/grep -q 'WINDOW-DONE' /tmp/att0-happy || fail "happy done"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-happy || fail "happy safe"
 /usr/bin/grep -q 'RESULT ar-r=not-run search=restored' /tmp/att0-happy || fail "happy result"
@@ -202,6 +212,8 @@ rc=$(run_mode /tmp/att0-report report 20260928-120001)
 expect_rc "$rc" 0 /tmp/att0-report
 /usr/bin/grep -q 'ATT0-DONE PASS' /tmp/att0-report || fail "report pass"
 /usr/bin/grep -q 'ATT0-DONE RULE a2-band PASS' /tmp/att0-report || fail "report band"
+/usr/bin/grep -q 'ATT0-DONE RULE d-late PASS' /tmp/att0-report || fail "report d-late"
+/usr/bin/grep -q 'ATT0-DONE RULE d-3.5b PASS' /tmp/att0-report || fail "report d-3.5b"
 /usr/bin/grep -q 'ATT0-DONE RULE leak-w21 PASS' /tmp/att0-report || fail "report leak"
 printf '%s\n' "HAPPY-WINDOW-OK"
 

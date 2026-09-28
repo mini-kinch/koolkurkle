@@ -25,13 +25,18 @@ def main(argv):
         sys.stdout.write("warning: falling back to legacy item\n")
     sys.stdout.write("att0 meta fill\n")
     sys.stdout.write("dry_run=%s\n" % (0 if apply else 1))
+    # unscanned_all on the seeded db is 1063, and 992+44+27 = 1063.
     sys.stdout.write("messages=0\n")
-    sys.stdout.write("errors=992\n")
+    sys.stdout.write("errors=1063\n")
     sys.stdout.write("capped=0\n")
-    sys.stdout.write("eligible=992\n")
+    sys.stdout.write("eligible=1063\n")
     sys.stdout.write("bytes_stored=0\n")
+    sys.stdout.write("filenames=0\n")
     sys.stdout.write("uidvalidity_mismatch=0\n")
+    sys.stdout.write("literal_dropped=0\n")
+    sys.stdout.write("literal_truncated=0\n")
     sys.stdout.write("curl_failures=[]\n")
+    sys.stdout.write("has_attachments=0\n")
     sys.stdout.write("parts_truncated=1\n")
     return 0
 

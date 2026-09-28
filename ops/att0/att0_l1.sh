@@ -19,6 +19,15 @@
 # takes the writer lock. Nothing between A2 and A3 calls the watchdog
 # arm or schedule entry points.
 #
+# D_P is re-read here by the P8 D query, read-only, on Phase P's scratch
+# copy $HOME/MailArchive/dryrun/att0-livepath-<P_STAMP>/mailroom.sqlite.
+# The operator does not write /tmp/att0-dp-<P_STAMP>. D_3.5b is D_W from
+# the in-window rehearsal copy, auto-confirmed by rule A2. After A3,
+# D_A is the same query on the live SoR and D_late is D_A - D_W
+# (0..D_LATE_MAX), auto-confirmed by rule A3.
+# restore-daily's gate is the window-done or rollback-done marker.
+# Mailroom's posted verdict is outside this script.
+#
 # Exit codes:
 #   0  done, and the SAFE-STATE check passed
 #   1  stopped before any live SoR write
@@ -53,7 +62,9 @@ BASELINE_44=44
 D_MAX=300
 D_LATE_MAX=10
 D_BAND=50
-P_STAMP_MAX_AGE_S=43200
+# P_STAMP_MAX_AGE is 12h.
+P_STAMP_MAX_AGE_H=12
+P_STAMP_MAX_AGE_S=$((P_STAMP_MAX_AGE_H * 3600))
 HARD_LIMIT_S=3060
 A2_TIMEOUT_S=120
 A3_CAP_S=300
@@ -97,6 +108,21 @@ S_EPOCH=
 RUN_ID=
 D_P=
 D_W=
+D_A=
+D_LATE=
+D_UNSCANNED=
+R_MESSAGES=
+R_ERRORS=
+R_CAPPED=
+R_ELIGIBLE=
+A_MESSAGES=
+A_ERRORS=
+A_CAPPED=
+A_ELIGIBLE=
+FILL_MESSAGES=
+FILL_ERRORS=
+FILL_CAPPED=
+FILL_ELIGIBLE=
 WROTE_SOR=0
 SEARCH_DOWN=0
 SEARCH_RESTORED=0
@@ -585,7 +611,10 @@ claim_window() {
 }
 
 d_query_sql() {
-    printf '%s\n' "WITH m AS (SELECT x.present_on_server AS p, (x.id IN (SELECT message_id FROM attachment_meta_scans)) AS s FROM messages x WHERE x.source='imap-live' AND x.folder IS NOT NULL AND trim(x.folder)<>'') SELECT 'TOTAL present='||sum(p=1)||' missing_present='||sum(p=1 AND NOT s)||' D_total='||(sum(p=1 AND NOT s)-${BASELINE_44})||' gone='||sum(p=0)||' scanned_gone='||sum(p=0 AND s)||' unscanned_all='||sum(NOT s) FROM m;"
+    # Per-index lines carry an index number only. Folder names stay in SQL.
+    # Each statement has its own WITH. A second statement does not see the first CTE.
+    _m="WITH m AS (SELECT x.folder AS folder, x.present_on_server AS p, (x.id IN (SELECT message_id FROM attachment_meta_scans)) AS s FROM messages x WHERE x.source='imap-live' AND x.folder IS NOT NULL AND trim(x.folder)<>'')"
+    printf '%s\n' "${_m}, g AS (SELECT folder, sum(p=1) AS present, sum(p=1 AND NOT s) AS missing_present, sum(p=0 AND s) AS scanned_gone FROM m GROUP BY folder) SELECT 'idx='||row_number() OVER (ORDER BY folder)||' present='||present||' missing_present='||missing_present||' scanned_gone='||scanned_gone FROM g ORDER BY folder; ${_m} SELECT 'TOTAL present='||sum(p=1)||' missing_present='||sum(p=1 AND NOT s)||' D_total='||(sum(p=1 AND NOT s)-${BASELINE_44})||' gone='||sum(p=0)||' scanned_gone='||sum(p=0 AND s)||' unscanned_all='||sum(NOT s) FROM m;"
 }
 
 field_of() {
@@ -607,7 +636,8 @@ parse_d_line() {
     D_TOTAL=$(field_of "$_line" D_total)
     D_GONE=$(field_of "$_line" gone)
     D_SCANNED_GONE=$(field_of "$_line" scanned_gone)
-    if [ -z "${D_TOTAL}" ] || [ -z "${D_GONE}" ] || [ -z "${D_SCANNED_GONE}" ]; then
+    D_UNSCANNED=$(field_of "$_line" unscanned_all)
+    if [ -z "${D_TOTAL}" ] || [ -z "${D_GONE}" ] || [ -z "${D_SCANNED_GONE}" ] || [ -z "${D_UNSCANNED}" ]; then
         return 1
     fi
     return 0
@@ -626,10 +656,50 @@ run_d_query() {
     return 0
 }
 
-# D_LATE is the P8 scanned_gone count. It is not the D_W-D_P band.
-# The band is D_BAND (50). scanned_gone must be <= D_LATE_MAX.
+# A2 item 1 and item 7. Every index line has scanned_gone=0, and
+# missing_present <= max(10, present/2). Folder names are not read.
+d_indexes_ok() {
+    _log=$1
+    _n=$("$AWK" 'BEGIN { n = 0 } /^idx=/ { n++ } END { print n + 0 }' "$_log")
+    if [ "${_n:-0}" -lt 1 ]; then
+        say STOP-d-no-index
+        return 1
+    fi
+    if ! "$AWK" '
+        function val(line, key,    n, i, parts, kv) {
+            n = split(line, parts, " ")
+            for (i = 1; i <= n; i++) {
+                split(parts[i], kv, "=")
+                if (kv[1] == key) return kv[2]
+            }
+            return ""
+        }
+        BEGIN { bad = 0 }
+        /^idx=/ {
+            p = val($0, "present")
+            m = val($0, "missing_present")
+            g = val($0, "scanned_gone")
+            if (p !~ /^[0-9]+$/ || m !~ /^[0-9]+$/ || g !~ /^[0-9]+$/) bad = 1
+            if (g != 0) bad = 1
+            half = int(p / 2)
+            cap = (half > 10 ? half : 10)
+            if (m + 0 > cap) bad = 1
+        }
+        END { exit bad ? 1 : 0 }
+    ' "$_log"; then
+        say STOP-d-index
+        return 1
+    fi
+    return 0
+}
+
+# A2, before any live SoR write. D_late is not this check.
+# 1 scanned_gone=0 on every index. 2 TOTAL gone=G. 3 unscanned_all=R_errors.
+# 4 rehearsal curl/literal/capped/uidvalidity/PARTIAL/rc, in log_ok_fill.
+# 5 0<=D_W<=D_MAX. 6 D_P<=D_W<=D_P+D_BAND. 7 index bound. 8 fill identity.
 d_check() {
-    if [ -z "${D_P}" ] || [ -z "${D_W}" ]; then
+    _log=$1
+    if [ -z "${D_P}" ] || [ -z "${D_W}" ] || [ -z "${R_ERRORS}" ]; then
         say STOP-d-check-missing
         return 1
     fi
@@ -639,8 +709,21 @@ d_check() {
     case "$D_W" in
         ''|*[!0-9-]*) say STOP-d-w-nan; return 1 ;;
     esac
+    case "$D_UNSCANNED" in
+        ''|*[!0-9]*) say STOP-unscanned; return 1 ;;
+    esac
+    case "$R_ERRORS" in
+        ''|*[!0-9]*) say STOP-unscanned; return 1 ;;
+    esac
+    if ! d_indexes_ok "$_log"; then
+        return 1
+    fi
     if [ "$D_GONE" != "$G_EXPECT" ]; then
         say STOP-gone
+        return 1
+    fi
+    if [ "$D_UNSCANNED" != "$R_ERRORS" ]; then
+        say STOP-unscanned
         return 1
     fi
     if [ "$D_P" -lt 0 ] || [ "$D_P" -gt "$D_MAX" ]; then
@@ -656,11 +739,192 @@ d_check() {
         say STOP-d-band
         return 1
     fi
-    if [ "$D_SCANNED_GONE" -gt "$D_LATE_MAX" ]; then
-        say STOP-d-late
+    _sum=$((R_MESSAGES + R_ERRORS + R_CAPPED))
+    if [ "$_sum" != "$R_ELIGIBLE" ]; then
+        say STOP-fill-identity
         return 1
     fi
     say "D-CHECK-OK D_P=${D_P} D_W=${D_W}"
+    say "D_3.5b=${D_W} auto (rule A2)"
+    return 0
+}
+
+# A3, on the live SoR after A3. A miss is a FAIL (caller sets exit 3).
+# D_late is D_A - D_W and must sit in 0..D_LATE_MAX.
+d_check_a3() {
+    _log=$1
+    case "$D_A" in
+        ''|*[!0-9-]*) say STOP-d-a-nan; return 1 ;;
+    esac
+    case "$A_ERRORS" in
+        ''|*[!0-9]*) say STOP-a3-unscanned; return 1 ;;
+    esac
+    case "$D_UNSCANNED" in
+        ''|*[!0-9]*) say STOP-a3-unscanned; return 1 ;;
+    esac
+    if ! d_indexes_ok "$_log"; then
+        return 1
+    fi
+    if [ "$D_GONE" != "$G_EXPECT" ]; then
+        say STOP-gone
+        return 1
+    fi
+    if [ "$D_UNSCANNED" != "$A_ERRORS" ]; then
+        say STOP-a3-unscanned
+        return 1
+    fi
+    _sum=$((A_MESSAGES + A_ERRORS + A_CAPPED))
+    if [ "$_sum" != "$A_ELIGIBLE" ]; then
+        say STOP-fill-identity
+        return 1
+    fi
+    if [ "$A_ELIGIBLE" != "$R_ELIGIBLE" ]; then
+        say STOP-a3-eligible
+        return 1
+    fi
+    D_LATE=$((D_A - D_W))
+    if [ "$D_LATE" -lt 0 ] || [ "$D_LATE" -gt "$D_LATE_MAX" ]; then
+        say STOP-d-late
+        return 1
+    fi
+    _cap=$((G_EXPECT + BASELINE_44 + D_W + D_LATE))
+    _expect=$((G_EXPECT + BASELINE_44 + D_A))
+    if [ "$A_ERRORS" -gt "$_cap" ] || [ "$A_ERRORS" != "$_expect" ]; then
+        say STOP-a3-44
+        return 1
+    fi
+    say "D_late=${D_LATE} auto (rule A3)"
+    say A3-D-OK
+    return 0
+}
+
+# A4 counts. R1 v2 K_OK lines=EXPECT_PRE / lines=34 stays TODO-PIN:
+# that recipe file was not in the upload, so this does not invent it.
+a4_counts_ok() {
+    _log="$LOGS/att0w-a4-${STAMP}.log"
+    if ! run_group "$STEP6_TIMEOUT_S" "$_log" "$PYTHON" -c '
+import hashlib, sqlite3, sys
+bk_path, sor_path, reh_path = sys.argv[1], sys.argv[2], sys.argv[3]
+a_messages = int(sys.argv[4])
+d_late = int(sys.argv[5])
+ATT0 = (
+    "attachments",
+    "attachment_extracts",
+    "attachment_chunks",
+    "attachment_meta_scans",
+    "attachment_folder_uidvalidity",
+    "attachments_pr1_empty",
+)
+
+def ident(name):
+    ok = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+    if not name or any(c not in ok for c in name):
+        raise SystemExit(1)
+    return "\"" + name + "\""
+
+def open_ro(path):
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+def tables(conn):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='\''table'\'' AND name NOT LIKE '\''sqlite_%'\'' ORDER BY name").fetchall()
+    return [r[0] for r in rows]
+
+def digest(conn, name):
+    q = ident(name)
+    schema = conn.execute("SELECT coalesce(sql,'\'''\'') FROM sqlite_master WHERE type='\''table'\'' AND name=?", (name,)).fetchone()[0]
+    h = hashlib.sha256()
+    h.update(schema.encode())
+    cur = conn.execute("SELECT * FROM %s ORDER BY rowid" % q)
+    for row in cur:
+        h.update(repr(row).encode())
+        h.update(b"\n")
+    return h.hexdigest()
+
+def count(conn, name):
+    return conn.execute("SELECT count(*) FROM %s" % ident(name)).fetchone()[0]
+
+def maxrow(conn, name):
+    return conn.execute("SELECT coalesce(max(rowid),0) FROM %s" % ident(name)).fetchone()[0]
+
+def has_sum(conn):
+    return conn.execute("SELECT coalesce(sum(has_attachments),0) FROM messages").fetchone()[0]
+
+def main():
+    bk = open_ro(bk_path)
+    sor = open_ro(sor_path)
+    reh = open_ro(reh_path)
+    bk_names = [n for n in tables(bk) if n not in ATT0]
+    sor_names = [n for n in tables(sor) if n not in ATT0]
+    if bk_names != sor_names:
+        sys.stdout.write("a4_non_att0=mismatch\n")
+        return 1
+    for name in bk_names:
+        if digest(bk, name) != digest(sor, name):
+            sys.stdout.write("a4_non_att0=content\n")
+            return 1
+        if count(bk, name) != count(sor, name) or maxrow(bk, name) != maxrow(sor, name):
+            sys.stdout.write("a4_non_att0=counts\n")
+            return 1
+    sys.stdout.write("a4_non_att0=ok\n")
+    if "messages" not in bk_names:
+        sys.stdout.write("a4_messages=missing\n")
+        return 1
+    sys.stdout.write("a4_messages=%d\n" % count(sor, "messages"))
+    sys.stdout.write("a4_messages_max=%d\n" % maxrow(sor, "messages"))
+    for name in ("attachments_pr1_empty", "attachment_extracts", "attachment_chunks"):
+        if name not in tables(sor):
+            sys.stdout.write("a4_missing=%s\n" % name)
+            return 1
+        n = count(sor, name)
+        sys.stdout.write("a4_%s=%d\n" % (name, n))
+        if n != 0:
+            return 1
+    if "attachment_meta_scans" not in tables(sor):
+        sys.stdout.write("a4_scans=missing\n")
+        return 1
+    scans = count(sor, "attachment_meta_scans")
+    sys.stdout.write("a4_scans=%d\n" % scans)
+    if scans != a_messages:
+        return 1
+    def triple(conn):
+        return (count(conn, "attachments"), count(conn, "attachment_folder_uidvalidity"), has_sum(conn))
+    live = triple(sor)
+    prev = triple(reh)
+    sys.stdout.write("a4_att_live=%d\n" % live[0])
+    sys.stdout.write("a4_att_reh=%d\n" % prev[0])
+    sys.stdout.write("a4_uid_live=%d\n" % live[1])
+    sys.stdout.write("a4_uid_reh=%d\n" % prev[1])
+    sys.stdout.write("a4_has_live=%d\n" % live[2])
+    sys.stdout.write("a4_has_reh=%d\n" % prev[2])
+    if d_late == 0:
+        if live != prev:
+            return 1
+    else:
+        if live[0] > prev[0] or live[1] > prev[1] or live[2] > prev[2]:
+            return 1
+        if (prev[2] - live[2]) > d_late:
+            return 1
+    sys.stdout.write("a4_result=ok\n")
+    return 0
+
+try:
+    rc = main()
+except Exception:
+    sys.stdout.write("a4_error=1\n")
+    rc = 1
+raise SystemExit(rc)
+' "$BK" "$SOR" "$REH_DB" "$A_MESSAGES" "$D_LATE"; then
+        say STOP-a4
+        return 1
+    fi
+    if ! has_line "$_log" "a4_non_att0=ok" || ! has_line "$_log" "a4_result=ok"; then
+        say STOP-a4
+        return 1
+    fi
+    say A4-OK
+    say "R1-V2-TODO-PIN recipe-absent"
     return 0
 }
 
@@ -737,7 +1001,7 @@ if ($reader == 0) {
             $fb = 1;
             $keep = 1;
         }
-        if ($line =~ /^(att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
+        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
             $keep = 1;
         }
         print $out $line if $keep;
@@ -882,6 +1146,18 @@ log_ok_fill() {
         say STOP-uidvalidity
         return 1
     fi
+    if ! has_line "$_log" "literal_dropped=0"; then
+        say STOP-literal-dropped
+        return 1
+    fi
+    if ! has_line "$_log" "literal_truncated=0"; then
+        say STOP-literal-truncated
+        return 1
+    fi
+    if ! has_line "$_log" "filenames=0"; then
+        say STOP-filenames
+        return 1
+    fi
     _m=$("$AWK" -F= '/^messages=/ { print $2; exit }' "$_log")
     _e=$("$AWK" -F= '/^errors=/ { print $2; exit }' "$_log")
     _c=$("$AWK" -F= '/^capped=/ { print $2; exit }' "$_log")
@@ -890,11 +1166,19 @@ log_ok_fill() {
         say STOP-fill-fields
         return 1
     fi
+    case "$_m" in ''|*[!0-9]*) say STOP-fill-fields; return 1 ;; esac
+    case "$_e" in ''|*[!0-9]*) say STOP-fill-fields; return 1 ;; esac
+    case "$_c" in ''|*[!0-9]*) say STOP-fill-fields; return 1 ;; esac
+    case "$_g" in ''|*[!0-9]*) say STOP-fill-fields; return 1 ;; esac
     _sum=$((_m + _e + _c))
     if [ "$_sum" != "$_g" ]; then
         say STOP-fill-identity
         return 1
     fi
+    FILL_MESSAGES=$_m
+    FILL_ERRORS=$_e
+    FILL_CAPPED=$_c
+    FILL_ELIGIBLE=$_g
     say FILL-REPORT-OK
     return 0
 }
@@ -1275,7 +1559,7 @@ arr_body() {
     fi
     _runr="att0-L1-${_wstamp}-R"
     if ! "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$_runr"; then
-        say ROLLBACK-FAILED
+        say "ROLLBACK-FAILED backup=${BK}"
         ARR_STATUS=failed
         return 1
     fi
@@ -1293,7 +1577,7 @@ arr_body() {
             return 1
         fi
         if ! "$LAUNCHCTL" bootout "$(gui_target com.mailroom.ask-mail-serve)"; then
-            say ROLLBACK-FAILED
+            say "ROLLBACK-FAILED backup=${BK}"
             ARR_STATUS=failed
             return 1
         fi
@@ -1312,7 +1596,7 @@ arr_body() {
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
     if [ "$_st" != "free" ]; then
-        say ROLLBACK-NEEDED
+        say "ROLLBACK-NEEDED lock-held"
         ARR_STATUS=needed
         return 1
     fi
@@ -1331,7 +1615,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev
     _stage="$MA/backups/mailroom-arr-stage-${_wstamp}.sqlite"
     _sh="/tmp/att0-restore-${_wstamp}.sh"
     write_restore_sh "$_sh" || {
-        say ROLLBACK-FAILED
+        say "ROLLBACK-FAILED backup=${BK}"
         ARR_STATUS=failed
         return 1
     }
@@ -1342,12 +1626,12 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev
         /bin/bash "$_sh" "$BK" "$_stage" "$SOR" "$MA" "$_wstamp" "$SQLITE" "$STAT" "$AWK"
     then
         wait_lock_free || true
-        say ROLLBACK-FAILED
+        say "ROLLBACK-FAILED backup=${BK}"
         ARR_STATUS=failed
         return 1
     fi
     if ! has_line "$_rlog" "RESTORE-SWAPPED"; then
-        say ROLLBACK-FAILED
+        say "ROLLBACK-FAILED backup=${BK}"
         ARR_STATUS=failed
         return 1
     fi
@@ -1360,7 +1644,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev
     fi
     ARR_STATUS=ran
     if ! printf '%s\n' "$_wstamp" > "/tmp/att0r-done-${_wstamp}.OK"; then
-        say ROLLBACK-FAILED
+        say "ROLLBACK-FAILED backup=${BK}"
         ARR_STATUS=failed
         return 1
     fi
@@ -1557,7 +1841,8 @@ do_window() {
         WANTED_RC=1
         return
     fi
-    say "D_P=${D_P}"
+    say "G=${G_EXPECT}"
+    say "D_P=${D_P} source=phasep-scratch"
     if ! imap_user_len; then WANTED_RC=1; return; fi
     PROBE_DB="$MA/dryrun/att0-probe-${STAMP}/mailroom.sqlite"
     if ! copy_db "$SOR" "$PROBE_DB"; then
@@ -1629,6 +1914,10 @@ do_window() {
         return
     fi
     if ! log_ok_fill "$_flog" 1; then WANTED_RC=1; return; fi
+    R_MESSAGES=$FILL_MESSAGES
+    R_ERRORS=$FILL_ERRORS
+    R_CAPPED=$FILL_CAPPED
+    R_ELIGIBLE=$FILL_ELIGIBLE
     _wlog="$LOGS/att0w-dw-${STAMP}.log"
     if ! run_d_query "$REH_DB" "$_wlog"; then
         say STOP-d-w-query
@@ -1636,7 +1925,7 @@ do_window() {
         return
     fi
     D_W=$D_TOTAL
-    if ! d_check; then WANTED_RC=1; return; fi
+    if ! d_check "$_wlog"; then WANTED_RC=1; return; fi
     BK="$MA/backups/mailroom-pre-att0-window-${STAMP}.sqlite"
     if [ -e "$BK" ]; then
         say STOP-backup-exists
@@ -1660,12 +1949,12 @@ do_window() {
         return
     fi
     say BACKUP-OK
-    S_EPOCH=$(now_epoch) || { WANTED_RC=1; return; }
     RUN_ID="att0-L1-${STAMP}"
     if ! search_not_disabled; then
         WANTED_RC=1
         return
     fi
+    S_EPOCH=$(now_epoch) || { WANTED_RC=1; return; }
     _wrc=0
     "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$RUN_ID" || _wrc=$?
     say "write_rc=${_wrc}"
@@ -1798,7 +2087,22 @@ do_window() {
         WANTED_RC=3
         return
     fi
+    A_MESSAGES=$FILL_MESSAGES
+    A_ERRORS=$FILL_ERRORS
+    A_CAPPED=$FILL_CAPPED
+    A_ELIGIBLE=$FILL_ELIGIBLE
     say A3-OK
+    _dalog="$LOGS/att0w-da-${STAMP}.log"
+    if ! run_d_query "$SOR" "$_dalog"; then
+        say STOP-d-a-query
+        WANTED_RC=3
+        return
+    fi
+    D_A=$D_TOTAL
+    if ! d_check_a3 "$_dalog"; then
+        WANTED_RC=3
+        return
+    fi
     if ! budget_ok step6 "$STEP6_TIMEOUT_S"; then WANTED_RC=3; return; fi
     _before=$("$AWK" -F= '/^bk_sha=/ { print $2; exit }' "/tmp/att0w-state-${STAMP}")
     _after=$("$SHASUM" -a 256 "$SOR" | "$AWK" '{print $1; exit}') || { WANTED_RC=3; return; }
@@ -1814,6 +2118,10 @@ do_window() {
         return
     fi
     say "R1-DIFF before=${_before} after=${_after}"
+    if ! a4_counts_ok; then
+        WANTED_RC=3
+        return
+    fi
     say R1-OK
     if ! ask_hash_same; then WANTED_RC=3; return; fi
     if ! s2_body; then
@@ -1922,6 +2230,8 @@ do_restore_daily() {
         return
     fi
     say "WINDOW_STAMP=${W_STAMP}"
+    # A7. The mechanical gate is the window PASS marker or the verified
+    # AR-R marker. Mailroom's posted run verdict is not visible here.
     if [ ! -f "/tmp/att0w-done-${W_STAMP}.OK" ] && [ ! -f "/tmp/att0r-done-${W_STAMP}.OK" ]; then
         say STOP-no-window-or-arr-marker
         WANTED_RC=1
@@ -2015,10 +2325,8 @@ do_restore_daily() {
 }
 
 # Read-only verdict from the window transcript, its logs, and /tmp markers.
-# Plan v1.17's verbatim eight-item list was not in the files on hand.
-# The eight rules below are the stated subset: done marker, clean exit,
-# the D_W band, D_MAX, D_LATE, the A2/A3/R1 markers, the leak and
-# falling-back scan, and search restored with the +26 gap still dropped.
+# D_late is D_A - D_W from the transcript line, not scanned_gone.
+# R1 v2 K_OK lines stay out of this verdict until the recipe is pinned.
 do_report() {
     W_STAMP=$1
     MODE=report
@@ -2072,16 +2380,29 @@ do_report() {
     else
         _rule d-max FAIL
     fi
-    _dw="$LOGS/att0w-dw-${W_STAMP}.log"
+    _b35=
+    if [ -f "$_tr" ]; then
+        _b35=$("$AWK" '/D_3.5b=/ { print; exit }' "$_tr")
+    fi
+    _b35v=$(field_of "${_b35:-}" D_3.5b)
+    case "${_b35v:-x}" in
+        ''|*[!0-9]*) _b35v= ;;
+    esac
+    if [ -n "$_b35v" ] && [ "$_b35v" = "${_rw:-}" ] && text_has "${_b35:-}" "auto (rule A2)"; then
+        _rule d-3.5b PASS
+    else
+        _rule d-3.5b FAIL
+    fi
     _late=
-    if [ -f "$_dw" ]; then
-        _tline=$("$AWK" '/^TOTAL / { print; exit }' "$_dw")
-        _late=$(field_of "${_tline:-}" scanned_gone)
+    _lline=
+    if [ -f "$_tr" ]; then
+        _lline=$("$AWK" '/D_late=/ { print; exit }' "$_tr")
+        _late=$(field_of "${_lline:-}" D_late)
     fi
     case "${_late:-x}" in
         ''|*[!0-9]*) _late= ;;
     esac
-    if [ -n "$_late" ] && [ "$_late" -le "$D_LATE_MAX" ]; then
+    if [ -n "$_late" ] && [ "$_late" -le "$D_LATE_MAX" ] && text_has "${_lline:-}" "auto (rule A3)"; then
         _rule d-late PASS
     else
         _rule d-late FAIL

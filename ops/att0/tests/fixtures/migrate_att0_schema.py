@@ -34,8 +34,23 @@ def main(argv):
     for name in TABLES:
         sys.stdout.write("%s=%s\n" % (name, state))
     conn = sqlite3.connect(db)
+    present = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'"
+    ).fetchone()
+    renamed = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='attachments_pr1_empty'"
+    ).fetchone()
+    if present and not renamed:
+        conn.execute("ALTER TABLE attachments RENAME TO attachments_pr1_empty")
+    conn.execute("CREATE TABLE IF NOT EXISTS attachments_pr1_empty (id INTEGER)")
+    conn.execute("CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE IF NOT EXISTS attachment_extracts (id INTEGER)")
+    conn.execute("CREATE TABLE IF NOT EXISTS attachment_chunks (id INTEGER)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS attachment_meta_scans (message_id INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS attachment_folder_uidvalidity (folder TEXT, uidvalidity INTEGER)"
     )
     conn.commit()
     conn.close()
