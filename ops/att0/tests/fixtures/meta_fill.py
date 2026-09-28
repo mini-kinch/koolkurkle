@@ -1,6 +1,7 @@
 """Test double for meta_fill. Prints a canary that the runner must drop."""
 
 import os
+import sqlite3
 import sys
 import time
 
@@ -38,6 +39,13 @@ def main(argv):
     sys.stdout.write("curl_failures=[]\n")
     sys.stdout.write("has_attachments=0\n")
     sys.stdout.write("parts_truncated=1\n")
+    if apply:
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "UPDATE messages SET has_attachments=1 WHERE present_on_server=1"
+        )
+        conn.commit()
+        conn.close()
     return 0
 
 

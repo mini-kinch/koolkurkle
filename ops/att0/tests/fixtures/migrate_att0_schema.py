@@ -52,6 +52,20 @@ def main(argv):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS attachment_folder_uidvalidity (folder TEXT, uidvalidity INTEGER)"
     )
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS attachment_chunks_fts USING fts5(body, content='')"
+    )
+    present_vec = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='message_embeddings'"
+    ).fetchone()
+    if not present_vec:
+        conn.execute("PRAGMA writable_schema=ON")
+        conn.execute(
+            "INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql) "
+            "VALUES ('table', 'message_embeddings', 'message_embeddings', 0, "
+            "'CREATE VIRTUAL TABLE message_embeddings USING vec0(embedding float[8])')"
+        )
+        conn.execute("PRAGMA writable_schema=RESET")
     conn.commit()
     conn.close()
     return 0

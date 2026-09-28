@@ -9,6 +9,21 @@ if [ "${1:-}" = "-j" ]; then
     exit 0
 fi
 if [ "${1:-}" = "+%s" ]; then
+    if [ "${ATT0_FAKE_S_LATE:-}" = "1" ]; then
+        _n=0
+        if [ -n "${ATT0_STATE:-}" ] && [ -f "${ATT0_STATE}/date_s_n" ]; then
+            _n=$(cat "${ATT0_STATE}/date_s_n")
+        fi
+        _n=$((_n + 1))
+        if [ -n "${ATT0_STATE:-}" ]; then
+            mkdir -p "${ATT0_STATE}"
+            printf '%s\n' "$_n" > "${ATT0_STATE}/date_s_n"
+        fi
+        if [ "$_n" -ge 3 ]; then
+            printf '%s\n' "$((base + 50000))"
+            exit 0
+        fi
+    fi
     if [ "${ATT0_FAKE_DATE_BREACH:-}" = "1" ] && [ -f "${HOME}/MailArchive/state/search_resume_after.epoch" ]; then
         printf '%s\n' "$((base + 10000))"
         exit 0

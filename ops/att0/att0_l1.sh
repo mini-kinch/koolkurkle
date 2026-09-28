@@ -66,7 +66,14 @@ BASELINE_44=44
 D_MAX=300
 D_LATE_MAX=10
 D_BAND=50
-# P_STAMP_MAX_AGE is 12h.
+# EXPECT_PRE is the un-migrated R1 v2 line count. AFTER is EXPECT_PRE
+# plus the nine tables A2 adds. The plan's 29 was replaced by 25.
+EXPECT_PRE=25
+EXPECT_AFTER=34
+R1V2_TIMEOUT_S=60
+R1V2_SHA=45ef12295c21f028b2e99dc4cba81fe4025cf45af9debe08e04c6231d577f3aa
+# P_STAMP_MAX_AGE is 12h. It is a start gate: entry, and again
+# immediately before S. The window may finish after that.
 P_STAMP_MAX_AGE_H=12
 P_STAMP_MAX_AGE_S=$((P_STAMP_MAX_AGE_H * 3600))
 HARD_LIMIT_S=3060
@@ -267,6 +274,38 @@ has_line() {
     _file=$1
     _needle=$2
     "$AWK" -v n="$_needle" 'BEGIN { f = 0 } index($0, n) { f = 1 } END { exit f ? 0 : 1 }' "$_file"
+}
+
+# Exactly one line that starts with key=, and the value is want.
+# A missing line, a second line, or a different value is a miss.
+kv_one() {
+    _file=$1
+    _key=$2
+    _want=$3
+    "$AWK" -v k="$_key" -v w="$_want" '
+        BEGIN { n = 0; bad = 0 }
+        index($0, k "=") == 1 {
+            n++
+            val = substr($0, length(k) + 2)
+            if (val != w) bad = 1
+        }
+        END { if (n != 1 || bad) exit 1 }
+    ' "$_file"
+}
+
+# Whole transcript line, or the line after the "PFX N " prefix, equals msg.
+exact_msg() {
+    _file=$1
+    _msg=$2
+    "$AWK" -v m="$_msg" '
+        BEGIN { f = 0 }
+        {
+            line = $0
+            sub(/^[^ ]+ [0-9]+ /, "", line)
+            if ($0 == m || line == m) f = 1
+        }
+        END { exit f ? 0 : 1 }
+    ' "$_file"
 }
 
 text_has() {
@@ -476,6 +515,9 @@ step0_locks() {
         return 1
     fi
     if ! watchdog_missing "/tmp/att0-step0-wd-${STAMP}-$$.log"; then
+        return 1
+    fi
+    if ! r1v2_pin_ok; then
         return 1
     fi
     say STEP0-LOCKS-OK
@@ -702,7 +744,14 @@ claim_window() {
 d_query_sql() {
     # Per-index lines carry an index number only. Folder names stay in SQL.
     # Each statement has its own WITH. A second statement does not see the first CTE.
-    _m="WITH m AS (SELECT x.folder AS folder, x.present_on_server AS p, (x.id IN (SELECT message_id FROM attachment_meta_scans)) AS s FROM messages x WHERE x.source='imap-live' AND x.folder IS NOT NULL AND trim(x.folder)<>'')"
+    # A missing attachment_meta_scans table is the pre-A2 state: nothing is scanned.
+    _scan=$1
+    if [ "$_scan" = "scan" ]; then
+        _s='(x.id IN (SELECT message_id FROM attachment_meta_scans))'
+    else
+        _s='0'
+    fi
+    _m="WITH m AS (SELECT x.folder AS folder, x.present_on_server AS p, ${_s} AS s FROM messages x WHERE x.source='imap-live' AND x.folder IS NOT NULL AND trim(x.folder)<>'')"
     printf '%s\n' "${_m}, g AS (SELECT folder, sum(p=1) AS present, sum(p=1 AND NOT s) AS missing_present, sum(p=0 AND s) AS scanned_gone FROM m GROUP BY folder) SELECT 'idx='||row_number() OVER (ORDER BY folder)||' present='||present||' missing_present='||missing_present||' scanned_gone='||scanned_gone FROM g ORDER BY folder; ${_m} SELECT 'TOTAL present='||sum(p=1)||' missing_present='||sum(p=1 AND NOT s)||' D_total='||(sum(p=1 AND NOT s)-${BASELINE_44})||' gone='||sum(p=0)||' scanned_gone='||sum(p=0 AND s)||' unscanned_all='||sum(NOT s) FROM m;"
 }
 
@@ -735,7 +784,13 @@ parse_d_line() {
 run_d_query() {
     _db=$1
     _log=$2
-    _out=$(run_group "$D_QUERY_TIMEOUT_S" "$_log" "$SQLITE" -readonly "$_db" "$(d_query_sql)") || return 1
+    _has=$("$SQLITE" -readonly "$_db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='attachment_meta_scans';" 2>/dev/null || true)
+    if [ "$_has" = "1" ]; then
+        _sql=$(d_query_sql scan)
+    else
+        _sql=$(d_query_sql noscan)
+    fi
+    _out=$(run_group "$D_QUERY_TIMEOUT_S" "$_log" "$SQLITE" -readonly "$_db" "$_sql") || return 1
     _line=$("$AWK" '/^TOTAL / { print; exit }' "$_log" 2>/dev/null || true)
     if [ -z "$_line" ]; then
         return 1
@@ -897,8 +952,7 @@ d_check_a3() {
     return 0
 }
 
-# A4 counts. R1 v2 K_OK lines=EXPECT_PRE / lines=34 stays TODO-PIN:
-# that recipe file was not in the upload, so this does not invent it.
+# A4 counts. Non-ATT-0 identity is the R1 v2 before/after digest, not this loop.
 a4_counts_ok() {
     _log="$LOGS/att0w-a4-${STAMP}.log"
     if ! run_group "$STEP6_TIMEOUT_S" "$_log" "$PYTHON" -c '
@@ -906,14 +960,6 @@ import hashlib, sqlite3, sys
 bk_path, sor_path, reh_path = sys.argv[1], sys.argv[2], sys.argv[3]
 a_messages = int(sys.argv[4])
 d_late = int(sys.argv[5])
-ATT0 = (
-    "attachments",
-    "attachment_extracts",
-    "attachment_chunks",
-    "attachment_meta_scans",
-    "attachment_folder_uidvalidity",
-    "attachments_pr1_empty",
-)
 
 def ident(name):
     ok = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
@@ -930,17 +976,6 @@ def tables(conn):
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type='\''table'\'' AND name NOT LIKE '\''sqlite_%'\'' ORDER BY name").fetchall()
     return [r[0] for r in rows]
 
-def digest(conn, name):
-    q = ident(name)
-    schema = conn.execute("SELECT coalesce(sql,'\'''\'') FROM sqlite_master WHERE type='\''table'\'' AND name=?", (name,)).fetchone()[0]
-    h = hashlib.sha256()
-    h.update(schema.encode())
-    cur = conn.execute("SELECT * FROM %s ORDER BY rowid" % q)
-    for row in cur:
-        h.update(repr(row).encode())
-        h.update(b"\n")
-    return h.hexdigest()
-
 def count(conn, name):
     return conn.execute("SELECT count(*) FROM %s" % ident(name)).fetchone()[0]
 
@@ -954,21 +989,8 @@ def main():
     bk = open_ro(bk_path)
     sor = open_ro(sor_path)
     reh = open_ro(reh_path)
-    bk_names = [n for n in tables(bk) if n not in ATT0]
-    sor_names = [n for n in tables(sor) if n not in ATT0]
-    if bk_names != sor_names:
-        sys.stdout.write("a4_non_att0=mismatch\n")
-        return 1
-    for name in bk_names:
-        if digest(bk, name) != digest(sor, name):
-            sys.stdout.write("a4_non_att0=content\n")
-            return 1
-        if count(bk, name) != count(sor, name) or maxrow(bk, name) != maxrow(sor, name):
-            sys.stdout.write("a4_non_att0=counts\n")
-            return 1
-    sys.stdout.write("a4_non_att0=ok\n")
-    if "messages" not in bk_names:
-        sys.stdout.write("a4_messages=missing\n")
+    if count(bk, "messages") != count(sor, "messages") or maxrow(bk, "messages") != maxrow(sor, "messages"):
+        sys.stdout.write("a4_messages=mismatch\n")
         return 1
     sys.stdout.write("a4_messages=%d\n" % count(sor, "messages"))
     sys.stdout.write("a4_messages_max=%d\n" % maxrow(sor, "messages"))
@@ -1018,13 +1040,209 @@ raise SystemExit(rc)
         say STOP-a4
         return 1
     fi
-    if ! has_line "$_log" "a4_non_att0=ok" || ! has_line "$_log" "a4_result=ok"; then
+    if ! kv_one "$_log" a4_result ok; then
         say STOP-a4
         return 1
     fi
     say A4-OK
-    say "R1-V2-TODO-PIN recipe-absent"
     return 0
+}
+
+# Nine tables A2 adds. The first five are empty at R-POSTA2.
+NINE_NAMES='attachments_pr1_empty attachment_extracts attachment_chunks attachment_meta_scans attachment_folder_uidvalidity attachment_chunks_fts_config attachment_chunks_fts_data attachment_chunks_fts_docsize attachment_chunks_fts_idx'
+NINE_ZERO='attachments_pr1_empty attachment_extracts attachment_chunks attachment_meta_scans attachment_folder_uidvalidity'
+AFTER_EXCEPT='attachments attachment_meta_scans attachment_folder_uidvalidity'
+
+r1v2_zsh() {
+    _self=${BASH_SOURCE[0]}
+    case "$_self" in
+        */*) printf '%s\n' "${_self%/*}/r1v2_digest.zsh" ;;
+        *) printf '%s\n' "./r1v2_digest.zsh" ;;
+    esac
+}
+
+r1v2_pin_ok() {
+    _z=$(r1v2_zsh)
+    _got=$("$SHASUM" -a 256 "$_z" 2>/dev/null | "$AWK" '{ print $1; exit }') || true
+    if [ "$_got" != "$R1V2_SHA" ]; then
+        say STOP-r1v2-sha
+        return 1
+    fi
+    say R1V2-SHA-OK
+    return 0
+}
+
+# One child. PASS is rc 0, last stdout line exactly K_OK lines=EXPECT,
+# and OUT.stderr at 0 bytes. The transcript tag is R1V2-<LABEL>.
+r1v2_run() {
+    _tag=$1
+    _label=$2
+    _db=$3
+    _expect=$4
+    _stamp=$5
+    _out="$LOGS/att0w-r1v2-${_tag}-${_stamp}.tsv"
+    _log="$LOGS/att0w-r1v2-${_tag}-${_stamp}.log"
+    _err="${_out}.stderr"
+    if [ -e "$_out" ] || [ -L "$_out" ] || [ -e "$_err" ] || [ -L "$_err" ]; then
+        say "STOP-r1v2-exists ${_tag}"
+        return 1
+    fi
+    _z=$(r1v2_zsh)
+    if ! run_group "$R1V2_TIMEOUT_S" "$_log" /bin/zsh "$_z" "$_db" "$_out" "$_expect"; then
+        say "STOP-r1v2 ${_tag}"
+        return 1
+    fi
+    _last=$("$AWK" 'NF { line = $0 } END { print line }' "$_log")
+    if [ "$_last" != "K_OK lines=${_expect}" ]; then
+        say "STOP-r1v2 ${_tag}"
+        return 1
+    fi
+    if [ ! -f "$_err" ]; then
+        say "STOP-r1v2 ${_tag}"
+        return 1
+    fi
+    _errb=$(/usr/bin/wc -c < "$_err" | tr -d ' ')
+    if [ "$_errb" != "0" ]; then
+        say "STOP-r1v2 ${_tag}"
+        return 1
+    fi
+    say "R1V2-${_label} K_OK lines=${_expect}"
+    return 0
+}
+
+r1_forbid_nine() {
+    _tsv=$1
+    "$AWK" -F '\t' -v nine="$NINE_NAMES" '
+        BEGIN {
+            n = split(nine, a, " ")
+            for (i = 1; i <= n; i++) bad[a[i]] = 1
+        }
+        bad[$1] { found = 1 }
+        END { exit found ? 1 : 0 }
+    ' "$_tsv"
+}
+
+# Every before line is in post. Extra names are exactly NINE.
+# The five content tables have count 0.
+r1_posta2_ok() {
+    _before=$1
+    _post=$2
+    "$AWK" -F '\t' -v nine="$NINE_NAMES" -v zero="$NINE_ZERO" '
+        BEGIN {
+            n = split(nine, a, " ")
+            for (i = 1; i <= n; i++) allow[a[i]] = 1
+            z = split(zero, b, " ")
+            for (i = 1; i <= z; i++) wantz[b[i]] = 1
+            if (n != 9 || z != 5) bad = 1
+        }
+        NR == FNR { bline[$0] = 1; bname[$1] = 1; next }
+        { pline[$0] = 1; pname[$1] = $2 }
+        END {
+            extra = 0
+            for (line in bline) if (!(line in pline)) bad = 1
+            for (name in pname) {
+                if (!(name in bname)) {
+                    extra++
+                    if (!allow[name]) bad = 1
+                    seen[name] = 1
+                }
+            }
+            for (name in allow) if (!seen[name]) bad = 1
+            if (extra != 9) bad = 1
+            for (name in wantz) if (pname[name] != "0") bad = 1
+            exit bad ? 1 : 0
+        }
+    ' "$_before" "$_post"
+}
+
+# Same names as post. Every line matches except the three A3 tables.
+r1_after_ok() {
+    _post=$1
+    _after=$2
+    "$AWK" -F '\t' -v exc="$AFTER_EXCEPT" '
+        BEGIN {
+            n = split(exc, a, " ")
+            for (i = 1; i <= n; i++) skip[a[i]] = 1
+        }
+        NR == FNR { pline[$1] = $0; pset[$1] = 1; next }
+        { aline[$1] = $0; aset[$1] = 1 }
+        END {
+            for (name in pset) if (!aset[name]) bad = 1
+            for (name in aset) if (!pset[name]) bad = 1
+            for (name in pset) {
+                if (skip[name]) continue
+                if (pline[name] != aline[name]) bad = 1
+            }
+            exit bad ? 1 : 0
+        }
+    ' "$_post" "$_after"
+}
+
+r1_sor0_before() {
+    if ! r1v2_run sor0 SOR0 "$SOR" "$EXPECT_PRE" "$STAMP"; then
+        return 1
+    fi
+    if ! r1v2_run before BEFORE "$BK" "$EXPECT_PRE" "$STAMP"; then
+        return 1
+    fi
+    _sor0="$LOGS/att0w-r1v2-sor0-${STAMP}.tsv"
+    _before="$LOGS/att0w-r1v2-before-${STAMP}.tsv"
+    if ! r1_forbid_nine "$_sor0" || ! r1_forbid_nine "$_before"; then
+        say STOP-r1v2-nine
+        return 1
+    fi
+    if /usr/bin/cmp -s "$_sor0" "$_before"; then
+        say LOGICAL_MATCH_BK=YES
+    else
+        say LOGICAL_MATCH_BK=NO
+        say STOP-r1v2-cmp
+        return 1
+    fi
+    PRE_MESSAGES=$("$SQLITE" -readonly "$SOR" "SELECT COUNT(*) FROM messages;") || return 1
+    PRE_MAX_ROWID=$("$SQLITE" -readonly "$SOR" "SELECT coalesce(MAX(rowid),0) FROM messages;") || return 1
+    _glog="$LOGS/att0w-pre-gone-${STAMP}.log"
+    if ! run_d_query "$SOR" "$_glog"; then
+        say STOP-r1v2-gone
+        return 1
+    fi
+    PRE_GONE=$D_GONE
+    case "$PRE_MESSAGES" in ''|*[!0-9]*) say STOP-r1v2-pre; return 1 ;; esac
+    case "$PRE_MAX_ROWID" in ''|*[!0-9]*) say STOP-r1v2-pre; return 1 ;; esac
+    case "$PRE_GONE" in ''|*[!0-9]*) say STOP-r1v2-pre; return 1 ;; esac
+    printf '%s\n' \
+        "pre_messages=${PRE_MESSAGES}" \
+        "pre_max_rowid=${PRE_MAX_ROWID}" \
+        "pre_gone=${PRE_GONE}" >> "/tmp/att0w-state-${STAMP}" || return 1
+    say R1V2-PRE-OK
+    return 0
+}
+
+r1_posta2() {
+    _before="$LOGS/att0w-r1v2-before-${STAMP}.tsv"
+    if ! r1v2_run posta2 POSTA2 "$SOR" "$EXPECT_AFTER" "$STAMP"; then
+        return 1
+    fi
+    _post="$LOGS/att0w-r1v2-posta2-${STAMP}.tsv"
+    if ! r1_posta2_ok "$_before" "$_post"; then
+        say STOP-r1v2-posta2
+        return 1
+    fi
+    say R1V2-POSTA2-OK
+    return 0
+}
+
+r1_after() {
+    _post="$LOGS/att0w-r1v2-posta2-${STAMP}.tsv"
+    if ! r1v2_run after AFTER "$SOR" "$EXPECT_AFTER" "$STAMP"; then
+        return 1
+    fi
+    _after="$LOGS/att0w-r1v2-after-${STAMP}.tsv"
+    if r1_after_ok "$_post" "$_after"; then
+        say LOGICAL_MATCH=YES
+        return 0
+    fi
+    say LOGICAL_MATCH=NO
+    return 1
 }
 
 copy_db() {
@@ -1101,7 +1319,7 @@ if ($reader == 0) {
             $fb = 1;
             $keep = 1;
         }
-        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
+        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|K_OK |K_FAIL |REFUSE_EXISTS|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|WAL-RESTORE-FAILED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
             $keep = 1;
         }
         print $out $line if $keep;
@@ -1298,31 +1516,31 @@ log_ok_fill() {
     if [ -n "${_pt:-}" ]; then
         say "PARTS-TRUNCATED-INFO parts_truncated=${_pt}"
     fi
-    if ! has_line "$_log" "curl_failures=[]"; then
+    if ! kv_one "$_log" curl_failures '[]'; then
         say STOP-curl-failures
         return 1
     fi
-    if ! has_line "$_log" "bytes_stored=0"; then
+    if ! kv_one "$_log" bytes_stored 0; then
         say STOP-bytes-stored
         return 1
     fi
-    if ! has_line "$_log" "capped=0"; then
+    if ! kv_one "$_log" capped 0; then
         say STOP-capped
         return 1
     fi
-    if ! has_line "$_log" "uidvalidity_mismatch=0"; then
+    if ! kv_one "$_log" uidvalidity_mismatch 0; then
         say STOP-uidvalidity
         return 1
     fi
-    if ! has_line "$_log" "literal_dropped=0"; then
+    if ! kv_one "$_log" literal_dropped 0; then
         say STOP-literal-dropped
         return 1
     fi
-    if ! has_line "$_log" "literal_truncated=0"; then
+    if ! kv_one "$_log" literal_truncated 0; then
         say STOP-literal-truncated
         return 1
     fi
-    if ! has_line "$_log" "filenames=0"; then
+    if ! kv_one "$_log" filenames 0; then
         say STOP-filenames
         return 1
     fi
@@ -1354,12 +1572,12 @@ log_ok_fill() {
 log_ok_migrate() {
     _log=$1
     _kind=$2
-    if ! has_line "$_log" "user_version=1"; then
+    if ! kv_one "$_log" user_version 1; then
         say STOP-user-version
         return 1
     fi
     if [ "$_kind" = "first" ]; then
-        if ! has_line "$_log" "legacy_attachments=renamed_empty"; then
+        if ! kv_one "$_log" legacy_attachments renamed_empty; then
             say STOP-legacy-rename
             return 1
         fi
@@ -1369,7 +1587,7 @@ log_ok_migrate() {
             return 1
         fi
     else
-        if ! has_line "$_log" "legacy_attachments=unchanged"; then
+        if ! kv_one "$_log" legacy_attachments unchanged; then
             say STOP-legacy-unchanged
             return 1
         fi
@@ -1681,7 +1899,7 @@ if [ -e "$STAGE" ]; then
     printf '%s\n' REFUSE-STAGE-EXISTS
     exit 1
 fi
-"$SQLITE" "$BK" ".backup '${STAGE}'" || exit 1
+"$SQLITE" -readonly "$BK" ".backup '${STAGE}'" || exit 1
 "$SQLITE" "$STAGE" "PRAGMA journal_mode=DELETE;" || exit 1
 for side in wal shm journal; do
     src="$SOR-$side"
@@ -1727,6 +1945,11 @@ if ! "$SQLITE" "$SOR" "PRAGMA quick_check;" | "$AWKBIN" 'BEGIN{ok=0} $0=="ok"{ok
         mv "$OLD" "$SOR" || true
     fi
     printf '%s\n' QUICK-CHECK-FAILED
+    exit 1
+fi
+_jm=$("$SQLITE" "$SOR" "PRAGMA journal_mode=WAL;") || exit 1
+if [ "$_jm" != "wal" ]; then
+    printf '%s\n' WAL-RESTORE-FAILED
     exit 1
 fi
 printf '%s\n' RESTORE-SWAPPED
@@ -1803,6 +2026,11 @@ arr_body() {
         ARR_STATUS=needed
         return 1
     fi
+    if ! wait_lock_free; then
+        say "ROLLBACK-NEEDED lock-held"
+        ARR_STATUS=needed
+        return 1
+    fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
     if [ "$_st" = "error" ]; then
         say LSOF-ERROR
@@ -1848,6 +2076,11 @@ arr_body() {
         ARR_STATUS=failed
         return 1
     fi
+    if ! arr_verify "$_wstamp"; then
+        say "ROLLBACK-FAILED verify backup=${BK}"
+        ARR_STATUS=failed
+        return 1
+    fi
     _stout=$("$PYTHON" "$S_DIR/search_resume_watchdog.py" status 2>/dev/null || true)
     say "status-logged"
     if text_has "$_stout" "d26_live=no"; then
@@ -1856,12 +2089,54 @@ arr_body() {
         say D26-STILL-LIVE
     fi
     ARR_STATUS=ran
-    if ! printf '%s\n' "$_wstamp" > "/tmp/att0r-done-${_wstamp}.OK"; then
-        say "ROLLBACK-FAILED backup=${BK}"
+    if ! printf '%s\n' "$_wstamp" > "/tmp/att0r-verified-${_wstamp}.OK"; then
+        say "ROLLBACK-FAILED verify backup=${BK}"
         ARR_STATUS=failed
         return 1
     fi
+    say ROLLED-BACK-VERIFIED
     say ROLLBACK-DONE
+    return 0
+}
+
+# W5. R-ARR matches R-BEFORE, journal_mode is wal, and messages, max
+# rowid, and G match the pre-window values. No second swap on a miss.
+arr_verify() {
+    _wstamp=$1
+    _before="$LOGS/att0w-r1v2-before-${_wstamp}.tsv"
+    _state="/tmp/att0w-state-${_wstamp}"
+    if [ ! -f "$_before" ] || [ ! -f "$_state" ]; then
+        return 1
+    fi
+    if ! r1v2_run arr ARR "$SOR" "$EXPECT_PRE" "$_wstamp"; then
+        return 1
+    fi
+    _arr="$LOGS/att0w-r1v2-arr-${_wstamp}.tsv"
+    if ! /usr/bin/cmp -s "$_before" "$_arr"; then
+        return 1
+    fi
+    _jm=$("$SQLITE" -readonly "$SOR" "PRAGMA journal_mode;") || return 1
+    if [ "$_jm" != "wal" ]; then
+        return 1
+    fi
+    _pm=$("$AWK" -F= '/^pre_messages=/ { print $2; exit }' "$_state")
+    _pr=$("$AWK" -F= '/^pre_max_rowid=/ { print $2; exit }' "$_state")
+    _pg=$("$AWK" -F= '/^pre_gone=/ { print $2; exit }' "$_state")
+    case "$_pm" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_pr" in ''|*[!0-9]*) return 1 ;; esac
+    case "$_pg" in ''|*[!0-9]*) return 1 ;; esac
+    _mc=$("$SQLITE" -readonly "$SOR" "SELECT COUNT(*) FROM messages;") || return 1
+    _mr=$("$SQLITE" -readonly "$SOR" "SELECT coalesce(MAX(rowid),0) FROM messages;") || return 1
+    if [ "$_mc" != "$_pm" ] || [ "$_mr" != "$_pr" ]; then
+        return 1
+    fi
+    _glog="$LOGS/att0-arr-gone-${_wstamp}.log"
+    if ! run_d_query "$SOR" "$_glog"; then
+        return 1
+    fi
+    if [ "$D_GONE" != "$_pg" ]; then
+        return 1
+    fi
     return 0
 }
 
@@ -2009,11 +2284,11 @@ meta_fill_cmd() {
 
 hits_clear() {
     _log=${1:-"$LOGS/att0-hits-entry-${STAMP}.log"}
-    if ! run_group 30 "$_log" "$PYTHON" -c 'import os,sys
-sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
+    if ! run_group 30 "$_log" "$PYTHON" -c 'import sys
+sys.path.insert(0, sys.argv[1])
 import sor_writer_gate as g
 h = g.rem_process_hits()
-sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))'; then
+sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' "$S_DIR"; then
         say STOP-hits
         return 1
     fi
@@ -2173,7 +2448,7 @@ do_window() {
         return
     fi
     BK_SHA=$("$SHASUM" -a 256 "$BK" | "$AWK" '{print $1; exit}') || { WANTED_RC=1; return; }
-    if ! "$SQLITE" "$BK" "PRAGMA quick_check;" | "$AWK" 'BEGIN{ok=0} $0=="ok"{ok=1} END{exit ok?0:1}'; then
+    if ! "$SQLITE" -readonly "$BK" "PRAGMA quick_check;" | "$AWK" 'BEGIN{ok=0} $0=="ok"{ok=1} END{exit ok?0:1}'; then
         say STOP-backup-quick
         WANTED_RC=1
         return
@@ -2184,12 +2459,21 @@ do_window() {
         return
     fi
     say BACKUP-OK
+    if ! r1_sor0_before; then
+        WANTED_RC=1
+        return
+    fi
     RUN_ID="att0-L1-${STAMP}"
     if ! search_not_disabled; then
         WANTED_RC=1
         return
     fi
     S_EPOCH=$(now_epoch) || { WANTED_RC=1; return; }
+    if ! age_ok; then
+        say STOP-p-stamp-age-at-S
+        WANTED_RC=1
+        return
+    fi
     _wrc=0
     "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$RUN_ID" || _wrc=$?
     say "write_rc=${_wrc}"
@@ -2270,6 +2554,10 @@ do_window() {
         return
     fi
     say SCHEMA-SHA-OK
+    if ! r1_posta2; then
+        WANTED_RC=3
+        return
+    fi
     # Free-lock gap before A3. A2's writer-lock drop already removed +26.
     # window, rollback, and restore-daily do not arm +26, and they do
     # not arm any other restore timer, in this gap. status is the only
@@ -2357,6 +2645,10 @@ do_window() {
     fi
     say "R1-DIFF before=${_before} after=${_after}"
     if ! a4_counts_ok; then
+        WANTED_RC=3
+        return
+    fi
+    if ! r1_after; then
         WANTED_RC=3
         return
     fi
@@ -2475,7 +2767,7 @@ do_restore_daily() {
     say "WINDOW_STAMP=${W_STAMP}"
     # A7. The mechanical gate is the window PASS marker or the verified
     # AR-R marker. Mailroom's posted run verdict is not visible here.
-    if [ ! -f "/tmp/att0w-done-${W_STAMP}.OK" ] && [ ! -f "/tmp/att0r-done-${W_STAMP}.OK" ]; then
+    if [ ! -f "/tmp/att0w-done-${W_STAMP}.OK" ] && [ ! -f "/tmp/att0r-verified-${W_STAMP}.OK" ]; then
         say STOP-no-window-or-arr-marker
         WANTED_RC=1
         return
@@ -2622,25 +2914,25 @@ fill_gates_ok() {
     if has_line "$_log" "PARTIAL"; then
         return 1
     fi
-    if ! has_line "$_log" "curl_failures=[]"; then
+    if ! kv_one "$_log" curl_failures '[]'; then
         return 1
     fi
-    if ! has_line "$_log" "bytes_stored=0"; then
+    if ! kv_one "$_log" bytes_stored 0; then
         return 1
     fi
-    if ! has_line "$_log" "capped=0"; then
+    if ! kv_one "$_log" capped 0; then
         return 1
     fi
-    if ! has_line "$_log" "uidvalidity_mismatch=0"; then
+    if ! kv_one "$_log" uidvalidity_mismatch 0; then
         return 1
     fi
-    if ! has_line "$_log" "literal_dropped=0"; then
+    if ! kv_one "$_log" literal_dropped 0; then
         return 1
     fi
-    if ! has_line "$_log" "literal_truncated=0"; then
+    if ! kv_one "$_log" literal_truncated 0; then
         return 1
     fi
-    if ! has_line "$_log" "filenames=0"; then
+    if ! kv_one "$_log" filenames 0; then
         return 1
     fi
     return 0
@@ -2669,8 +2961,9 @@ fill_take() {
 # Read-only verdict from the window's own logs and /tmp markers.
 # A2-A4 numbers are recomputed from att0w-dp/dw/da, the fill logs, and
 # the A4 log. D_late is D_A - D_W. parts_truncated is not a gate.
-# a4-r1v2 passes only when K_OK, lines=34, and LOGICAL_MATCH are present.
-# The R1 v2 recipe was not uploaded, so that rule fails closed.
+# a4-r1v2 requires exact transcript lines, not substrings.
+# A rolled-back window needs R1V2-ARR and ROLLED-BACK-VERIFIED.
+# LOGICAL_MATCH=NO fails either way.
 # Mailroom's posted verdict stays the official run verdict.
 do_report() {
     W_STAMP=$1
@@ -2867,7 +3160,7 @@ do_report() {
     if [ -f "$_a4" ]; then
         _scans=$("$AWK" -F= '/^a4_scans=/ { print $2; exit }' "$_a4" 2>/dev/null || true)
     fi
-    if [ -f "$_a4" ] && has_line "$_a4" "a4_non_att0=ok" && has_line "$_a4" "a4_result=ok" && is_uint "$_scans" && is_uint "$_am" && [ "$_scans" = "$_am" ]; then
+    if [ -f "$_a4" ] && kv_one "$_a4" a4_result ok && is_uint "$_scans" && is_uint "$_am" && [ "$_scans" = "$_am" ]; then
         _rule a4-counts PASS
     else
         _rule a4-counts FAIL
@@ -2900,24 +3193,23 @@ do_report() {
     else
         _rule search-restored FAIL
     fi
-    _k=1
-    _ln=1
-    _lm=1
-    for _f in "$_tr" "$_a4" "$_r1"; do
-        if [ ! -f "$_f" ]; then
-            continue
+    _r1ok=0
+    if [ -f "$_tr" ] && exact_msg "$_tr" "LOGICAL_MATCH=NO"; then
+        _r1ok=0
+    elif [ -f "$_tr" ] && exact_msg "$_tr" "ROLLED-BACK-VERIFIED"; then
+        if exact_msg "$_tr" "R1V2-ARR K_OK lines=${EXPECT_PRE}"; then
+            _r1ok=1
         fi
-        if has_line "$_f" "K_OK"; then
-            _k=0
-        fi
-        if has_line "$_f" "lines=34"; then
-            _ln=0
-        fi
-        if has_line "$_f" "LOGICAL_MATCH"; then
-            _lm=0
-        fi
-    done
-    if [ "$_k" = "0" ] && [ "$_ln" = "0" ] && [ "$_lm" = "0" ]; then
+    elif [ -f "$_tr" ] \
+        && exact_msg "$_tr" "R1V2-BEFORE K_OK lines=${EXPECT_PRE}" \
+        && exact_msg "$_tr" "R1V2-POSTA2 K_OK lines=${EXPECT_AFTER}" \
+        && exact_msg "$_tr" "R1V2-AFTER K_OK lines=${EXPECT_AFTER}" \
+        && exact_msg "$_tr" "LOGICAL_MATCH_BK=YES" \
+        && exact_msg "$_tr" "LOGICAL_MATCH=YES"
+    then
+        _r1ok=1
+    fi
+    if [ "$_r1ok" = "1" ]; then
         _rule a4-r1v2 PASS
     else
         _rule a4-r1v2 FAIL

@@ -15,6 +15,15 @@ fail() {
 }
 
 /bin/bash -n "$SCRIPT" || fail "bash -n"
+_r1z="$ROOT/ops/att0/r1v2_digest.zsh"
+_r1tail=$(tail -n 39 "$_r1z" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1; exit}')
+if [ "$_r1tail" != "f862c5ba3ad2ae2b86fe1be19ca348f34b39eea1c016bf4a56b9375fbd9e9cf0" ]; then
+    fail "r1v2 tail sha ${_r1tail}"
+fi
+/bin/zsh "$_r1z" /tmp/no-such.sqlite /tmp/att0-r1-refuse /tmp/att0-r1-refuse.out 0 >/tmp/att0-r1-expect.out
+if [ "$?" -ne 2 ]; then
+    fail "r1v2 expect 0 rc"
+fi
 if /usr/bin/grep -n -E 'declare -A|mapfile|readarray|\[\[ -v|wait -n|\|&|\$\{[A-Za-z_][A-Za-z0-9_]*,,|\$\{[A-Za-z_][A-Za-z0-9_]*\^\^' "$SCRIPT"; then
     fail "forbidden construct"
 fi
@@ -386,6 +395,96 @@ printf '%s\n' "$_dout" | /usr/bin/grep -q 'STOP-print-disabled' || {
 printf '%s\n' "$_dout" | /usr/bin/grep -q 'DAILY-DISABLED' && fail "print-disabled rc looked disabled"
 printf '%s\n' "PROC-RC-OK"
 
+_kvlog=/tmp/att0-kv-good.log
+cat > "$_kvlog" <<'EOF'
+att0 meta fill
+messages=0
+errors=1063
+capped=0
+eligible=1063
+bytes_stored=0
+filenames=0
+uidvalidity_mismatch=0
+literal_dropped=0
+literal_truncated=0
+curl_failures=[]
+EOF
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-good.log 0
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'FILL-REPORT-OK' || {
+    printf '%s\n' "$_kv" >&2
+    fail "kv good fill"
+}
+printf '%s\n' "$_kv" | /usr/bin/grep -q '^RC=0$' || fail "kv good rc"
+printf '%s\n' 'capped=0' >> "$_kvlog"
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-good.log 0
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv duplicate"
+printf '%s\n' "$_kv" | /usr/bin/grep -q '^RC=0$' && fail "kv duplicate rc"
+sed -i '/^capped=/d' "$_kvlog"
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-good.log 0
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv missing"
+printf '%s\ncapped=1\n' "$(cat "$_kvlog")" > "$_kvlog"
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-good.log 0
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv nonzero"
+printf '%s\nuser_version=1\nuser_version=1\nlegacy_attachments=renamed_empty\n' x > /tmp/att0-kv-mig.log
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_migrate /tmp/att0-kv-mig.log first
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-user-version' || fail "kv migrate dup"
+printf '%s\n' "KV-ONE-OK"
+
 # W23. The pinned curl argv has no imap text. The URL is on stdin.
 cat > /tmp/att0-sleeper.c <<'EOF'
 #include <unistd.h>
@@ -524,7 +623,7 @@ CREATE TABLE messages (
   present_on_server INTEGER,
   has_attachments INTEGER
 );
-CREATE TABLE attachment_meta_scans (message_id INTEGER);
+CREATE TABLE attachments (id INTEGER PRIMARY KEY);
 INSERT INTO messages (id, source, folder, present_on_server, has_attachments)
 SELECT n, 'imap-live',
   CASE WHEN n <= 992 THEN 'g' ELSE 'p' || (n - 992) END,
@@ -537,6 +636,12 @@ FROM (
   SELECT n FROM c
 );
 SQL
+    _pad=1
+    while [ "$_pad" -le 23 ]; do
+        _name=$(printf 'pad_%02d' "$_pad")
+        /usr/bin/sqlite3 "$1" "CREATE TABLE ${_name} (id INTEGER);"
+        _pad=$((_pad + 1))
+    done
 }
 
 setup_tree() {
@@ -546,6 +651,7 @@ setup_tree() {
         "/tmp/att0w-state-${ATT0_FAKE_STAMP}" \
         "/tmp/att0w-s1-${ATT0_FAKE_STAMP}" \
         "/tmp/att0r-done-${ATT0_FAKE_STAMP}.OK" \
+        "/tmp/att0r-verified-${ATT0_FAKE_STAMP}.OK" \
         "/tmp/att0-restore-${ATT0_FAKE_STAMP}.sh" \
         /tmp/att0-run-group-*.pl \
         /tmp/phaseP-offline-"${P_STAMP}".OK \
@@ -620,6 +726,16 @@ expect_rc() {
     scrub "$_log"
 }
 
+rm -f /tmp/att0-r1-count.sqlite /tmp/att0-r1-count.tsv /tmp/att0-r1-count.tsv.stderr
+seed_db /tmp/att0-r1-count.sqlite
+if ! /bin/zsh "$ROOT/ops/att0/r1v2_digest.zsh" /tmp/att0-r1-count.sqlite /tmp/att0-r1-count.tsv 25 > /tmp/att0-r1-count.out; then
+    cat /tmp/att0-r1-count.out >&2
+    fail "r1v2 pre count"
+fi
+/usr/bin/grep -q '^K_OK lines=25$' /tmp/att0-r1-count.out || fail "r1v2 pre line"
+test ! -s /tmp/att0-r1-count.tsv.stderr || fail "r1v2 pre stderr"
+printf '%s\n' "R1V2-PRECOUNT-OK"
+
 P_STAMP=20260928-010000
 ATT0_FAKE_STAMP=20260928-120000
 export ATT0_FAKE_STAMP ATT0_WRITE_HELD=1
@@ -637,7 +753,7 @@ printf '%s\n' "STEP0-LOCK-OK"
 P_STAMP=20260928-010001
 ATT0_FAKE_STAMP=20260928-120001
 export ATT0_FAKE_STAMP
-unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
+unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_FAKE_S_LATE ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
 setup_tree happy
 rc=$(run_mode /tmp/att0-happy window "$P_STAMP")
 expect_rc "$rc" 0 /tmp/att0-happy
@@ -679,6 +795,12 @@ test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'FLOCK-WRITE-FREE' /tmp/att0-happy || fail "happy flock"
 /usr/bin/grep -q 'WATCHDOG-MISSING-OK' /tmp/att0-happy || fail "happy watchdog"
 /usr/bin/grep -q 'STEP0-LOCKS-OK' /tmp/att0-happy || fail "happy step0"
+/usr/bin/grep -E '^ATT0W [0-9]+ R1V2-BEFORE K_OK lines=25$' /tmp/att0-happy || fail "happy r1 before"
+/usr/bin/grep -E '^ATT0W [0-9]+ R1V2-POSTA2 K_OK lines=34$' /tmp/att0-happy || fail "happy r1 posta2"
+/usr/bin/grep -E '^ATT0W [0-9]+ R1V2-AFTER K_OK lines=34$' /tmp/att0-happy || fail "happy r1 after"
+/usr/bin/grep -E '^ATT0W [0-9]+ LOGICAL_MATCH_BK=YES$' /tmp/att0-happy || fail "happy logical bk"
+/usr/bin/grep -E '^ATT0W [0-9]+ LOGICAL_MATCH=YES$' /tmp/att0-happy || fail "happy logical"
+/usr/bin/grep -E 'LOGICAL_MATCH=NO$' /tmp/att0-happy && fail "happy logical no"
 /usr/bin/grep -q 'NO-WRITER-OK' /tmp/att0-happy || fail "happy no writer"
 /usr/bin/grep -q 'PGREP-ERROR' /tmp/att0-happy && fail "happy pgrep error"
 /usr/bin/grep -q 'LSOF-ERROR' /tmp/att0-happy && fail "happy lsof error"
@@ -698,9 +820,9 @@ fi
 /usr/bin/grep -q 'search_resume_watchdog.py arm' /tmp/att0-happy && fail "happy armed"
 /usr/bin/grep -q 'search_resume_watchdog.py schedule' /tmp/att0-happy && fail "happy scheduled"
 rc=$(run_mode /tmp/att0-report report 20260928-120001)
-expect_rc "$rc" 1 /tmp/att0-report
-/usr/bin/grep -q '^ATT0-DONE PASS$' /tmp/att0-report && fail "report overall pass"
-/usr/bin/grep -q 'ATT0-DONE FAIL rule=a4-r1v2' /tmp/att0-report || fail "report r1v2 verdict"
+expect_rc "$rc" 0 /tmp/att0-report
+/usr/bin/grep -q '^ATT0-DONE PASS$' /tmp/att0-report || fail "report overall pass"
+/usr/bin/grep -q 'ATT0-DONE FAIL' /tmp/att0-report && fail "report overall fail"
 /usr/bin/grep -q 'ATT0-DONE RULE a2-band PASS' /tmp/att0-report || fail "report band"
 /usr/bin/grep -q 'ATT0-DONE RULE a2-gone PASS' /tmp/att0-report || fail "report gone"
 /usr/bin/grep -q 'ATT0-DONE RULE a2-index PASS' /tmp/att0-report || fail "report index"
@@ -714,7 +836,7 @@ expect_rc "$rc" 1 /tmp/att0-report
 /usr/bin/grep -q 'ATT0-DONE RULE a3-eligible PASS' /tmp/att0-report || fail "report eligible"
 /usr/bin/grep -q 'ATT0-DONE RULE a4-counts PASS' /tmp/att0-report || fail "report a4"
 /usr/bin/grep -q 'ATT0-DONE RULE a4-quick PASS' /tmp/att0-report || fail "report quick"
-/usr/bin/grep -q 'ATT0-DONE RULE a4-r1v2 FAIL' /tmp/att0-report || fail "report r1v2 rule"
+/usr/bin/grep -q 'ATT0-DONE RULE a4-r1v2 PASS' /tmp/att0-report || fail "report r1v2 rule"
 /usr/bin/grep -q 'ATT0-DONE RULE leak-w21 PASS' /tmp/att0-report || fail "report leak"
 /usr/bin/grep -q 'ATT0-DONE RULE search-restored PASS' /tmp/att0-report || fail "report search"
 printf '%s\n' "HAPPY-WINDOW-OK"
@@ -767,7 +889,9 @@ expect_rc "$rc" 3 /tmp/att0-a3
 /usr/bin/grep -q 'SUMMARY stamp=20260928-120004 exit=3' /tmp/att0-a3 || fail "a3 summary"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-a3 || fail "a3 safe"
 /usr/bin/grep -q 'kickstart' "${ATT0_STATE}/launchctl.log" && fail "a3 kickstart"
-test -f /tmp/att0r-done-20260928-120004.OK || fail "a3 arr marker"
+test -f /tmp/att0r-verified-20260928-120004.OK || fail "a3 arr marker"
+/usr/bin/grep -q 'ROLLED-BACK-VERIFIED' /tmp/att0-a3 || fail "a3 verified"
+/usr/bin/grep -E '^ATT0W [0-9]+ R1V2-ARR K_OK lines=25$' /tmp/att0-a3 || fail "a3 r1 arr"
 unset ATT0_FAKE_A3_RC
 printf '%s\n' "A3-FAIL-OK"
 
@@ -783,6 +907,21 @@ expect_rc "$rc" 1 /tmp/att0-budget
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-budget || fail "budget safe"
 unset ATT0_FAKE_DATE_BREACH
 printf '%s\n' "BUDGET-OK"
+
+# 1b-1. Entry is under 12h. The third +%s, immediately before S, is over 12h.
+P_STAMP=20260928-010018
+ATT0_FAKE_STAMP=20260928-120018
+export ATT0_FAKE_STAMP ATT0_FAKE_S_LATE=1
+setup_tree age-at-s
+rc=$(run_mode /tmp/att0-age-s window "$P_STAMP")
+expect_rc "$rc" 1 /tmp/att0-age-s
+/usr/bin/grep -q 'STOP-p-stamp-age-at-S' /tmp/att0-age-s || fail "age at S"
+/usr/bin/grep -q 'A2-OK' /tmp/att0-age-s && fail "age at S wrote A2"
+/usr/bin/grep -q 'write_rc=' /tmp/att0-age-s && fail "age at S wrote deadline"
+/usr/bin/grep -q 'SEARCH-BOOTED-OUT' /tmp/att0-age-s && fail "age at S bootout"
+/usr/bin/grep -q 'RESULT ar-r=not-run search=restored' /tmp/att0-age-s || fail "age at S result"
+unset ATT0_FAKE_S_LATE
+printf '%s\n' "AGE-AT-S-OK"
 
 P_STAMP=20260928-010006
 ATT0_FAKE_STAMP=20260928-120006
@@ -809,6 +948,18 @@ expect_rc "$rc" 1 /tmp/att0-restore-no
 /usr/bin/grep -q 'enable' "${ATT0_STATE}/launchctl.log" && fail "restore enabled"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-restore-no || fail "restore refuse safe"
 printf '%s\n' "RESTORE-REFUSE-OK"
+
+# att0r-done alone is not the gate. att0w-done or att0r-verified is.
+P_STAMP=20260928-010019
+ATT0_FAKE_STAMP=20260928-120019
+export ATT0_FAKE_STAMP
+setup_tree arr-done-only
+printf '%s\n' "$ATT0_FAKE_STAMP" > "/tmp/att0r-done-${ATT0_FAKE_STAMP}.OK"
+rc=$(run_mode /tmp/att0-arr-done-only restore-daily "$ATT0_FAKE_STAMP")
+expect_rc "$rc" 1 /tmp/att0-arr-done-only
+/usr/bin/grep -q 'STOP-no-window-or-arr-marker' /tmp/att0-arr-done-only || fail "arr-done alone"
+/usr/bin/grep -q 'enable' "${ATT0_STATE}/launchctl.log" && fail "arr-done enabled"
+printf '%s\n' "ARR-DONE-ONLY-REFUSE-OK"
 
 P_STAMP=20260928-010017
 ATT0_FAKE_STAMP=20260928-120017
@@ -853,15 +1004,69 @@ printf '%s\n' \
     "window_stamp=20260928-129999" \
     > /tmp/att0w-state-20260928-129999
 printf '%s\n' "s_epoch=1700000000" "run_id=att0-L1-20260928-129999" > /tmp/att0w-s1-20260928-129999
-rm -f /tmp/att0-restore-20260928-129999.sh /tmp/att0r-done-20260928-129999.OK
+_pm=$(/usr/bin/sqlite3 "$HOME/MailArchive/mailroom.sqlite" "SELECT COUNT(*) FROM messages;")
+_pr=$(/usr/bin/sqlite3 "$HOME/MailArchive/mailroom.sqlite" "SELECT coalesce(MAX(rowid),0) FROM messages;")
+_pg=$(/usr/bin/sqlite3 "$HOME/MailArchive/mailroom.sqlite" "SELECT sum(present_on_server=0) FROM messages WHERE source='imap-live' AND folder IS NOT NULL AND trim(folder)<>'';")
+test "$_pm" = "1063" && test "$_pr" = "1063" && test "$_pg" = "992" || fail "rollback pre counts ${_pm} ${_pr} ${_pg}"
+printf '%s\n' "pre_messages=${_pm}" "pre_max_rowid=${_pr}" "pre_gone=${_pg}" >> /tmp/att0w-state-20260928-129999
+rm -f "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129999.tsv" \
+    "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129999.tsv.stderr"
+if ! /bin/zsh "$ROOT/ops/att0/r1v2_digest.zsh" \
+    "$HOME/MailArchive/backups/mailroom-pre-att0-window-20260928-129999.sqlite" \
+    "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129999.tsv" \
+    25 > /tmp/att0-rollback-r1.out; then
+    cat /tmp/att0-rollback-r1.out >&2
+    fail "rollback before digest"
+fi
+/usr/bin/grep -q '^K_OK lines=25$' /tmp/att0-rollback-r1.out || fail "rollback before line"
+rm -f /tmp/att0-restore-20260928-129999.sh /tmp/att0r-verified-20260928-129999.OK
 rc=$(run_mode /tmp/att0-rollback rollback 20260928-129999)
 expect_rc "$rc" 0 /tmp/att0-rollback
 /usr/bin/grep -q 'ROLLBACK-DONE' /tmp/att0-rollback || fail "rollback done"
 /usr/bin/grep -q 'RESULT ar-r=ran search=restored' /tmp/att0-rollback || fail "rollback result"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-rollback || fail "rollback safe"
 /usr/bin/grep -q 'SUMMARY stamp=20260928-120008 exit=0' /tmp/att0-rollback || fail "rollback summary"
-test -f /tmp/att0r-done-20260928-129999.OK || fail "rollback marker"
+test -f /tmp/att0r-verified-20260928-129999.OK || fail "rollback marker"
+/usr/bin/grep -q 'ROLLED-BACK-VERIFIED' /tmp/att0-rollback || fail "rollback verified"
+/usr/bin/grep -E '^ATT0R [0-9]+ R1V2-ARR K_OK lines=25$' /tmp/att0-rollback || fail "rollback r1 arr"
 printf '%s\n' "ROLLBACK-OK"
+
+# D3. A verify miss prints the backup path, does not swap again, and still restores search.
+P_STAMP=20260928-010020
+ATT0_FAKE_STAMP=20260928-120020
+export ATT0_FAKE_STAMP
+setup_tree rollback-bad
+/usr/bin/sqlite3 "$HOME/MailArchive/mailroom.sqlite" ".backup '${HOME}/MailArchive/backups/mailroom-pre-att0-window-20260928-129998.sqlite'"
+bk_sha=$(/usr/bin/sha256sum "$HOME/MailArchive/backups/mailroom-pre-att0-window-20260928-129998.sqlite" | /usr/bin/awk '{print $1; exit}')
+printf '%s\n' \
+    "bk_path=${HOME}/MailArchive/backups/mailroom-pre-att0-window-20260928-129998.sqlite" \
+    "bk_sha=${bk_sha}" \
+    "p_stamp=${P_STAMP}" \
+    "window_stamp=20260928-129998" \
+    "pre_messages=1063" \
+    "pre_max_rowid=1063" \
+    "pre_gone=1" \
+    > /tmp/att0w-state-20260928-129998
+printf '%s\n' "s_epoch=1700000000" "run_id=att0-L1-20260928-129998" > /tmp/att0w-s1-20260928-129998
+rm -f "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129998.tsv" \
+    "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129998.tsv.stderr"
+if ! /bin/zsh "$ROOT/ops/att0/r1v2_digest.zsh" \
+    "$HOME/MailArchive/backups/mailroom-pre-att0-window-20260928-129998.sqlite" \
+    "$HOME/MailArchive/logs/att0w-r1v2-before-20260928-129998.tsv" \
+    25 > /tmp/att0-rollback-bad-r1.out; then
+    cat /tmp/att0-rollback-bad-r1.out >&2
+    fail "rollback-bad before digest"
+fi
+rm -f /tmp/att0-restore-20260928-129998.sh /tmp/att0r-verified-20260928-129998.OK
+rc=$(run_mode /tmp/att0-rollback-bad rollback 20260928-129998)
+expect_rc "$rc" 3 /tmp/att0-rollback-bad
+/usr/bin/grep -q "ROLLBACK-FAILED verify backup=${HOME}/MailArchive/backups/mailroom-pre-att0-window-20260928-129998.sqlite" /tmp/att0-rollback-bad || fail "verify fail line"
+_swaps=$(/usr/bin/grep -c 'RESTORE-SWAPPED' "$HOME/MailArchive/logs/att0-arr-20260928-129998.log" || true)
+test "$_swaps" = "1" || fail "verify fail swaps ${_swaps}"
+/usr/bin/grep -q 'ROLLED-BACK-VERIFIED' /tmp/att0-rollback-bad && fail "verify fail looked verified"
+test ! -e /tmp/att0r-verified-20260928-129998.OK || fail "verify fail marker"
+/usr/bin/grep -q 'search=restored' /tmp/att0-rollback-bad || fail "verify fail search"
+printf '%s\n' "ROLLBACK-VERIFY-FAIL-OK"
 
 rc=$(run_mode /tmp/att0-usage)
 expect_rc "$rc" 2 /tmp/att0-usage
