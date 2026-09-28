@@ -596,6 +596,30 @@ phasep_markers_ok() {
     return 0
 }
 
+# Entry re-check after the markers and the 12h age check. Both Phase P
+# stamps are the daily and imap stamps. G and D_P come from the read-only
+# P8 query on the Phase P scratch copy. The A2 band is [D_P, D_P+D_BAND].
+entry_dp_ok() {
+    if ! stamps_ok; then
+        return 1
+    fi
+    _dlog="$LOGS/att0w-dp-${STAMP}.log"
+    if ! run_d_query "$MA/dryrun/att0-livepath-${P_STAMP}/mailroom.sqlite" "$_dlog"; then
+        say STOP-d-p-query
+        return 1
+    fi
+    D_P=$D_TOTAL
+    if [ "$D_GONE" != "$G_EXPECT" ]; then
+        say STOP-gone
+        return 1
+    fi
+    _hi=$((D_P + D_BAND))
+    say "G=${G_EXPECT}"
+    say "D_P=${D_P} source=phasep-scratch"
+    say "D-BAND D_P=${D_P} low=${D_P} high=${_hi}"
+    return 0
+}
+
 claim_window() {
     _f="/tmp/att0w-claimed-${P_STAMP}"
     if [ -e "$_f" ]; then
@@ -1158,6 +1182,11 @@ log_ok_fill() {
     if [ "$_apply" = "1" ] && has_line "$_log" "PARTIAL"; then
         say STOP-partial
         return 1
+    fi
+    # parts_truncated is meta_fill's --max-parts default. It is not a gate.
+    _pt=$("$AWK" -F= '/^parts_truncated=/ { print $2; exit }' "$_log")
+    if [ -n "${_pt:-}" ]; then
+        say "PARTS-TRUNCATED-INFO parts_truncated=${_pt}"
     fi
     if ! has_line "$_log" "curl_failures=[]"; then
         say STOP-curl-failures
@@ -1857,6 +1886,7 @@ do_window() {
     fi
     printf '%s\n' "${PFX} STAMP=${STAMP}" >> "$TRANSCRIPT" || { WANTED_RC=1; return; }
     say "P_STAMP=${P_STAMP}"
+    if ! entry_dp_ok; then WANTED_RC=1; return; fi
     if ! sha_five_ok; then WANTED_RC=1; return; fi
     if ! daily_not_loaded; then WANTED_RC=1; return; fi
     if ! daily_disabled; then WANTED_RC=1; return; fi
@@ -1866,24 +1896,9 @@ do_window() {
     if ! watchdog_missing; then WANTED_RC=1; return; fi
     if ! claim_window; then WANTED_RC=1; return; fi
     if ! no_action_required; then WANTED_RC=1; return; fi
-    if ! stamps_ok; then WANTED_RC=1; return; fi
     if ! ask_hash_record; then WANTED_RC=1; return; fi
     if ! sor_1c; then WANTED_RC=1; return; fi
     if ! legacy_rows_ok; then WANTED_RC=1; return; fi
-    _dlog="$LOGS/att0w-dp-${STAMP}.log"
-    if ! run_d_query "$MA/dryrun/att0-livepath-${P_STAMP}/mailroom.sqlite" "$_dlog"; then
-        say STOP-d-p-query
-        WANTED_RC=1
-        return
-    fi
-    D_P=$D_TOTAL
-    if [ "$D_GONE" != "$G_EXPECT" ]; then
-        say STOP-gone
-        WANTED_RC=1
-        return
-    fi
-    say "G=${G_EXPECT}"
-    say "D_P=${D_P} source=phasep-scratch"
     if ! imap_user_len; then WANTED_RC=1; return; fi
     PROBE_DB="$MA/dryrun/att0-probe-${STAMP}/mailroom.sqlite"
     if ! copy_db "$SOR" "$PROBE_DB"; then
