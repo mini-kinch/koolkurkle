@@ -31,9 +31,12 @@ failure is marked scanned. A second connection fails closed. After
 each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
 no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
-``/usr/bin/security``. The lookup is
-``/usr/bin/security find-generic-password -s <keychain-item> -w``.
-An empty IMAP user fails closed in the curl client before
+``/usr/bin/security``. The item name comes from ``MAILROOM_KEYCHAIN_ITEM``
+or ``MAILROOM_KEYCHAIN_CONFIG`` (placeholder ``<keychain-item>``). The
+lookup is ``/usr/bin/security find-generic-password -s <keychain-item> -w``.
+The read deadline is 15 seconds. A timeout is process status 5
+(``error: imap keychain read timed out``) and is returned before any
+auth attempt. An empty IMAP user fails closed in the curl client before
 LOGIN. A Keychain or login failure is process status 4
 (``error: imap auth failed``), not status 2 and not status 0.
 Curl receives the password only on stdin (``-K -``,
@@ -72,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import inspect
 import json
 import os
 import re
@@ -120,6 +124,8 @@ _DEFAULT_TIMEOUT_S = 30
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 # Auth/keychain open failure. Not argparse, not the writer lock (both 2).
 AUTH_EXIT = 4
+# Keychain subprocess deadline. Not argparse and not the writer lock (both 2).
+KEYCHAIN_TIMEOUT_EXIT = 5
 
 
 class FillRefuse(RuntimeError):
@@ -1268,6 +1274,14 @@ def _env_text(env: dict[str, str], args_value: str | None, key: str) -> str | No
     return value
 
 
+def report_keychain_timeout(report: dict[str, Any]) -> bool:
+    """True when the password read hit its deadline."""
+    for item in report.get("curl_failures") or []:
+        if str(item) == "imap keychain read timed out":
+            return True
+    return False
+
+
 def report_auth_failed(report: dict[str, Any]) -> bool:
     """True when the fill recorded a Keychain or login failure.
 
@@ -1317,7 +1331,17 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     mailbox = _env_text(environ, args.mailbox, "MAILROOM_IMAP_MAILBOX")
 
     def _password_fn() -> str:
-        return read_imap_app_password()
+        fn = read_imap_app_password
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return fn(env=environ)
+        accepts_env = "env" in params or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_env:
+            return fn(env=environ)
+        return fn()
 
     try:
         report = fill_metadata(
@@ -1344,6 +1368,9 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         sys.stderr.write("error: sqlite fill failed (%s)\n" % type(exc).__name__)
         return 2
     sys.stdout.write(format_report(report))
+    if report_keychain_timeout(report):
+        sys.stderr.write("error: imap keychain read timed out\n")
+        return KEYCHAIN_TIMEOUT_EXIT
     if report_auth_failed(report):
         sys.stderr.write("error: imap auth failed\n")
         return AUTH_EXIT

@@ -1920,41 +1920,30 @@ class FillTests(unittest.TestCase):
             self.assertNotIn("ex-inbox", done)
             self.assertNotIn("ex-inbox-2", done)
 
-    def test_keychain_env_cannot_redirect_the_password_fetch(self):
+    def test_keychain_env_pins_the_item_and_ignores_password_env(self):
         calls = []
 
         def runner(binary, service):
             calls.append((binary, service))
-            if service == "mailroom.imap.app-password":
-                return 1, ""
-            if service == "mailroom.icloud.app-password":
-                return 0, "legacy-secret"
+            if service == "keychain-item-under-test":
+                return 0, "pinned-secret"
             return 0, "redirected-secret"
 
         env = {
             "MAILROOM_SECURITY_BIN": "/tmp/not-security",
-            "MAILROOM_KEYCHAIN_ITEM": "other-item",
+            "MAILROOM_KEYCHAIN_ITEM": "keychain-item-under-test",
             "IMAP_APP_PASSWORD": "env-secret",
             "MAILROOM_IMAP_PASSWORD": "env-secret",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             password = imap_keychain.read_imap_app_password(runner=runner)
-        self.assertEqual(
-            calls,
-            [
-                ("/usr/bin/security", "mailroom.imap.app-password"),
-                ("/usr/bin/security", "mailroom.icloud.app-password"),
-            ],
-        )
-        self.assertLess(
-            calls.index(("/usr/bin/security", "mailroom.imap.app-password")),
-            calls.index(("/usr/bin/security", "mailroom.icloud.app-password")),
-        )
-        self.assertEqual(password, "legacy-secret")
+        self.assertEqual(calls, [("/usr/bin/security", "keychain-item-under-test")])
+        self.assertEqual(password, "pinned-secret")
         source = (SCRIPTS / "imap_keychain.py").read_text(encoding="utf-8")
         self.assertNotIn("MAILROOM_SECURITY_BIN", source)
-        self.assertNotIn("MAILROOM_KEYCHAIN_ITEM", source)
-        self.assertNotIn("os.environ", source)
+        self.assertIn("MAILROOM_KEYCHAIN_ITEM", source)
+        self.assertNotIn("falling back", source)
+        self.assertNotIn("legacy-item-under-test", source)
 
     def test_mailroom_security_bin_env_does_not_change_argv(self):
         """MAILROOM_SECURITY_BIN is not a binary override. Argv stays absolute."""
@@ -1968,7 +1957,10 @@ class FillTests(unittest.TestCase):
             proc.stderr = ""
             return proc
 
-        env = {"MAILROOM_SECURITY_BIN": "/tmp/not-security"}
+        env = {
+            "MAILROOM_SECURITY_BIN": "/tmp/not-security",
+            "MAILROOM_KEYCHAIN_ITEM": "keychain-item-under-test",
+        }
         with mock.patch.dict(os.environ, env, clear=False), mock.patch(
             "imap_keychain.subprocess.run", fake_run
         ):
@@ -1981,46 +1973,40 @@ class FillTests(unittest.TestCase):
                     "/usr/bin/security",
                     "find-generic-password",
                     "-s",
-                    "mailroom.imap.app-password",
+                    "keychain-item-under-test",
                     "-w",
                 ]
             ],
         )
 
-    def test_primary_argv_matches_main_and_precedes_legacy(self):
-        """Primary argv is main's list. Legacy is the next call only."""
+    def test_missing_pinned_item_does_not_fall_back(self):
+        """One read. A miss is an error. There is no second item."""
         seen = []
 
         def fake_run(args, check=False, capture_output=False, text=False):
             seen.append(list(args))
             proc = mock.Mock()
             proc.stderr = ""
-            if len(seen) == 1:
-                proc.returncode = 1
-                proc.stdout = ""
-            else:
-                proc.returncode = 0
-                proc.stdout = "legacy-secret\n"
+            proc.returncode = 1
+            proc.stdout = ""
             return proc
 
         primary = [
             "/usr/bin/security",
             "find-generic-password",
             "-s",
-            "mailroom.imap.app-password",
+            "keychain-item-under-test",
             "-w",
         ]
-        legacy = [
-            "/usr/bin/security",
-            "find-generic-password",
-            "-s",
-            "mailroom.icloud.app-password",
-            "-w",
-        ]
-        with mock.patch("imap_keychain.subprocess.run", fake_run):
-            password = imap_keychain.read_imap_app_password()
-        self.assertEqual(seen, [primary, legacy])
-        self.assertEqual(password, "legacy-secret")
+        err = io.StringIO()
+        with mock.patch.dict(
+            os.environ, {"MAILROOM_KEYCHAIN_ITEM": "keychain-item-under-test"}, clear=False
+        ), mock.patch("imap_keychain.subprocess.run", fake_run), mock.patch("sys.stderr", err):
+            with self.assertRaises(imap_keychain.KeychainError) as ctx:
+                imap_keychain.read_imap_app_password()
+        self.assertEqual(seen, [primary])
+        self.assertEqual(str(ctx.exception), "imap keychain password is missing")
+        self.assertNotIn("falling back", err.getvalue())
 
     def test_empty_imap_user_does_not_call_security(self):
         import imap_curl
@@ -2221,6 +2207,7 @@ class CliTests(unittest.TestCase):
             env = {
                 "MAILROOM_IMAP_HOST": "imap.example.com",
                 "MAILROOM_IMAP_USER": "user@example.com",
+                "MAILROOM_KEYCHAIN_ITEM": "keychain-item-under-test",
                 "IMAP_APP_PASSWORD": "env-secret",
                 "MAILROOM_IMAP_PASSWORD": "env-secret",
                 "MAILROOM_IMAP_PORT": "143",
@@ -2256,7 +2243,7 @@ class CliTests(unittest.TestCase):
                     "/usr/bin/security",
                     "find-generic-password",
                     "-s",
-                    "mailroom.imap.app-password",
+                    "keychain-item-under-test",
                     "-w",
                 ],
             )
@@ -2761,7 +2748,8 @@ class DesignAndBoundaryTests(unittest.TestCase):
         self.assertIn("attachments_pr1_empty", text)
         self.assertIn("peak memory", text.lower())
         self.assertIn("64 MiB", text)
-        self.assertIn("mailroom.imap.app-password", text)
+        self.assertIn("find-generic-password", text)
+        self.assertIn("Keychain", text)
         self.assertIn("messages.folder", text)
         self.assertIn("skipped", text)
         self.assertIn("capped:", text)
@@ -3381,6 +3369,7 @@ class CurlTransportTests(unittest.TestCase):
                         env={
                             "MAILROOM_IMAP_HOST": "imap.example.invalid",
                             "MAILROOM_IMAP_USER": "user@example.invalid",
+                            "MAILROOM_KEYCHAIN_ITEM": "keychain-item-under-test",
                             "CURL_BIN": "/tmp/not-curl",
                         },
                     )
@@ -3649,7 +3638,7 @@ class CurlTransportTests(unittest.TestCase):
                     timeout_s=5,
                 )
             rc, out = imap_keychain._run_security(
-                missing, "mailroom.imap.app-password"
+                missing, "keychain-item-under-test"
             )
             self.assertNotEqual(rc, 0)
             self.assertEqual(out, "")
