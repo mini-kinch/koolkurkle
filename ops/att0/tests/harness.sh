@@ -73,6 +73,37 @@ if ! /usr/bin/awk '
 ' "$SCRIPT"; then
     fail "run_group ignores a live process group"
 fi
+if /usr/bin/grep -n 'alarm shift; exec' "$SCRIPT"; then
+    fail "alarm plus exec"
+fi
+if ! /usr/bin/grep -q 'setpgrp(0, 0)' "$SCRIPT"; then
+    fail "timer parent missing setpgrp"
+fi
+if ! /usr/bin/grep -F -q '$SIG{INT}' "$SCRIPT"; then
+    fail "timer parent missing INT"
+fi
+if ! /usr/bin/grep -F -q '$SIG{TERM}' "$SCRIPT"; then
+    fail "timer parent missing TERM"
+fi
+if ! /usr/bin/awk '
+    /^do_window\(\)/ { on = 1 }
+    on && /step0_locks/ { step = 1 }
+    on && /\$MKDIR/ {
+        if (!step) bad = 1
+        saw = 1
+        exit
+    }
+    END { if (!step || !saw || bad) exit 1 }
+' "$SCRIPT"; then
+    fail "step0 is not before mkdir"
+fi
+if ! /usr/bin/awk '
+    /^flock_probe\(\)/ { on = 1 }
+    on && /with_writer_lock\.py/ { hit = 1 }
+    on && /^}/ { exit hit ? 0 : 1 }
+' "$SCRIPT"; then
+    fail "flock probe is not the wrapper acquisition path"
+fi
 _wpat=$(/usr/bin/awk -F"'" '/^WRITER_PAT=/{ print $2; exit }' "$SCRIPT")
 /usr/bin/pgrep -fl "$_wpat" >/tmp/att0-pgrep-self.out 2>&1
 _prc=$?
@@ -145,6 +176,7 @@ run_locks() {
         N=0
         TRANSCRIPT=
         MA="/tmp/att0-lock-${_name}"
+        S_DIR="$FIX"
         AWK=/usr/bin/awk
         PYTHON=/usr/bin/python3
         LSOF="$FAKES/lsof-split"
@@ -261,6 +293,73 @@ fi
 kill "$_curl_pid" 2>/dev/null || true
 wait "$_curl_pid" 2>/dev/null || true
 printf '%s\n' "CURL-ARGV-OK"
+
+# W23. Curl argv counts only when that process is in the fill group.
+cat > /tmp/att0-ps-fillcurl <<'EOF'
+#!/bin/bash
+pgid=$(cat /tmp/att0-fillcurl-pgid 2>/dev/null || printf '%s\n' 0)
+case "$*" in
+    *command*)
+        if [ "${ATT0_FILLCURL_MODE:-in}" = "in" ]; then
+            printf '%s\n' "4242 ${pgid} /usr/bin/curl --silent --show-error --fail-early -K -"
+        else
+            printf '%s\n' "4242 1 /usr/bin/curl --silent --show-error --fail-early -K -"
+        fi
+        ;;
+esac
+exit 0
+EOF
+chmod +x /tmp/att0-ps-fillcurl
+rm -f /tmp/att0-fillcurl-pgid /tmp/att0-fillcurl.log /tmp/att0-fillcurl-out.log
+mkdir -p /tmp/att0-fillcurl-ma
+if [ ! -e /tmp/att0-fillcurl-ma/mailroom.write.lock ]; then
+    : > /tmp/att0-fillcurl-ma/mailroom.write.lock
+fi
+run_fillcurl() {
+    _mode=$1
+    _log=$2
+    ATT0_FILLCURL_MODE=$_mode
+    export ATT0_FILLCURL_MODE
+    set +e
+    (
+        set +C
+        # shellcheck disable=SC1090
+        . "$SCRIPT"
+        set +e
+        PFX=ATT0T
+        N=0
+        TRANSCRIPT=
+        MA=/tmp/att0-fillcurl-ma
+        S_DIR="$FIX"
+        AWK=/usr/bin/awk
+        PYTHON=/usr/bin/python3
+        PERL=/usr/bin/perl
+        PGREP=/usr/bin/pgrep
+        LSOF="$FAKES/lsof"
+        PS=/tmp/att0-ps-fillcurl
+        STAMP=20260928-130077
+        run_group 30 "$_log" /bin/bash -c 'echo $$ > /tmp/att0-fillcurl-pgid; exit 0'
+        printf '%s\n' "RC=$?"
+    ) > "${_log}.out" 2>&1
+    set -e
+}
+run_fillcurl in /tmp/att0-fillcurl.log
+if ! /usr/bin/grep -q 'fill_curl=1' /tmp/att0-fillcurl.log.out \
+    || ! /usr/bin/grep -q 'STOP-group-occupied' /tmp/att0-fillcurl.log.out \
+    || /usr/bin/grep -q '^RC=0$' /tmp/att0-fillcurl.log.out; then
+    cat /tmp/att0-fillcurl.log.out >&2
+    fail "fill curl in group"
+fi
+run_fillcurl out /tmp/att0-fillcurl-out.log
+if ! /usr/bin/grep -q 'fill_curl=0' /tmp/att0-fillcurl-out.log.out \
+    || ! /usr/bin/grep -q 'GROUP-EMPTY' /tmp/att0-fillcurl-out.log.out \
+    || /usr/bin/grep -q 'STOP-group-occupied' /tmp/att0-fillcurl-out.log.out \
+    || ! /usr/bin/grep -q '^RC=0$' /tmp/att0-fillcurl-out.log.out; then
+    cat /tmp/att0-fillcurl-out.log.out >&2
+    fail "fill curl outside group"
+fi
+unset ATT0_FILLCURL_MODE
+printf '%s\n' "FILLCURL-GROUP-OK"
 
 # W24. Leader exits 0 while a grandchild ignores TERM and holds the lock.
 # Continuing requires the group empty and the lock free.
@@ -400,10 +499,24 @@ expect_rc() {
     scrub "$_log"
 }
 
+P_STAMP=20260928-010000
+ATT0_FAKE_STAMP=20260928-120000
+export ATT0_FAKE_STAMP ATT0_WRITE_HELD=1
+setup_tree step0
+rc=$(run_mode /tmp/att0-step0 window "$P_STAMP")
+expect_rc "$rc" 4 /tmp/att0-step0
+/usr/bin/grep -q 'STOP-write-lock-held' /tmp/att0-step0 || fail "step0 held"
+/usr/bin/grep -q 'STEP0-LOCKS-OK' /tmp/att0-step0 && fail "step0 passed while held"
+/usr/bin/grep -q 'SAFE-STATE-FAIL' /tmp/att0-step0 || fail "step0 safe"
+test ! -e "$HOME/MailArchive/logs/att0-window-${ATT0_FAKE_STAMP}.transcript" || fail "step0 wrote transcript"
+test ! -e "$HOME/MailArchive/backups"/mailroom-pre-att0-window-* || fail "step0 wrote backup"
+unset ATT0_WRITE_HELD
+printf '%s\n' "STEP0-LOCK-OK"
+
 P_STAMP=20260928-010001
 ATT0_FAKE_STAMP=20260928-120001
 export ATT0_FAKE_STAMP
-unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC
+unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
 setup_tree happy
 rc=$(run_mode /tmp/att0-happy window "$P_STAMP")
 expect_rc "$rc" 0 /tmp/att0-happy
@@ -444,7 +557,16 @@ test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'LOCK-DAILY-FREE' /tmp/att0-happy || fail "happy daily lock"
 /usr/bin/grep -q 'FLOCK-WRITE-FREE' /tmp/att0-happy || fail "happy flock"
 /usr/bin/grep -q 'WATCHDOG-MISSING-OK' /tmp/att0-happy || fail "happy watchdog"
+/usr/bin/grep -q 'STEP0-LOCKS-OK' /tmp/att0-happy || fail "happy step0"
 /usr/bin/grep -q 'FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks' /tmp/att0-happy || fail "happy followup"
+/usr/bin/grep -q 'fill_curl=0' /tmp/att0-happy || fail "happy fill curl"
+if ! /usr/bin/awk '
+    /GROUP-EMPTY/ { ready = 1 }
+    /FILL-REPORT-OK/ { if (!ready) bad = 1; n++; ready = 0 }
+    END { if (n != 2 || bad) exit 1 }
+' /tmp/att0-happy; then
+    fail "fill verdict before group empty"
+fi
 /usr/bin/grep -q 'harness=normal' /tmp/att0-happy || fail "happy harness normal"
 /usr/bin/grep -q 'group_empty=1' /tmp/att0-happy || fail "happy group empty"
 /usr/bin/grep -q 'group_empty=0' /tmp/att0-happy && fail "happy group occupied"
@@ -660,5 +782,28 @@ fi
 /usr/bin/grep -q '^harness=timeout then TERM/KILL$' /tmp/att0-orphan-timeout.meta || fail "timeout harness line"
 /usr/bin/grep -q '^group_empty=1$' /tmp/att0-orphan-timeout.meta || fail "timeout group"
 printf '%s\n' "ORPHAN-TIMEOUT-OK"
+
+# W24. INT and TERM use the same timer-parent path as a timeout.
+# TERM the live parent while the child is still running.
+rm -f /tmp/att0-orphan-signal.meta /tmp/att0-orphan-signal.log
+_t0=$(/bin/date +%s)
+set +e
+/usr/bin/perl -e 'alarm 25; exec @ARGV or die' /usr/bin/perl "$_helper" 30 /tmp/att0-orphan-signal.log 5 /bin/sleep 30 > /tmp/att0-orphan-signal.meta &
+_sigpid=$!
+sleep 0.8
+kill -TERM "$_sigpid"
+wait "$_sigpid"
+set -e
+_t1=$(/bin/date +%s)
+if [ $((_t1 - _t0)) -gt 15 ]; then
+    fail "signal reap too slow $((_t1 - _t0))"
+fi
+/usr/bin/grep -q '^harness=signal then TERM/KILL$' /tmp/att0-orphan-signal.meta || fail "signal harness line"
+/usr/bin/grep -q '^group_empty=1$' /tmp/att0-orphan-signal.meta || fail "signal group"
+/usr/bin/grep -q '^fill_curl=0$' /tmp/att0-orphan-signal.meta || fail "signal fill curl"
+if /bin/ps -ax -o command= | /usr/bin/awk 'index($0, "/bin/sleep 30") && index($0, "awk") == 0 { found = 1 } END { exit found ? 0 : 1 }'; then
+    fail "signal left sleep"
+fi
+printf '%s\n' "ORPHAN-SIGNAL-OK"
 
 printf '%s\n' "ALL-OK"

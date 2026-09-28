@@ -1,2 +1,27 @@
 #!/bin/bash
+# One path. Non-empty stdout means held. Two paths exit 1 with no
+# stdout, which is the Phase P fail-open the operator script must reject.
+files=0
+target=
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        *)
+            files=$((files + 1))
+            target=$a
+            ;;
+    esac
+done
+if [ "$files" -gt 1 ]; then
+    exit 1
+fi
+base=${target##*/}
+if [ "$base" = "mailroom.write.lock" ] && [ "${ATT0_WRITE_HELD:-0}" = "1" ]; then
+    printf '%s\n' 4242
+    exit 0
+fi
+if [ "$base" = "mailroom.daily.lock" ] && [ "${ATT0_DAILY_HELD:-0}" = "1" ]; then
+    printf '%s\n' 4343
+    exit 0
+fi
 exit 1

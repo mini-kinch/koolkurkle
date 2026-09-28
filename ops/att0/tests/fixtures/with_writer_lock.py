@@ -1,11 +1,16 @@
-"""Test double for the writer-lock wrapper. No secrets."""
+"""Test double for the writer-lock wrapper. No secrets.
 
+The acquisition path matches with_writer_lock.py: LOCK_EX|LOCK_NB, then
+the command, then release. A held lock exits 2 and does not run the command.
+"""
+
+import fcntl
 import os
 import subprocess
 import sys
 
 LOCK_TOKEN_ENV = "MAILROOM_WRITER_LOCK_TOKEN"
-ALLOWED = ("att0-migrate", "att0 meta fill", "att0-restore")
+ALLOWED = ("att0-migrate", "att0 meta fill", "att0-restore", "att0-lock-probe")
 
 
 def main(argv):
@@ -20,6 +25,25 @@ def main(argv):
     if not cmd:
         sys.stderr.write("error: command is required after --\n")
         return 2
+    if "--lock-file" in argv:
+        lock_path = argv[argv.index("--lock-file") + 1]
+    else:
+        lock_path = os.path.expanduser("~/MailArchive/mailroom.write.lock")
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        sys.stderr.write("error: writer lock held\n")
+        return 2
+    try:
+        return _run(cmd)
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+
+
+def _run(cmd):
     run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
     if run_id:
         path = os.path.expanduser("~/MailArchive/state/search_resume_after.epoch")

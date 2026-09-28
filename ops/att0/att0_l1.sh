@@ -373,8 +373,9 @@ no_writer() {
     return 0
 }
 
-# One file per lsof. An all-digit line means held. rc 1 and empty means
-# free. Anything else is an error. A missing write lock is not free.
+# One file per lsof -t. Non-empty stdout means held. rc 1 and empty
+# stdout means not open. That is not success by itself. Any other rc
+# is an error. A missing write lock is not free.
 lock_probe_file() {
     _path=$1
     _missing_ok=$2
@@ -386,13 +387,13 @@ lock_probe_file() {
         fi
         return 0
     fi
-    _out=$("$LSOF" -t -- "$_path" 2>&1)
+    _out=$("$LSOF" -t -- "$_path" 2>/dev/null)
     _rc=$?
-    if printf '%s\n' "$_out" | "$AWK" 'BEGIN { f = 0 } /^[0-9]+$/ { f = 1 } END { exit f ? 0 : 1 }'; then
+    if [ -n "$_out" ]; then
         printf '%s\n' held
         return 0
     fi
-    if [ "$_rc" -eq 1 ] && [ -z "$_out" ]; then
+    if [ "$_rc" -eq 1 ]; then
         printf '%s\n' free
         return 0
     fi
@@ -400,17 +401,14 @@ lock_probe_file() {
     return 0
 }
 
+# Same acquisition path as with_writer_lock.py: LOCK_EX|LOCK_NB, then
+# release immediately. rc 2 is held. lsof rc is not this check.
 flock_probe() {
     _rc=0
-    "$PYTHON" -c 'import fcntl, sys
-fh = open(sys.argv[1], "a+")
-try:
-    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    sys.exit(2)
-fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-fh.close()
-' "$MA/mailroom.write.lock" || _rc=$?
+    "$PYTHON" "$S_DIR/with_writer_lock.py" \
+        --purpose att0-lock-probe \
+        --lock-file "$MA/mailroom.write.lock" \
+        -- /usr/bin/true || _rc=$?
     if [ "$_rc" -eq 0 ]; then
         say FLOCK-WRITE-FREE
         return 0
@@ -421,6 +419,19 @@ fh.close()
     fi
     say STOP-flock-error
     return 1
+}
+
+# Step 0. Read-only writer and per-file lock re-check. Caller must
+# invoke this before it creates a directory, a transcript, or a SoR copy.
+step0_locks() {
+    if ! no_writer; then
+        return 1
+    fi
+    if ! locks_ok; then
+        return 1
+    fi
+    say STEP0-LOCKS-OK
+    return 0
 }
 
 locks_ok() {
@@ -1049,15 +1060,19 @@ if ($reader == 0) {
     exit($fb ? 7 : 0);
 }
 close $rh;
-my $timed_out = 0;
+my $why = "";
 my $child_status = -1;
-# The alarm only marks the deadline. It does not kill. Killing here
-# would be the timeout-only path. The reap below runs on every exit.
-local $SIG{ALRM} = sub { $timed_out = 1; };
+# Live timer parent. The child already called setpgrp and exec.
+# This is not alarm-then-exec: the parent stays up and reaps.
+# INT, TERM, timeout, and a normal exit all fall through to the same
+# TERM, wait, KILL of the whole group.
+local $SIG{ALRM} = sub { $why = "timeout" if $why eq ""; };
+local $SIG{INT} = sub { $why = "signal" if $why eq ""; };
+local $SIG{TERM} = sub { $why = "signal" if $why eq ""; };
 alarm($alarm_s);
 # Poll. A restarted wait would sit until the leader exits and would
 # miss the deadline when the leader ignores the alarm.
-while (!$timed_out && $child_status < 0) {
+while ($why eq "" && $child_status < 0) {
     my $w = waitpid($pid, WNOHANG);
     if ($w == $pid) {
         $child_status = $?;
@@ -1103,7 +1118,12 @@ if ($child_status >= 0) {
         $exit = $child_status >> 8;
     }
 }
-my $how = $timed_out ? "timeout then TERM/KILL" : "normal";
+my $how = "normal";
+if ($why eq "timeout") {
+    $how = "timeout then TERM/KILL";
+} elsif ($why eq "signal") {
+    $how = "signal then TERM/KILL";
+}
 print "child_rc=$exit\n";
 print "harness=$how\n";
 if ($reader_status >= 0 && (($reader_status >> 8) == 7)) {
@@ -1122,13 +1142,30 @@ sub group_has_member {
     close $ps;
     return $found;
 }
+sub fill_curl_in_group {
+    my $found = 0;
+    my $opened = open my $ps, "-|", $psbin, "-ax", "-o", "pid=,pgid=,command=";
+    return 1 unless $opened;
+    while (my $line = <$ps>) {
+        if ($line =~ /^\s*(\d+)\s+(\d+)\s+(.*)$/) {
+            my ($proc_pgid, $cmd) = ($2, $3);
+            if ($proc_pgid =~ /^\d+$/ && $proc_pgid == $pid && $cmd =~ m{^/usr/bin/curl( |$)}) {
+                $found = 1;
+            }
+        }
+    }
+    close $ps;
+    return $found;
+}
 my $group_empty = group_has_member() ? 0 : 1;
 if (!$group_empty) {
     select(undef, undef, undef, 0.2);
     $group_empty = group_has_member() ? 0 : 1;
 }
+my $fill_curl = fill_curl_in_group() ? 1 : 0;
 print "group_empty=$group_empty\n";
-exit($timed_out ? 124 : ($exit == 0 ? 0 : 1));
+print "fill_curl=$fill_curl\n";
+exit($why eq "timeout" ? 124 : ($exit == 0 ? 0 : 1));
 ENDPERL
 }
 
@@ -1136,6 +1173,7 @@ RUN_CHILD_RC=
 RUN_HOW=
 RUN_FALLBACK=0
 RUN_GROUP_EMPTY=0
+RUN_FILL_CURL=1
 
 run_group() {
     _alarm=$1
@@ -1153,14 +1191,17 @@ run_group() {
         /^harness=/ { h = $2 }
         /^fallback=/ { f = $2 }
         /^group_empty=/ { g = $2 }
-        END { printf "%s|%s|%s|%s\n", c, h, f, g }
+        /^fill_curl=/ { k = $2 }
+        END { printf "%s|%s|%s|%s|%s\n", c, h, f, g, k }
     ')
     RUN_CHILD_RC=${_parsed%%|*}
     _rest=${_parsed#*|}
     RUN_HOW=${_rest%%|*}
     _rest=${_rest#*|}
     RUN_FALLBACK=${_rest%%|*}
-    RUN_GROUP_EMPTY=${_rest#*|}
+    _rest=${_rest#*|}
+    RUN_GROUP_EMPTY=${_rest%%|*}
+    RUN_FILL_CURL=${_rest#*|}
     if [ -z "$RUN_CHILD_RC" ]; then
         RUN_CHILD_RC=1
     fi
@@ -1168,16 +1209,19 @@ run_group() {
     if [ "${RUN_FALLBACK:-0}" = "1" ]; then
         _fail=1
     fi
-    if [ "$RUN_HOW" = "timeout then TERM/KILL" ]; then
+    if [ "$RUN_HOW" = "timeout then TERM/KILL" ] || [ "$RUN_HOW" = "signal then TERM/KILL" ]; then
         _fail=1
     fi
     if [ "$RUN_CHILD_RC" != "0" ]; then
         _fail=1
     fi
-    # group_empty=0 means a descendant is still in the leader's group.
-    # That is a STOP even when the leader already dropped the writer lock.
-    if [ "${RUN_GROUP_EMPTY:-0}" != "1" ]; then
+    # Assert the fill group is empty, and that no pinned curl argv is
+    # still a member, before any verdict line from the caller.
+    if [ "${RUN_GROUP_EMPTY:-0}" != "1" ] || [ "${RUN_FILL_CURL:-1}" != "0" ]; then
+        say STOP-group-occupied
         _fail=1
+    else
+        say GROUP-EMPTY
     fi
     if ! leftover_clear; then
         _fail=1
@@ -1885,7 +1929,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))'; then
 watchdog_missing() {
     _log="$LOGS/att0-watchdog-entry-${STAMP}.log"
     run_group 30 "$_log" "$PYTHON" "$S_DIR/search_resume_watchdog.py" status || true
-    if [ "$RUN_HOW" != "normal" ] || [ "${RUN_GROUP_EMPTY:-0}" != "1" ]; then
+    if [ "$RUN_HOW" != "normal" ] || [ "${RUN_GROUP_EMPTY:-0}" != "1" ] || [ "${RUN_FILL_CURL:-1}" != "0" ]; then
         say STOP-watchdog-status
         return 1
     fi
@@ -1910,6 +1954,7 @@ do_window() {
     if ! env_check; then WANTED_RC=1; return; fi
     if ! phasep_markers_ok; then WANTED_RC=1; return; fi
     if ! age_ok; then WANTED_RC=1; return; fi
+    if ! step0_locks; then WANTED_RC=1; return; fi
     "$MKDIR" -p "$LOGS" "$MA/backups" "$MA/dryrun" "$MA/state" || { WANTED_RC=1; return; }
     TRANSCRIPT="$LOGS/att0-window-${STAMP}.transcript"
     if [ -e "$TRANSCRIPT" ]; then
@@ -1984,6 +2029,7 @@ do_window() {
         return
     fi
     if ! log_ok_migrate "$_mlog" first; then WANTED_RC=1; return; fi
+    # In-window 3.5L-b rehearsal fill. Own process group, live timer parent.
     _flog="$LOGS/att0w-reh-fill-${STAMP}.log"
     if ! run_group "$REHEARSAL_TIMEOUT_S" "$_flog" \
         "$ENVBIN" MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
@@ -2155,6 +2201,7 @@ do_window() {
         return
     fi
     if ! budget_ok a3 "$_a3t"; then WANTED_RC=3; return; fi
+    # Live fill after A2. Same live timer parent as the rehearsal fill.
     _a3log="$LOGS/att0w-a3-${STAMP}.log"
     if ! run_group "$_a3t" "$_a3log" \
         "$ENVBIN" MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
