@@ -292,6 +292,7 @@ fh = open(sys.argv[1], "a+")
 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 ' /tmp/att0-desc-lock || fail "desc lock still held"
+set +e
 printf '%s\n' "DESC-LOCK-OK"
 
 seed_db() {
