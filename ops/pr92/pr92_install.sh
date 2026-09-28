@@ -125,6 +125,10 @@ load_tools() {
     fi
 }
 
+print_tools() {
+    printf '%s\n' "PR92 TOOLS git=$GIT launchctl=$LAUNCHCTL shasum=$SHASUM find=$FIND python=$PYTHON cmp=$CMP awk=$AWK date=$DATE id=$ID cp=$CP chmod=$CHMOD mv=$MV mkdir=$MKDIR touch=$TOUCH env=$ENVBIN"
+}
+
 step() {
     N=$((N + 1))
     printf '%s\n' "PR92 ${N} $1"
@@ -263,6 +267,7 @@ post_mv_rollback() {
 }
 
 do_rollback() {
+    print_tools
     STAMP=$1
     case "$STAMP" in
         [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
@@ -294,6 +299,7 @@ begin_attempt() {
         *) fail stamp bad-format ;;
     esac
     printf '%s\n' "PR92 STAMP=${STAMP}"
+    print_tools
     WT="/tmp/pr92-gate-473b59a0bc85-${STAMP}"
     if ! printf '%s\n' "$STAMP" > "/tmp/pr92-stamp-${STAMP}.OK"; then
         fail stamp noclobber
@@ -516,7 +522,7 @@ PY
         fail runid unset
     fi
     step "p3-chain smoke-python with_writer_lock.py bash-pr92_install operator-shell launchd-1"
-    if ! "$PYTHON" "$WT/scripts/with_writer_lock.py" \
+    "$PYTHON" "$WT/scripts/with_writer_lock.py" \
         --purpose att0-migrate \
         --lock-file "$WT/pr92-smoke/positive.write.lock" \
         --action-required-file "$WT/pr92-smoke/absent-action-required" \
@@ -541,8 +547,10 @@ except Exception:
     sys.stdout.write("STOP-p3-positive\n")
     raise SystemExit(1)
 sys.stdout.write("PR92-P3-ALLOW\n")
+raise SystemExit(2)
 PY
-    then
+    _pos=$?
+    if [ "$_pos" -ne 2 ]; then
         fail p3 p3-positive
     fi
     mark p3 PR92-P3-OK
@@ -655,7 +663,9 @@ block3() {
 }
 
 do_install() {
-    trap kill_holder EXIT INT TERM
+    trap kill_holder EXIT
+    trap 'kill_holder; fail signal int' INT
+    trap 'kill_holder; fail signal term' TERM
     block1
     block2
     block3
