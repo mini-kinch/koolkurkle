@@ -821,8 +821,14 @@ expect_rc "$rc" 3 /tmp/att0-pdis
 /usr/bin/grep -q 'ENABLED-OK' /tmp/att0-pdis && fail "pdis looked enabled"
 /usr/bin/grep -q 'SAFE-STATE-FAIL' /tmp/att0-pdis || fail "pdis safe"
 unset ATT0_PDIS_FAIL_AFTER
+rm -f "${ATT0_STATE}/daily_enabled" "${ATT0_STATE}/daily_loaded" \
+    "${ATT0_STATE}/daily_running" "${ATT0_STATE}/daily_pgrep" \
+    "${ATT0_STATE}/pdis_n"
 printf '%s\n' "PRINT-DISABLED-RC-OK"
 
+P_STAMP=20260928-010007
+ATT0_FAKE_STAMP=20260928-120007
+export ATT0_FAKE_STAMP
 printf '%s\n' "$P_STAMP" > /tmp/att0w-done-20260928-120007.OK
 # The restore mode's window stamp is the argument, not P_STAMP.
 # Reuse the tree; the done marker is what the gate reads.
