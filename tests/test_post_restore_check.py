@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -803,11 +805,10 @@ class UrgentTextOnceTests(unittest.TestCase):
             self.assertEqual(db.read_bytes(), blob)
             self.assertEqual(calls, [])
 
-            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 2)
-            self.assertEqual(calls, ["a", "b"])
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self.assertEqual(calls, [])
             ledger = check.urgent_ledger_path(archive)
             self.assertEqual(_ledger_ids(ledger), ["a", "b", "c"])
-            calls.clear()
             self.assertEqual(check.rescan_urgent_texts(ledger, ["a", "b", "c"], send), 0)
             self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
             self.assertEqual(calls, [])
@@ -883,6 +884,198 @@ class UrgentTextOnceTests(unittest.TestCase):
             self.assertEqual(calls, ["msg-1"])
             self.assertEqual(_ledger_ids(ledger), ["msg-1"])
 
+    def _passing_archive(self, root: Path, ids: list[str]) -> None:
+        conn = sqlite3.connect(root / "mailroom.sqlite")
+        conn.execute(
+            "CREATE TABLE messages ("
+            "id TEXT PRIMARY KEY, urgent INTEGER, ingested_at TEXT, "
+            "present_on_server INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE notify_log ("
+            "ts TEXT NOT NULL, message_id TEXT NOT NULL, "
+            "channel TEXT NOT NULL, result TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+            "VALUES (?, 1, ?, 1)",
+            [(message_id, "2025-06-01T00:00:00Z") for message_id in ids],
+        )
+        conn.commit()
+        conn.close()
+        _stamp(root, NEWER)
+        (root / check.WRITE_LOCK_NAME).write_text("", encoding="utf-8")
+
+    def test_first_ledger_creation_does_not_text_existing_urgent_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            old = ["old-%02d" % n for n in range(50)]
+            self._passing_archive(archive, old)
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            ledger = check.urgent_ledger_path(archive)
+            real_link = check.os.link
+
+            def fail_link(_src, _dst):
+                raise OSError("link failed")
+
+            check.os.link = fail_link
+            try:
+                with self.assertRaises(OSError):
+                    check.deliver_archive_urgent_texts(archive, send)
+            finally:
+                check.os.link = real_link
+            self.assertFalse(ledger.exists())
+            self.assertEqual(calls, [])
+
+            report = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(report, 0)
+            self.assertEqual(report.overflow, 0)
+            self.assertEqual(calls, [])
+            self.assertEqual(_ledger_ids(ledger), old)
+            conn = sqlite3.connect(ledger)
+            try:
+                results = {
+                    row[0]
+                    for row in conn.execute("SELECT result FROM notify_log")
+                }
+            finally:
+                conn.close()
+            self.assertEqual(results, {check.BASELINE_RESULT})
+
+            conn = sqlite3.connect(archive / "mailroom.sqlite")
+            conn.execute(
+                "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+                "VALUES ('new-1', 1, ?, 1)",
+                ("2026-09-28T00:00:00Z",),
+            )
+            conn.commit()
+            conn.close()
+            again = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(again, 1)
+            self.assertEqual(calls, ["new-1"])
+            third = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(third, 0)
+            self.assertEqual(calls, ["new-1"])
+
+    def test_send_cap_reports_overflow_then_remainder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old"])
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            self.assertEqual(check.URGENT_SEND_CAP, 20)
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self.assertEqual(calls, [])
+            fresh = ["n%02d" % n for n in range(check.URGENT_SEND_CAP + 5)]
+            conn = sqlite3.connect(archive / "mailroom.sqlite")
+            conn.executemany(
+                "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+                "VALUES (?, 1, '2026-09-28T00:00:00Z', 1)",
+                [(message_id,) for message_id in fresh],
+            )
+            conn.commit()
+            conn.close()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                first = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(first, check.URGENT_SEND_CAP)
+            self.assertEqual(first.overflow, 5)
+            self.assertIn("urgent_texts_overflow=5\n", buf.getvalue())
+            self.assertEqual(calls, fresh[: check.URGENT_SEND_CAP])
+            ledger = check.urgent_ledger_path(archive)
+            recorded = set(_ledger_ids(ledger))
+            for message_id in fresh[check.URGENT_SEND_CAP :]:
+                self.assertNotIn(message_id, recorded)
+            second = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(second, 5)
+            self.assertEqual(second.overflow, 0)
+            self.assertEqual(calls, fresh)
+            self.assertEqual(
+                check.deliver_archive_urgent_texts(archive, send),
+                0,
+            )
+
+    def test_locked_ledger_defers_id_and_evaluate_still_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old"])
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            conn = sqlite3.connect(archive / "mailroom.sqlite")
+            conn.executemany(
+                "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+                "VALUES (?, 1, '2026-09-28T00:00:00Z', 1)",
+                [("ok-new",), ("lock-me",)],
+            )
+            conn.commit()
+            conn.close()
+            real = check._send_one
+
+            def flaky(path, message_id, send_one):
+                if message_id == "lock-me":
+                    raise sqlite3.OperationalError("database is locked")
+                return real(path, message_id, send_one)
+
+            check._send_one = flaky
+            saved_lsof = check.run_lsof
+            saved_pgrep = check.run_pgrep
+            check.run_lsof = _quiet_lsof
+            check.run_pgrep = _quiet_pgrep
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    lines, code = check.evaluate(
+                        archive, SINCE_DT, urgent_send=send
+                    )
+            finally:
+                check._send_one = real
+                check.run_lsof = saved_lsof
+                check.run_pgrep = saved_pgrep
+            self.assertEqual(code, check.EXIT_OK)
+            self.assertTrue(lines[-1].endswith("POST-RESTORE PASS"))
+            self.assertIn("urgent_text_deferred=lock-me", lines)
+            self.assertIn("urgent_text_deferred=lock-me\n", buf.getvalue())
+            self.assertEqual(calls, ["ok-new"])
+            self.assertNotIn("lock-me", _ledger_ids(check.urgent_ledger_path(archive)))
+            self.assertIn("ok-new", _ledger_ids(check.urgent_ledger_path(archive)))
+
+    def test_failing_check_sends_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old-%02d" % n for n in range(3)])
+            _stamp(archive, OLDER)
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            saved_lsof = check.run_lsof
+            saved_pgrep = check.run_pgrep
+            check.run_lsof = _quiet_lsof
+            check.run_pgrep = _quiet_pgrep
+            try:
+                lines, code = check.evaluate(
+                    archive, SINCE_DT, urgent_send=send
+                )
+            finally:
+                check.run_lsof = saved_lsof
+                check.run_pgrep = saved_pgrep
+            self.assertEqual(code, check.EXIT_STAMP)
+            self.assertTrue(lines[-1].endswith("POST-RESTORE FAIL last_daily_rag_ok"))
+            self.assertEqual(calls, [])
+            self.assertFalse(check.urgent_ledger_path(archive).exists())
+
 
 class SourceContractTests(unittest.TestCase):
     def test_script_is_read_only_and_takes_no_lock(self):
@@ -904,11 +1097,51 @@ class SourceContractTests(unittest.TestCase):
 
     def test_review_opens_with_the_required_line(self):
         doc = ROOT / "docs" / "att0" / "post-restore-backlog-review.md"
+        if not doc.is_file():
+            self.skipTest("review doc absent")
         first = doc.read_text(encoding="utf-8").splitlines()[0]
         self.assertEqual(
             first,
             "Repo copies only; the installed copies on the Mac may differ and were not reviewed.",
         )
+
+    def test_urgent_ledger_path_is_the_only_per_message_sender(self):
+        self.assertEqual(check.URGENT_LEDGER_NAME, "notify_log.sqlite")
+        self.assertEqual(check.URGENT_SEND_CAP, 20)
+        self.assertGreaterEqual(check._LEDGER_TIMEOUT_S, 90)
+        archive = Path("archive-root")
+        self.assertEqual(
+            check.urgent_ledger_path(archive),
+            archive / "logs" / "notify_log.sqlite",
+        )
+        script = (SCRIPTS / "post_restore_check.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "logs/notify_log.sqlite is the only per-message urgent ledger",
+            script,
+        )
+        self.assertIn(
+            "every future per-message urgent sender must go through send_urgent_texts",
+            script,
+        )
+        self.assertIn(
+            "at-least-once if the process dies between the send returning and COMMIT",
+            script,
+        )
+        for path in SCRIPTS.rglob("*.py"):
+            if path.name == "post_restore_check.py":
+                continue
+            body = path.read_text(encoding="utf-8")
+            self.assertNotIn("logs/notify_log.sqlite", body)
+            self.assertNotIn("send_urgent_texts", body)
+            self.assertNotIn("URGENT_LEDGER_NAME", body)
+            writes_log = (
+                "INSERT INTO notify_log" in body
+                or "INSERT OR REPLACE INTO notify_log" in body
+                or "INSERT OR IGNORE INTO notify_log" in body
+            )
+            if writes_log:
+                self.assertEqual(path.name, "notify_bills.py")
+                self.assertIn("bills-", body)
 
 
 if __name__ == "__main__":

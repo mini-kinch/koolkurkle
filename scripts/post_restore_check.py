@@ -42,11 +42,17 @@ timestamp column when one exists, otherwise the linked message's
 stamp must be strictly newer than ``--since``.
 
 ``send_urgent_texts`` delivers one urgent text per ``message_id``.
-The read-only report does not call it. The helper reads ``notify_log``
-under ``BEGIN IMMEDIATE``, calls the sender, and inserts the id only
-after that call returns. The ledger file is ``logs/notify_log.sqlite``
-with the same ``notify_log`` unique key. The report never deletes
-those rows and never writes ``mailroom.sqlite``.
+logs/notify_log.sqlite is the only per-message urgent ledger, and every future per-message urgent sender must go through send_urgent_texts.
+The helper is at-least-once if the process dies between the send returning and COMMIT.
+It reads ``notify_log`` under ``BEGIN IMMEDIATE``,
+calls the sender, and inserts the id only after that call returns.
+The first time that file is created, every urgent id that already
+exists is inserted with result ``baseline`` in that same transaction
+and is not sent. Each later call sends at most URGENT_SEND_CAP new
+ids. Ids over the cap stay unsent and unrecorded. A locked ledger
+defers that id and does not send it. The read-only report sends only
+when a sender is passed and the check result is 0. It never deletes
+ledger rows and never writes ``mailroom.sqlite``.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,7 +81,9 @@ DAILY_LOCK_NAME = "mailroom.daily.lock"
 BILLS_KEY_PREFIX = "bills-"
 URGENT_TEXT_CHANNEL = "imessage"
 URGENT_LEDGER_NAME = "notify_log.sqlite"
-_LEDGER_TIMEOUT_S = 30.0
+URGENT_SEND_CAP = 20
+BASELINE_RESULT = "baseline"
+_LEDGER_TIMEOUT_S = 90.0
 BILL_TIME_COLUMNS = (
     "created_at",
     "inserted_at",
@@ -313,6 +322,16 @@ def _ensure_notify_log(conn: sqlite3.Connection) -> None:
     )
 
 
+class _SendReport(int):
+    """Sent count. ``overflow`` and ``deferred`` ride along."""
+
+    def __new__(cls, sent, overflow=0, deferred=()):
+        obj = int.__new__(cls, sent)
+        obj.overflow = overflow
+        obj.deferred = tuple(deferred)
+        return obj
+
+
 def _connect_ledger(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
@@ -329,6 +348,99 @@ def _connect_ledger(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _discard_sqlite(path: Path) -> None:
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        extra = path if suffix == "" else Path(str(path) + suffix)
+        try:
+            extra.unlink()
+        except OSError:
+            continue
+
+
+def _unique_ids(message_ids) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in message_ids:
+        if raw is None:
+            continue
+        message_id = str(raw)
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        unique.append(message_id)
+    return unique
+
+
+def _publish_baseline_if_absent(ledger_path: Path | str, message_ids) -> bool:
+    """Create the ledger and seed baseline rows, or do nothing.
+
+    The destination appears only after the baseline transaction commits.
+    A crash before that publish leaves no ledger file to burst from.
+    A later open of an existing file does not seed again.
+    """
+    path = _ledger_file(ledger_path)
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(
+        ".%s.%d.%d.creating" % (path.name, os.getpid(), time.monotonic_ns())
+    )
+    _discard_sqlite(tmp)
+    conn = sqlite3.connect(
+        str(tmp),
+        timeout=_LEDGER_TIMEOUT_S,
+        isolation_level=None,
+    )
+    try:
+        conn.execute("PRAGMA busy_timeout=%d" % int(_LEDGER_TIMEOUT_S * 1000))
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_notify_log(conn)
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            conn.executemany(
+                "INSERT INTO notify_log(ts, message_id, channel, result) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (now, message_id, URGENT_TEXT_CHANNEL, BASELINE_RESULT)
+                    for message_id in _unique_ids(message_ids)
+                ],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            _rollback(conn)
+            raise
+    except Exception:
+        conn.close()
+        _discard_sqlite(tmp)
+        raise
+    conn.close()
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        _discard_sqlite(tmp)
+        return False
+    except OSError:
+        _discard_sqlite(tmp)
+        raise
+    _discard_sqlite(tmp)
+    return True
+
+
+def _recorded_ids(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    conn = _connect_ledger(path)
+    try:
+        rows = conn.execute(
+            "SELECT message_id FROM notify_log WHERE channel = ?",
+            (URGENT_TEXT_CHANNEL,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {str(row[0]) for row in rows if row[0] is not None}
+
+
 def _rollback(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("ROLLBACK")
@@ -342,6 +454,8 @@ def _send_one(path: Path, message_id: str, send) -> bool:
     The write lock is held across the sender call so a second run cannot
     pass the ledger check first. The row is inserted only after ``send``
     returns. A raised ``send`` rolls the transaction back and leaves no row.
+    The helper is at-least-once if the process dies between the send
+    returning and COMMIT.
     """
     conn = _connect_ledger(path)
     try:
@@ -374,26 +488,37 @@ def _send_one(path: Path, message_id: str, send) -> bool:
         conn.close()
 
 
-def send_urgent_texts(ledger_path: Path | str, message_ids, send) -> int:
+def send_urgent_texts(ledger_path: Path | str, message_ids, send) -> _SendReport:
     """Send each ``message_id`` at most once. Return how many this call sent.
 
     ``send(message_id)`` must raise when the text is not confirmed. The
     same id later in ``message_ids``, or in a later call, does not send
     again. Failed calls leave the id unrecorded so a retry can send it.
+    At most ``URGENT_SEND_CAP`` ids are sent. The rest stay unrecorded.
+    ``sqlite3.OperationalError`` defers that id and does not send it.
+    The helper is at-least-once if the process dies between the send
+    returning and COMMIT.
     """
     path = _ledger_file(ledger_path)
+    recorded = _recorded_ids(path)
+    pending = [message_id for message_id in _unique_ids(message_ids) if message_id not in recorded]
+    chosen = pending[:URGENT_SEND_CAP]
+    overflow = len(pending) - len(chosen)
     sent = 0
-    seen: set[str] = set()
-    for raw in message_ids:
-        if raw is None:
+    deferred: list[str] = []
+    for message_id in chosen:
+        try:
+            did_send = _send_one(path, message_id, send)
+        except sqlite3.OperationalError:
+            deferred.append(message_id)
             continue
-        message_id = str(raw)
-        if message_id in seen:
-            continue
-        seen.add(message_id)
-        if _send_one(path, message_id, send):
+        if did_send:
             sent += 1
-    return sent
+    if overflow:
+        sys.stdout.write("urgent_texts_overflow=%d\n" % overflow)
+    for message_id in deferred:
+        sys.stdout.write("urgent_text_deferred=%s\n" % message_id)
+    return _SendReport(sent, overflow, deferred)
 
 
 def rescan_urgent_texts(ledger_path: Path | str, message_ids, send) -> int:
@@ -431,13 +556,16 @@ def _retain_confirmed(path: Path, message_ids: list[str]) -> None:
         conn.close()
 
 
-def deliver_archive_urgent_texts(archive: Path, send) -> int:
+def deliver_archive_urgent_texts(archive: Path, send) -> _SendReport:
     """Text urgent mail ids from the archive once each.
 
-    Message ids come from ``messages.id`` where ``urgent`` is set. An id
-    already in the archive ``notify_log`` is pinned into the durable
-    ledger and is not texted. New ids go through ``send_urgent_texts``.
-    Nothing here is written to ``mailroom.sqlite``.
+    Message ids come from ``messages.id`` where ``urgent`` is set. The
+    first time ``logs/notify_log.sqlite`` is created, those ids are
+    stored with result ``baseline`` and nothing is sent. Later calls
+    send new ids through ``send_urgent_texts``, at most
+    ``URGENT_SEND_CAP`` per call. An id already in the archive
+    ``notify_log`` is pinned and is not texted. Nothing here is written
+    to ``mailroom.sqlite``.
     """
     conn = open_readonly(Path(archive) / SOR_BASENAME)
     try:
@@ -453,10 +581,12 @@ def deliver_archive_urgent_texts(archive: Path, send) -> int:
     finally:
         conn.close()
     ledger = urgent_ledger_path(archive)
+    if _publish_baseline_if_absent(ledger, pending):
+        return _SendReport(0, 0, ())
     pinned = [message_id for message_id in pending if message_id in already]
     fresh = [message_id for message_id in pending if message_id not in already]
     _retain_confirmed(ledger, pinned)
-    return rescan_urgent_texts(ledger, fresh, send)
+    return send_urgent_texts(ledger, fresh, send)
 
 
 def read_stamp(path: Path) -> str | None:
@@ -693,8 +823,15 @@ def evaluate(
         writers=writers,
         failed=failed,
     )
-    if urgent_send is not None and db_ok:
-        deliver_archive_urgent_texts(archive, urgent_send)
+    if urgent_send is not None and code == EXIT_OK:
+        report = deliver_archive_urgent_texts(archive, urgent_send)
+        extra: list[str] = []
+        if report.overflow:
+            extra.append("urgent_texts_overflow=%d" % report.overflow)
+        for message_id in report.deferred:
+            extra.append("urgent_text_deferred=%s" % message_id)
+        if extra:
+            lines = lines[:-1] + extra + lines[-1:]
     return lines, code
 
 
