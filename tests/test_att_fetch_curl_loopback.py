@@ -253,35 +253,14 @@ def _redact(blob: bytes) -> str:
 
 
 class CurlLoopbackLiteralTests(unittest.TestCase):
-    @unittest.expectedFailure
-    def test_real_curl_returns_literal_on_one_connection(self) -> None:
-        """R3 probe. Expected to fail on this curl: the literal is not intact.
+    def test_imaplib_returns_literal_on_one_connection(self) -> None:
+        """The part client is imaplib. A tag-like literal comes back intact.
 
-        Measured /usr/bin/curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-        OpenSSL/3.0.13. Release-Date: 2023-12-06, security patched:
-        8.5.0-2ubuntu10.9.
-
-        EXAMINE state did stay on one TCP connection. The fetch process
-        sent CAPABILITY, LOGIN, EXAMINE, UID FETCH, LOGOUT on connection 2.
-        A prior process sent CAPABILITY, LOGIN, EXAMINE, LOGOUT on
-        connection 1. No SELECT, STORE, or EXPUNGE.
-
-        The stub's 64-byte literal contained CRLF, a line starting with
-        ``* ``, the line ``A003 OK``, and the live tag line ``A004 OK``.
-        Curl's custom-request reader forwarded untagged ``*`` lines only
-        and treated the embedded ``A004 OK`` as the end of the response.
-        Stdout for that process was the EXAMINE untagged lines plus
-        ``* 1 FETCH (BODY[1]<0> {64}`` and ``* 1 FETCH (FLAGS (\\Seen))``.
-        The other literal bytes were not returned. ``fetch_part`` raised
-        ``FetchRefuse('part fetch failed')`` and stored nothing.
-
-        R1, R2, and R4 are intentionally not implemented from this result.
+        The stub literal contains CRLF, a ``* `` line, ``A003 OK``, and the
+        live tag line. The transcript is LOGIN, EXAMINE, UID FETCH. No
+        SELECT, STORE, or EXPUNGE, and curl is not spawned.
         """
-        if not os.path.exists(CURL_BIN):
-            self.skipTest("pinned curl binary /usr/bin/curl is absent")
-        version = _curl_version_text()
-        sys.__stderr__.write("curl --version\n%s" % version)
-
+        version = "imaplib"
         runs = []
         real_run = subprocess.run
 
@@ -359,22 +338,17 @@ class CurlLoopbackLiteralTests(unittest.TestCase):
                 server.close()
 
         report = self._report(version, runs, server, got, error)
-        sys.__stderr__.write(report + "\n")
         trios = [commands for commands in server.connections if _trio(commands)]
         self.assertEqual(len(trios), 1, report)
         for commands in server.connections:
             for command in commands:
                 self.assertFalse(_forbidden(command), report)
-        self.assertTrue(runs, report)
-        for argv, _rc, _stdout, _stderr in runs:
-            self.assertEqual(argv[0], CURL_BIN, report)
-            self.assertNotIn("-k", argv, report)
-            self.assertNotIn("--insecure", argv, report)
-            for arg in argv:
-                self.assertNotIn(SECRET, str(arg), report)
+                self.assertNotIn("SELECT", _verb(command), report)
+        self.assertEqual(runs, [], report)
         self.assertIsNone(error, report)
         self.assertIsNotNone(server.served, report)
         self.assertEqual(got, server.served, report)
+        self.assertNotIn(SECRET.encode("ascii"), got or b"", report)
 
     def _report(self, version, runs, server, got, error) -> str:
         lines = [

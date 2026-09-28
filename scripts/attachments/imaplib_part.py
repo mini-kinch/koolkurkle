@@ -148,6 +148,14 @@ def interpret_peek(data, offset: int) -> bytes:
     return b""
 
 
+def _unquote_mailbox(mailbox: str) -> str:
+    """imaplib quotes the name. Callers that already quoted must not double it."""
+    text = str(mailbox)
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        return text[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return text
+
+
 def _default_opener(host: str, port: int, *, ssl_context, timeout: float):
     return imaplib.IMAP4_SSL(host, int(port), ssl_context=ssl_context, timeout=timeout)
 
@@ -224,8 +232,9 @@ class ImaplibPartConn:
             _refuse("imap select failed")
         if any(char in str(mailbox) for char in "\r\n\x00"):
             _refuse("missing mailbox")
+        name = _unquote_mailbox(str(mailbox))
         return self._call(
-            lambda: self._raw.select(str(mailbox), readonly=True),
+            lambda: self._raw.select(name, readonly=True),
             "imap select failed",
         )
 
