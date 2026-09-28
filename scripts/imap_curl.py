@@ -39,10 +39,11 @@ except ImportError:  # python3 scripts/attachments/meta_fill.py
     from bodystructure import ParseError, bodystructure_from_fetch, parse_sexp  # type: ignore
 
 try:
-    from imap_keychain import KeychainError, read_imap_app_password
+    from imap_keychain import KeychainError, KeychainTimeout, read_imap_app_password
 except ImportError:  # package import path
     from scripts.imap_keychain import (  # type: ignore
         KeychainError,
+        KeychainTimeout,
         read_imap_app_password,
     )
 
@@ -547,8 +548,11 @@ class CurlImapsClient:
         fn = read_imap_app_password if self._password_fn is None else self._password_fn
         try:
             password = fn()
-        except KeychainError:
-            raise CurlImapError("imap keychain password is missing") from None
+        except KeychainTimeout:
+            raise CurlImapError("imap keychain read timed out") from None
+        except KeychainError as exc:
+            message = str(exc) or "imap keychain password is missing"
+            raise CurlImapError(message) from None
         if not password:
             raise CurlImapError("imap keychain password is missing")
         self._password = password

@@ -31,11 +31,11 @@ failure is marked scanned. A second connection fails closed. After
 each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
 no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
-``/usr/bin/security``. The lookup is
-``/usr/bin/security find-generic-password -s mailroom.imap.app-password -w``,
-with one fallback to ``mailroom.icloud.app-password`` when the default
-item misses. An empty IMAP user fails closed in the curl client before
-LOGIN.
+``/usr/bin/security``. The item name comes from ``MAILROOM_KEYCHAIN_ITEM``
+or ``MAILROOM_KEYCHAIN_CONFIG`` (placeholder ``<keychain-item>``). The
+read deadline is 15 seconds. A timeout is process status 5
+(``error: imap keychain read timed out``). An empty IMAP user fails
+closed in the curl client before LOGIN.
 Curl receives the password only on stdin (``-K -``,
 ``user = "..."``), never in argv, the environment, or a file. TLS
 verification stays on (no ``-k``). There is no password option and no
@@ -118,6 +118,8 @@ _DEFAULT_MAX_MESSAGES = 200
 _DEFAULT_MAX_PARTS = 100
 _DEFAULT_TIMEOUT_S = 30
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
+# Keychain subprocess deadline. Not argparse and not the writer lock (both 2).
+KEYCHAIN_TIMEOUT_EXIT = 5
 
 
 class FillRefuse(RuntimeError):
@@ -1266,6 +1268,14 @@ def _env_text(env: dict[str, str], args_value: str | None, key: str) -> str | No
     return value
 
 
+def report_keychain_timeout(report: dict[str, Any]) -> bool:
+    """True when the password read hit its deadline."""
+    for item in report.get("curl_failures") or []:
+        if str(item) == "imap keychain read timed out":
+            return True
+    return False
+
+
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -1296,7 +1306,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
     mailbox = _env_text(environ, args.mailbox, "MAILROOM_IMAP_MAILBOX")
 
     def _password_fn() -> str:
-        return read_imap_app_password()
+        return read_imap_app_password(env=environ)
 
     try:
         report = fill_metadata(
@@ -1323,6 +1333,9 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         sys.stderr.write("error: sqlite fill failed (%s)\n" % type(exc).__name__)
         return 2
     sys.stdout.write(format_report(report))
+    if report_keychain_timeout(report):
+        sys.stderr.write("error: imap keychain read timed out\n")
+        return KEYCHAIN_TIMEOUT_EXIT
     return 0
 
 
