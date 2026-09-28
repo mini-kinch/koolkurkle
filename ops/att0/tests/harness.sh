@@ -27,6 +27,19 @@ fi
 if /usr/bin/grep -n -E 'search_resume_watchdog\.py arm|search_resume_watchdog\.py schedule' "$SCRIPT"; then
     fail "watchdog arm or schedule entry point"
 fi
+# Free-lock gap: the only watchdog call between A2-OK and A3-OK is status.
+# Matching the words arm or schedule here would hit the comment that names them.
+if ! /usr/bin/awk '
+    /say A2-OK$/ { on = 1; next }
+    /say A3-OK$/ { on = 0; next }
+    on && /search_resume_watchdog\.py/ {
+        n++
+        if ($0 !~ / status/) bad = 1
+    }
+    END { if (n != 1 || bad) exit 1 }
+' "$SCRIPT"; then
+    fail "gap watchdog call is not status-only"
+fi
 if /usr/bin/grep -n -E 'curl\.\*imap|run_mailroom_daily' "$SCRIPT"; then
     fail "fail-open process pattern"
 fi
@@ -217,13 +230,27 @@ test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'group_empty=1' /tmp/att0-happy || fail "happy group empty"
 /usr/bin/grep -q 'group_empty=0' /tmp/att0-happy && fail "happy group occupied"
 /usr/bin/grep -q 'search_resume_watchdog.py arm' /tmp/att0-happy && fail "happy armed"
+/usr/bin/grep -q 'search_resume_watchdog.py schedule' /tmp/att0-happy && fail "happy scheduled"
 rc=$(run_mode /tmp/att0-report report 20260928-120001)
-expect_rc "$rc" 0 /tmp/att0-report
-/usr/bin/grep -q 'ATT0-DONE PASS' /tmp/att0-report || fail "report pass"
+expect_rc "$rc" 1 /tmp/att0-report
+/usr/bin/grep -q '^ATT0-DONE PASS$' /tmp/att0-report && fail "report overall pass"
+/usr/bin/grep -q 'ATT0-DONE FAIL rule=a4-r1v2' /tmp/att0-report || fail "report r1v2 verdict"
 /usr/bin/grep -q 'ATT0-DONE RULE a2-band PASS' /tmp/att0-report || fail "report band"
+/usr/bin/grep -q 'ATT0-DONE RULE a2-gone PASS' /tmp/att0-report || fail "report gone"
+/usr/bin/grep -q 'ATT0-DONE RULE a2-index PASS' /tmp/att0-report || fail "report index"
+/usr/bin/grep -q 'ATT0-DONE RULE a2-unscanned PASS' /tmp/att0-report || fail "report unscanned"
+/usr/bin/grep -q 'ATT0-DONE RULE a2-fill PASS' /tmp/att0-report || fail "report fill"
+/usr/bin/grep -q 'ATT0-DONE RULE a2-identity PASS' /tmp/att0-report || fail "report identity"
+/usr/bin/grep -q 'ATT0-DONE RULE d-max PASS' /tmp/att0-report || fail "report d-max"
 /usr/bin/grep -q 'ATT0-DONE RULE d-late PASS' /tmp/att0-report || fail "report d-late"
 /usr/bin/grep -q 'ATT0-DONE RULE d-3.5b PASS' /tmp/att0-report || fail "report d-3.5b"
+/usr/bin/grep -q 'ATT0-DONE RULE a3-44 PASS' /tmp/att0-report || fail "report 44"
+/usr/bin/grep -q 'ATT0-DONE RULE a3-eligible PASS' /tmp/att0-report || fail "report eligible"
+/usr/bin/grep -q 'ATT0-DONE RULE a4-counts PASS' /tmp/att0-report || fail "report a4"
+/usr/bin/grep -q 'ATT0-DONE RULE a4-quick PASS' /tmp/att0-report || fail "report quick"
+/usr/bin/grep -q 'ATT0-DONE RULE a4-r1v2 FAIL' /tmp/att0-report || fail "report r1v2 rule"
 /usr/bin/grep -q 'ATT0-DONE RULE leak-w21 PASS' /tmp/att0-report || fail "report leak"
+/usr/bin/grep -q 'ATT0-DONE RULE search-restored PASS' /tmp/att0-report || fail "report search"
 printf '%s\n' "HAPPY-WINDOW-OK"
 
 ATT0_FAKE_STAMP=20260928-120011

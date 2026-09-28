@@ -14,10 +14,14 @@
 # /tmp/phaseP-offline-<P_STAMP>.OK, /tmp/phaseP-p8-<P_STAMP>.OK and
 # /tmp/phaseP-state-<P_STAMP> before it creates a directory or a
 # transcript. The Keychain and IMAP pre-check is a meta_fill dry-run
-# on a scratch copy. report is read-only. The +26 search-resume
+# on a scratch copy. report is read-only: it recomputes the window
+# verdict from that window's logs and markers, and it does not write.
+# Mailroom's posted verdict stays official. The +26 search-resume
 # deadline is written once, before search bootout, and dropped when A2
-# takes the writer lock. Nothing between A2 and A3 calls the watchdog
-# arm or schedule entry points.
+# takes the writer lock. Nothing in window, rollback, or restore-daily
+# arms that +26 restore, or any other restore timer, in the free-lock
+# gap between A2 and A3. The gap calls watchdog status only. The only
+# deadline there is the S+50 file plus the S+51 budget.
 #
 # D_P is re-read here by the P8 D query, read-only, on Phase P's scratch
 # copy $HOME/MailArchive/dryrun/att0-livepath-<P_STAMP>/mailroom.sqlite.
@@ -682,14 +686,14 @@ run_d_query() {
 
 # A2 item 1 and item 7. Every index line has scanned_gone=0, and
 # missing_present <= max(10, present/2). Folder names are not read.
-d_indexes_ok() {
+# indexes_hold is quiet so the read-only report can reuse it.
+indexes_hold() {
     _log=$1
     _n=$("$AWK" 'BEGIN { n = 0 } /^idx=/ { n++ } END { print n + 0 }' "$_log")
     if [ "${_n:-0}" -lt 1 ]; then
-        say STOP-d-no-index
         return 1
     fi
-    if ! "$AWK" '
+    "$AWK" '
         function val(line, key,    n, i, parts, kv) {
             n = split(line, parts, " ")
             for (i = 1; i <= n; i++) {
@@ -710,7 +714,17 @@ d_indexes_ok() {
             if (m + 0 > cap) bad = 1
         }
         END { exit bad ? 1 : 0 }
-    ' "$_log"; then
+    ' "$_log"
+}
+
+d_indexes_ok() {
+    _log=$1
+    _n=$("$AWK" 'BEGIN { n = 0 } /^idx=/ { n++ } END { print n + 0 }' "$_log")
+    if [ "${_n:-0}" -lt 1 ]; then
+        say STOP-d-no-index
+        return 1
+    fi
+    if ! indexes_hold "$_log"; then
         say STOP-d-index
         return 1
     fi
@@ -2092,8 +2106,10 @@ do_window() {
     fi
     say SCHEMA-SHA-OK
     # Free-lock gap before A3. A2's writer-lock drop already removed +26.
-    # Do not call watchdog arm or schedule here. The only remaining
-    # deadline is the S+50 file plus the S+51 budget check below.
+    # window, rollback, and restore-daily do not arm +26, and they do
+    # not arm any other restore timer, in this gap. status is the only
+    # watchdog call here. The only deadline is the S+50 file plus the
+    # S+51 budget check below.
     _glog="$LOGS/att0w-gap-${STAMP}.log"
     if ! run_group 30 "$_glog" "$PYTHON" "$S_DIR/search_resume_watchdog.py" status; then
         say STOP-gap-status
@@ -2380,9 +2396,91 @@ do_restore_daily() {
     WANTED_RC=3
 }
 
-# Read-only verdict from the window transcript, its logs, and /tmp markers.
-# D_late is D_A - D_W from the transcript line, not scanned_gone.
-# R1 v2 K_OK lines stay out of this verdict until the recipe is pinned.
+# Quiet helpers for report. They do not print and they do not write.
+is_uint() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+read_total() {
+    _file=$1
+    D_PRESENT=
+    D_MISSING=
+    D_TOTAL=
+    D_GONE=
+    D_SCANNED_GONE=
+    D_UNSCANNED=
+    if [ ! -f "$_file" ]; then
+        return 1
+    fi
+    _tline=$("$AWK" '/^TOTAL / { print; exit }' "$_file" 2>/dev/null || true)
+    parse_d_line "$_tline" || return 1
+    return 0
+}
+
+fill_gates_ok() {
+    _log=$1
+    if [ ! -f "$_log" ]; then
+        return 1
+    fi
+    if has_line "$_log" "falling back"; then
+        return 1
+    fi
+    if has_line "$_log" "PARTIAL"; then
+        return 1
+    fi
+    if ! has_line "$_log" "curl_failures=[]"; then
+        return 1
+    fi
+    if ! has_line "$_log" "bytes_stored=0"; then
+        return 1
+    fi
+    if ! has_line "$_log" "capped=0"; then
+        return 1
+    fi
+    if ! has_line "$_log" "uidvalidity_mismatch=0"; then
+        return 1
+    fi
+    if ! has_line "$_log" "literal_dropped=0"; then
+        return 1
+    fi
+    if ! has_line "$_log" "literal_truncated=0"; then
+        return 1
+    fi
+    if ! has_line "$_log" "filenames=0"; then
+        return 1
+    fi
+    return 0
+}
+
+fill_take() {
+    _log=$1
+    FILL_MESSAGES=
+    FILL_ERRORS=
+    FILL_CAPPED=
+    FILL_ELIGIBLE=
+    if [ ! -f "$_log" ]; then
+        return 1
+    fi
+    FILL_MESSAGES=$("$AWK" -F= '/^messages=/ { print $2; exit }' "$_log" 2>/dev/null || true)
+    FILL_ERRORS=$("$AWK" -F= '/^errors=/ { print $2; exit }' "$_log" 2>/dev/null || true)
+    FILL_CAPPED=$("$AWK" -F= '/^capped=/ { print $2; exit }' "$_log" 2>/dev/null || true)
+    FILL_ELIGIBLE=$("$AWK" -F= '/^eligible=/ { print $2; exit }' "$_log" 2>/dev/null || true)
+    is_uint "$FILL_MESSAGES" || return 1
+    is_uint "$FILL_ERRORS" || return 1
+    is_uint "$FILL_CAPPED" || return 1
+    is_uint "$FILL_ELIGIBLE" || return 1
+    return 0
+}
+
+# Read-only verdict from the window's own logs and /tmp markers.
+# A2-A4 numbers are recomputed from att0w-dp/dw/da, the fill logs, and
+# the A4 log. D_late is D_A - D_W. parts_truncated is not a gate.
+# a4-r1v2 passes only when K_OK, lines=34, and LOGICAL_MATCH are present.
+# The R1 v2 recipe was not uploaded, so that rule fails closed.
+# Mailroom's posted verdict stays the official run verdict.
 do_report() {
     W_STAMP=$1
     MODE=report
@@ -2414,24 +2512,89 @@ do_report() {
     else
         _rule window-exit FAIL
     fi
-    _dline=
-    if [ -f "$_tr" ]; then
-        _dline=$("$AWK" '/D-CHECK-OK/ { print; exit }' "$_tr")
+    _dp="$LOGS/att0w-dp-${W_STAMP}.log"
+    _dw="$LOGS/att0w-dw-${W_STAMP}.log"
+    _da="$LOGS/att0w-da-${W_STAMP}.log"
+    _reh="$LOGS/att0w-reh-fill-${W_STAMP}.log"
+    _a3="$LOGS/att0w-a3-${W_STAMP}.log"
+    _a4="$LOGS/att0w-a4-${W_STAMP}.log"
+    _r1="$LOGS/att0w-r1-${W_STAMP}.log"
+    _gap="$LOGS/att0w-gap-${W_STAMP}.log"
+    _rp=
+    _rw=
+    _rgone=
+    _runsc=
+    _ra=
+    _ragone=
+    _raunsc=
+    if read_total "$_dp"; then
+        _rp=$D_TOTAL
     fi
-    _rp=$(field_of "${_dline:-}" D_P)
-    _rw=$(field_of "${_dline:-}" D_W)
-    case "${_rp:-x}" in
-        ''|*[!0-9]*) _rp= ;;
-    esac
-    case "${_rw:-x}" in
-        ''|*[!0-9]*) _rw= ;;
-    esac
-    if [ -n "$_rp" ] && [ -n "$_rw" ] && [ "$_rw" -ge "$_rp" ] && [ "$_rw" -le $((_rp + D_BAND)) ]; then
+    if read_total "$_dw"; then
+        _rw=$D_TOTAL
+        _rgone=$D_GONE
+        _runsc=$D_UNSCANNED
+    fi
+    if read_total "$_da"; then
+        _ra=$D_TOTAL
+        _ragone=$D_GONE
+        _raunsc=$D_UNSCANNED
+    fi
+    _rm=
+    _re=
+    _rcap=
+    _rel=
+    _am=
+    _ae=
+    _acap=
+    _ael=
+    if fill_take "$_reh"; then
+        _rm=$FILL_MESSAGES
+        _re=$FILL_ERRORS
+        _rcap=$FILL_CAPPED
+        _rel=$FILL_ELIGIBLE
+    fi
+    if fill_take "$_a3"; then
+        _am=$FILL_MESSAGES
+        _ae=$FILL_ERRORS
+        _acap=$FILL_CAPPED
+        _ael=$FILL_ELIGIBLE
+    fi
+    _late=
+    if is_uint "$_ra" && is_uint "$_rw"; then
+        _late=$((_ra - _rw))
+    fi
+    if is_uint "$_rp" && is_uint "$_rw" && [ "$_rw" -ge "$_rp" ] && [ "$_rw" -le $((_rp + D_BAND)) ]; then
         _rule a2-band PASS
     else
         _rule a2-band FAIL
     fi
-    if [ -n "$_rp" ] && [ -n "$_rw" ] && [ "$_rp" -le "$D_MAX" ] && [ "$_rw" -le "$D_MAX" ]; then
+    if is_uint "$_rgone" && [ "$_rgone" = "$G_EXPECT" ]; then
+        _rule a2-gone PASS
+    else
+        _rule a2-gone FAIL
+    fi
+    if [ -f "$_dw" ] && indexes_hold "$_dw"; then
+        _rule a2-index PASS
+    else
+        _rule a2-index FAIL
+    fi
+    if is_uint "$_runsc" && is_uint "$_re" && [ "$_runsc" = "$_re" ]; then
+        _rule a2-unscanned PASS
+    else
+        _rule a2-unscanned FAIL
+    fi
+    if fill_gates_ok "$_reh"; then
+        _rule a2-fill PASS
+    else
+        _rule a2-fill FAIL
+    fi
+    if is_uint "$_rm" && is_uint "$_re" && is_uint "$_rcap" && is_uint "$_rel" && [ $((_rm + _re + _rcap)) = "$_rel" ]; then
+        _rule a2-identity PASS
+    else
+        _rule a2-identity FAIL
+    fi
+    if is_uint "$_rp" && is_uint "$_rw" && [ "$_rp" -le "$D_MAX" ] && [ "$_rw" -le "$D_MAX" ]; then
         _rule d-max PASS
     else
         _rule d-max FAIL
@@ -2449,31 +2612,86 @@ do_report() {
     else
         _rule d-3.5b FAIL
     fi
-    _late=
     _lline=
+    _tlate=
     if [ -f "$_tr" ]; then
         _lline=$("$AWK" '/D_late=/ { print; exit }' "$_tr")
-        _late=$(field_of "${_lline:-}" D_late)
+        _tlate=$(field_of "${_lline:-}" D_late)
     fi
-    case "${_late:-x}" in
-        ''|*[!0-9]*) _late= ;;
+    case "${_tlate:-x}" in
+        ''|*[!0-9]*) _tlate= ;;
     esac
-    if [ -n "$_late" ] && [ "$_late" -le "$D_LATE_MAX" ] && text_has "${_lline:-}" "auto (rule A3)"; then
+    if is_uint "$_late" && [ -n "$_tlate" ] && [ "$_late" = "$_tlate" ] && [ "$_late" -le "$D_LATE_MAX" ] && text_has "${_lline:-}" "auto (rule A3)"; then
         _rule d-late PASS
     else
         _rule d-late FAIL
+    fi
+    if is_uint "$_ragone" && [ "$_ragone" = "$G_EXPECT" ]; then
+        _rule a3-gone PASS
+    else
+        _rule a3-gone FAIL
+    fi
+    if [ -f "$_da" ] && indexes_hold "$_da"; then
+        _rule a3-index PASS
+    else
+        _rule a3-index FAIL
+    fi
+    if is_uint "$_raunsc" && is_uint "$_ae" && [ "$_raunsc" = "$_ae" ]; then
+        _rule a3-unscanned PASS
+    else
+        _rule a3-unscanned FAIL
+    fi
+    if fill_gates_ok "$_a3"; then
+        _rule a3-fill PASS
+    else
+        _rule a3-fill FAIL
+    fi
+    if is_uint "$_am" && is_uint "$_ae" && is_uint "$_acap" && is_uint "$_ael" && [ $((_am + _ae + _acap)) = "$_ael" ]; then
+        _rule a3-identity PASS
+    else
+        _rule a3-identity FAIL
+    fi
+    if is_uint "$_ael" && is_uint "$_rel" && [ "$_ael" = "$_rel" ]; then
+        _rule a3-eligible PASS
+    else
+        _rule a3-eligible FAIL
+    fi
+    if is_uint "$_ae" && is_uint "$_ra" && is_uint "$_rw" && is_uint "$_late"; then
+        _expect=$((G_EXPECT + BASELINE_44 + _ra))
+        _cap=$((G_EXPECT + BASELINE_44 + _rw + _late))
+        if [ "$_ae" = "$_expect" ] && [ "$_ae" -le "$_cap" ]; then
+            _rule a3-44 PASS
+        else
+            _rule a3-44 FAIL
+        fi
+    else
+        _rule a3-44 FAIL
     fi
     if [ -f "$_tr" ] && has_line "$_tr" "A2-OK" && has_line "$_tr" "A3-OK" && has_line "$_tr" "R1-OK" && has_line "$_tr" "ASK-MAIL-UNCHANGED-OK"; then
         _rule writers PASS
     else
         _rule writers FAIL
     fi
+    _scans=
+    if [ -f "$_a4" ]; then
+        _scans=$("$AWK" -F= '/^a4_scans=/ { print $2; exit }' "$_a4" 2>/dev/null || true)
+    fi
+    if [ -f "$_a4" ] && has_line "$_a4" "a4_non_att0=ok" && has_line "$_a4" "a4_result=ok" && is_uint "$_scans" && is_uint "$_am" && [ "$_scans" = "$_am" ]; then
+        _rule a4-counts PASS
+    else
+        _rule a4-counts FAIL
+    fi
+    if [ -f "$_r1" ] && "$AWK" '$0 == "ok" { f = 1 } END { exit f ? 0 : 1 }' "$_r1"; then
+        _rule a4-quick PASS
+    else
+        _rule a4-quick FAIL
+    fi
     _leak=0
     for _f in "$_tr" "$LOGS"/att0w-*-"${W_STAMP}".log; do
         if [ ! -f "$_f" ]; then
             continue
         fi
-        if "$AWK" 'index($0, "falling back") || index($0, "IMAP_APP_PASSWORD=") || index($0, "MAILROOM_IMAP_PASSWORD=") { found = 1 } END { exit found ? 0 : 1 }' "$_f"; then
+        if "$AWK" 'index($0, "falling back") || index($0, "IMAP_APP_PASSWORD=") || index($0, "MAILROOM_IMAP_PASSWORD=") || index($0, "LOGIN ") || index($0, "Subject:") { found = 1 } END { exit found ? 0 : 1 }' "$_f"; then
             _leak=1
         fi
     done
@@ -2486,10 +2704,32 @@ do_report() {
     if [ ! -f "$_tr" ] || ! "$AWK" '{ n = split($0, a, " "); if (a[n] == "SAFE-STATE") f = 1 } END { exit f ? 0 : 1 }' "$_tr"; then
         _safe=0
     fi
-    if [ "$_safe" = "1" ] && has_line "$_tr" "S2-OK" && has_line "$_tr" "search=restored" && has_line "$_tr" "GAP-D26-DROPPED"; then
+    if [ "$_safe" = "1" ] && has_line "$_tr" "S2-OK" && has_line "$_tr" "search=restored" && has_line "$_tr" "GAP-D26-DROPPED" && [ -f "$_gap" ] && has_line "$_gap" "d26_live=no"; then
         _rule search-restored PASS
     else
         _rule search-restored FAIL
+    fi
+    _k=1
+    _ln=1
+    _lm=1
+    for _f in "$_tr" "$_a4" "$_r1"; do
+        if [ ! -f "$_f" ]; then
+            continue
+        fi
+        if has_line "$_f" "K_OK"; then
+            _k=0
+        fi
+        if has_line "$_f" "lines=34"; then
+            _ln=0
+        fi
+        if has_line "$_f" "LOGICAL_MATCH"; then
+            _lm=0
+        fi
+    done
+    if [ "$_k" = "0" ] && [ "$_ln" = "0" ] && [ "$_lm" = "0" ]; then
+        _rule a4-r1v2 PASS
+    else
+        _rule a4-r1v2 FAIL
     fi
     if [ -n "$_bad" ]; then
         printf '%s\n' "ATT0-DONE FAIL rule=${_bad}"

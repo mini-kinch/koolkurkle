@@ -2,9 +2,9 @@
 
 Phase P is `phaseP_473b59a0.sh` (sha256 `1ff2204ba32e4adcd66f725cdb8c8dce52973813f74d1da0ea4df041d99c81b2`). This card does not place or rewrite it. It already passed for `P_STAMP=20260928-011821`. This card places `ops/att0/att0_l1.sh` and runs one mode per call. There is no `phasep` mode and no `keychain-primer` mode. The clone is `/tmp/pr48b`. The branch is `cursor/att0-l1-run-scripts`.
 
-Script sha256: `15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89`
+Script sha256: `cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea`
 
-Commit: `5ac934e2a6e3f8f471f2841a0ea1444d5f04287a`
+Commit: `COMMIT_SHA_PENDING`
 
 Run each one-liner from a shell that has `set -C`. Placement writes `/tmp/att0_l1.sh` only when that path is absent. If the path already exists, the sha256 must already match; a different sha stops the chain before `<MODE>-PLACED`. Each step prints its own marker. `window`, `rollback`, and `restore-daily` print a stamp, numbered step lines, a `SAFE-STATE` line, and one `SUMMARY` line. `report` prints a stamp and a `SUMMARY` line and does not run `SAFE-STATE`. The script does not call the Keychain binary. `window` refuses, before it creates a directory or a transcript, unless `/tmp/phaseP-offline-<P_STAMP>.OK`, `/tmp/phaseP-p8-<P_STAMP>.OK`, and `/tmp/phaseP-state-<P_STAMP>` are present.
 
@@ -33,7 +33,7 @@ Exit codes: `0` done, `1` stopped before a live SoR write, `2` usage, `3` failur
 ## window
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ]; else git show 5ac934e2a6e3f8f471f2841a0ea1444d5f04287a:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
 ```
 
 The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, restore-daily, and report.
@@ -41,7 +41,7 @@ The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, res
 ## rollback
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ]; else git show 5ac934e2a6e3f8f471f2841a0ea1444d5f04287a:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
 ```
 
 ## restore-daily
@@ -49,20 +49,26 @@ cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/a
 Refuses unless `/tmp/att0w-done-<WINDOW_STAMP>.OK` or `/tmp/att0r-done-<WINDOW_STAMP>.OK` exists.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ]; else git show 5ac934e2a6e3f8f471f2841a0ea1444d5f04287a:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
 ```
 
 ## report
 
-Read-only. No network, no Keychain, no writer.
+`report <WINDOW_STAMP>` is the done-report checker. There is no second script. It reads that window's transcript, its `att0w-*` logs, and `/tmp/att0w-done-<WINDOW_STAMP>.OK`. It does not write, and it does not use the network or the Keychain. Mailroom's posted verdict stays the official run verdict.
+
+Each rule is one line, `ATT0-DONE RULE <id> PASS` or `FAIL`. The last line is `ATT0-DONE PASS` or `ATT0-DONE FAIL rule=<id>`. A2–A4 are recomputed from `att0w-dp`, `att0w-dw`, `att0w-da`, `att0w-reh-fill`, `att0w-a3`, `att0w-a4`, and `att0w-r1`. `D_W` must sit in `[D_P, D_P+D_BAND]` with `D_BAND=50`. Any `falling back`, `LOGIN `, or `Subject:` line is `leak-w21` FAIL. `parts_truncated` is not a gate.
+
+`a4-r1v2` passes only when the logs contain `K_OK`, `lines=34`, and `LOGICAL_MATCH`. Those are the plan v1.17 R1 v2 digest lines. The recipe was not uploaded, so a window that otherwise passed reports `ATT0-DONE FAIL rule=a4-r1v2`. That failure is fail-closed. It is not a live SoR failure.
+
+Nothing in `window`, `rollback`, or `restore-daily` arms the watchdog's +26 minute search restore, or any other restore timer, in the free-lock gap between A2 and A3. That gap calls `search_resume_watchdog.py status` only. The only deadline there is the S+50 file written before search bootout, plus the S+51 budget.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ]; else git show 5ac934e2a6e3f8f471f2841a0ea1444d5f04287a:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 15d243dbe75a56842a5abd024c54814f450022c2e956abd3829ccfc313449e89 ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = cbafa99061491faf8adafa96ccce100c0b0394e7133f3c38dcb404eed2f742ea ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
 ```
 
 ## TODO-PIN
 
-- Plan v1.17 PASS items that need the R1 v2 digest recipe (`K_OK lines=<EXPECT_PRE>`, AFTER `K_OK lines=34`, and `LOGICAL_MATCH`) stay open. That recipe file was not in the upload. Step 6 does `PRAGMA quick_check`, the before/after sha, non-ATT-0 table identity, and the A4 count rules. It prints `R1-V2-TODO-PIN recipe-absent` and does not invent the digest. AR-R verifies `quick_check=ok` inside the restore and does not invent `K_OK lines=<EXPECT_PRE>`.
+- Plan v1.17 PASS items that need the R1 v2 digest recipe (`K_OK lines=<EXPECT_PRE>`, AFTER `K_OK lines=34`, and `LOGICAL_MATCH`) stay open. That recipe file was not in the upload. Step 6 does `PRAGMA quick_check`, the before/after sha, non-ATT-0 table identity, and the A4 count rules. It prints `R1-V2-TODO-PIN recipe-absent` and does not invent the digest. `report` records that gap as `ATT0-DONE FAIL rule=a4-r1v2`. AR-R verifies `quick_check=ok` inside the restore and does not invent `K_OK lines=<EXPECT_PRE>`.
 - Verbatim S1 v7, A2 v10, A3 v10, AR-R v11, and S2 v6 fence strings that asked a person to read a diff are replaced by the mechanical checks in Part A. The 18:55 and 19:50–20:20 fences stay off because the daily is held.
 - Legacy attachment rows: an absent `attachments` table counts as 0.
 - The 15s access probe inside `window` is a `meta_fill` dry-run on a scratch copy (`--max-messages 1 --timeout 10`), in its own process group. This script does not call the Keychain binary. A `falling back` line is a STOP. Phase P `fill` is the Keychain read.
