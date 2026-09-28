@@ -969,6 +969,7 @@ write_helper_pl() {
 use strict;
 use warnings;
 use Errno qw(EINTR);
+use POSIX qw(WNOHANG);
 my $alarm_s = shift @ARGV;
 my $log = shift @ARGV;
 my $term_wait = shift @ARGV;
@@ -1012,25 +1013,46 @@ if ($reader == 0) {
 close $rh;
 my $timed_out = 0;
 my $child_status = -1;
-local $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
+# The alarm only marks the deadline. It does not kill. Killing here
+# would be the timeout-only path. The reap below runs on every exit.
+local $SIG{ALRM} = sub { $timed_out = 1; };
 alarm($alarm_s);
-while (1) {
-    my $w = waitpid($pid, 0);
+# Poll. A restarted wait would sit until the leader exits and would
+# miss the deadline when the leader ignores the alarm.
+while (!$timed_out && $child_status < 0) {
+    my $w = waitpid($pid, WNOHANG);
     if ($w == $pid) {
         $child_status = $?;
         last;
     }
-    if ($timed_out) {
+    if ($w < 0 && $! != EINTR) {
         last;
     }
-    next if $w < 0 && $! == EINTR;
-    last;
+    select(undef, undef, undef, 0.2);
 }
 alarm(0);
+# Every child exit, including a normal one. An inner alarm can reap
+# only the leader and leave meta_fill, curl, or security in this group.
+# TERM, wait, then KILL to -pgid. An empty group is harmless.
+# with_writer_lock.py, meta_fill.py, and imap_curl.py do not call
+# setsid or start_new_session, so every descendant stays in the group.
+die "refusing to signal the current group\n" if $pid <= 1;
 kill "TERM", -$pid;
-sleep $term_wait;
+my $left = $term_wait;
+while ($left > 0) {
+    my $slept = sleep($left);
+    last if $slept <= 0;
+    $left -= $slept;
+}
 kill "KILL", -$pid;
-waitpid($pid, 0);
+if ($child_status < 0) {
+    my $w = waitpid($pid, 0);
+    if ($w == $pid) {
+        $child_status = $?;
+    }
+} else {
+    waitpid($pid, 0);
+}
 my $reader_status = -1;
 if (waitpid($reader, 0) == $reader) {
     $reader_status = $?;
@@ -1043,22 +1065,29 @@ if ($child_status >= 0) {
         $exit = $child_status >> 8;
     }
 }
-my $how = $timed_out ? "timeout-term-kill" : "normal";
+my $how = $timed_out ? "timeout then TERM/KILL" : "normal";
 print "child_rc=$exit\n";
 print "harness=$how\n";
 if ($reader_status >= 0 && (($reader_status >> 8) == 7)) {
     print "fallback=1\n";
 }
-my $group_empty = 0;
-if (open my $ps, "-|", $psbin, "-ax", "-o", "pid=,pgid=") {
-    $group_empty = 1;
+sub group_has_member {
+    my $found = 0;
+    my $opened = open my $ps, "-|", $psbin, "-ax", "-o", "pid=,pgid=";
+    return 1 unless $opened;
     while (my $line = <$ps>) {
         my ($proc_pid, $proc_pgid) = split ' ', $line;
         if (defined $proc_pgid && $proc_pgid =~ /^\d+$/ && $proc_pgid == $pid) {
-            $group_empty = 0;
+            $found = 1;
         }
     }
     close $ps;
+    return $found;
+}
+my $group_empty = group_has_member() ? 0 : 1;
+if (!$group_empty) {
+    select(undef, undef, undef, 0.2);
+    $group_empty = group_has_member() ? 0 : 1;
 }
 print "group_empty=$group_empty\n";
 exit($timed_out ? 124 : ($exit == 0 ? 0 : 1));
@@ -1101,7 +1130,7 @@ run_group() {
     if [ "${RUN_FALLBACK:-0}" = "1" ]; then
         _fail=1
     fi
-    if [ "$RUN_HOW" = "timeout-term-kill" ]; then
+    if [ "$RUN_HOW" = "timeout then TERM/KILL" ]; then
         _fail=1
     fi
     if [ "$RUN_CHILD_RC" != "0" ]; then
@@ -1275,7 +1304,18 @@ script_others() {
 }
 
 leftover_clear() {
-    for _pat in "$WRITER_PAT" "$CURL_PAT" "$PERL_PAT" "$TIME_PAT"; do
+    # Follow-up after every run_group, including a normal child exit.
+    # The curl pattern is any /usr/bin/curl, so an imap curl is included.
+    # Names are bracket-guarded so pgrep does not match its own argv.
+    for _pat in \
+        "$WRITER_PAT" \
+        '[w]ith_writer_lock' \
+        '[m]eta_fill' \
+        "$CURL_PAT" \
+        '[s]ecurity' \
+        "$PERL_PAT" \
+        "$TIME_PAT"
+    do
         _st=$(pgrep_state "$_pat")
         if [ "$_st" != "absent" ]; then
             say STOP-leftover-process
@@ -1295,6 +1335,7 @@ leftover_clear() {
         say STOP-daily-lock-held
         return 1
     fi
+    say "FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks"
     say LEFTOVER-CLEAR
     return 0
 }

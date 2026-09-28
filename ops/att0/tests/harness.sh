@@ -205,6 +205,8 @@ test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'LOCK-DAILY-FREE' /tmp/att0-happy || fail "happy daily lock"
 /usr/bin/grep -q 'FLOCK-WRITE-FREE' /tmp/att0-happy || fail "happy flock"
 /usr/bin/grep -q 'WATCHDOG-MISSING-OK' /tmp/att0-happy || fail "happy watchdog"
+/usr/bin/grep -q 'FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks' /tmp/att0-happy || fail "happy followup"
+/usr/bin/grep -q 'harness=normal' /tmp/att0-happy || fail "happy harness normal"
 /usr/bin/grep -q 'group_empty=1' /tmp/att0-happy || fail "happy group empty"
 /usr/bin/grep -q 'group_empty=0' /tmp/att0-happy && fail "happy group occupied"
 /usr/bin/grep -q 'search_resume_watchdog.py arm' /tmp/att0-happy && fail "happy armed"
@@ -288,7 +290,8 @@ export ATT0_FAKE_STAMP ATT0_FAKE_A3_HANG=1 ATT0_TEST_MAX_ALARM=2
 setup_tree hang
 rc=$(run_mode /tmp/att0-hang window "$P_STAMP")
 expect_rc "$rc" 3 /tmp/att0-hang
-/usr/bin/grep -q 'harness=timeout-term-kill' /tmp/att0-hang || fail "hang harness"
+/usr/bin/grep -q 'harness=timeout then TERM/KILL' /tmp/att0-hang || fail "hang harness"
+/usr/bin/grep -q 'child_rc=' /tmp/att0-hang || fail "hang child rc"
 /usr/bin/grep -q 'ROLLBACK-DONE' /tmp/att0-hang || fail "hang rollback"
 /usr/bin/grep -q 'RESULT ar-r=ran search=restored' /tmp/att0-hang || fail "hang result"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-hang || fail "hang safe"
@@ -364,5 +367,45 @@ if [ "$_arc" != "142" ]; then
     fail "alarm rc ${_arc}"
 fi
 printf '%s\n' "ALARM-142-OK"
+
+# A leader that exits 0 while a grandchild ignores TERM must still be reaped.
+# The grandchild stays in the group because it does not call setsid.
+rm -f /tmp/att0-orphan-normal.meta /tmp/att0-orphan-normal.log /tmp/att0-orphan-helper-path
+(
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    STAMP=20260928-130001
+    write_helper_pl
+    printf '%s\n' "$HELPER_PL"
+) > /tmp/att0-orphan-helper-path
+_helper=$(cat /tmp/att0-orphan-helper-path)
+test -n "$_helper" && test -f "$_helper" || fail "orphan helper missing"
+_t0=$(/bin/date +%s)
+set +e
+/usr/bin/perl -e 'alarm 20; exec @ARGV or die' /usr/bin/perl "$_helper" 30 /tmp/att0-orphan-normal.log 5 /usr/bin/perl -e 'my $p = fork(); die "fork\n" unless defined $p; if ($p == 0) { $SIG{TERM} = "IGNORE"; $SIG{HUP} = "IGNORE"; sleep 30; exit 0; } exit 0;' > /tmp/att0-orphan-normal.meta
+set -e
+_t1=$(/bin/date +%s)
+if [ $((_t1 - _t0)) -gt 15 ]; then
+    fail "orphan reap too slow $((_t1 - _t0))"
+fi
+/usr/bin/grep -q '^child_rc=0$' /tmp/att0-orphan-normal.meta || fail "orphan child rc"
+/usr/bin/grep -q '^harness=normal$' /tmp/att0-orphan-normal.meta || fail "orphan harness"
+/usr/bin/grep -q '^group_empty=1$' /tmp/att0-orphan-normal.meta || fail "orphan group"
+printf '%s\n' "ORPHAN-NORMAL-OK"
+
+rm -f /tmp/att0-orphan-timeout.meta /tmp/att0-orphan-timeout.log
+_t0=$(/bin/date +%s)
+set +e
+/usr/bin/perl -e 'alarm 20; exec @ARGV or die' /usr/bin/perl "$_helper" 1 /tmp/att0-orphan-timeout.log 5 /bin/sleep 30 > /tmp/att0-orphan-timeout.meta
+set -e
+_t1=$(/bin/date +%s)
+if [ $((_t1 - _t0)) -gt 15 ]; then
+    fail "timeout reap too slow $((_t1 - _t0))"
+fi
+/usr/bin/grep -q '^child_rc=' /tmp/att0-orphan-timeout.meta || fail "timeout child rc"
+/usr/bin/grep -q '^harness=timeout then TERM/KILL$' /tmp/att0-orphan-timeout.meta || fail "timeout harness line"
+/usr/bin/grep -q '^group_empty=1$' /tmp/att0-orphan-timeout.meta || fail "timeout group"
+printf '%s\n' "ORPHAN-TIMEOUT-OK"
 
 printf '%s\n' "ALL-OK"
