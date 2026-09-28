@@ -563,15 +563,16 @@ class _CurlPartConn:
 class ImapPartClient:
     """UID FETCH of partial ``BODY.PEEK[part]<offset.count>`` ranges.
 
-    Production transport is pinned ``/usr/bin/curl`` ``imaps://`` port 993
-    with readonly EXAMINE. The mailbox is not in the URL. Plain IMAP is
-    refused. The password comes from ``password_fn`` (default Keychain via
+    Production transport is ``imaplib_part.ImaplibPartConn`` (stdlib
+    ``imaplib`` over TLS, readonly EXAMINE, ``BODY.PEEK`` partials only).
+    There is no curl ``-X`` fallback. Plain IMAP is refused. The password
+    comes from ``password_fn`` (default Keychain via
     ``read_imap_app_password``). Each chunk is written to ``dest`` and
     dropped so peak memory stays one chunk. Tests inject ``imap_factory``.
 
     ``port`` and ``ca_file`` are test hooks for a loopback TLS stub.
-    Production callers leave both unset: the port stays 993 and curl uses
-    the system trust store. ``ca_file`` adds a CA bundle and does not
+    Production callers leave both unset: the port stays 993 and TLS uses
+    the default verify context. ``ca_file`` adds a CA bundle and does not
     disable verification.
     """
 
@@ -615,7 +616,9 @@ class ImapPartClient:
                 raise FetchRefuse("imap keychain password is missing") from None
             try:
                 if self._factory is None:
-                    self._conn = _CurlPartConn(
+                    import imaplib_part as part_mod
+
+                    self._conn = part_mod.ImaplibPartConn(
                         self.host,
                         self.port,
                         self.timeout,
@@ -712,14 +715,9 @@ class ImapPartClient:
                 if typ != "OK":
                     raise FetchRefuse("part fetch failed")
                 declared = declared_literal_size(data)
-                try:
-                    blob = parse_fetch_literal(data)
-                except FetchRefuse:
-                    if offset == 0:
-                        raise
-                    blob = b""
-                except Exception:
-                    raise FetchRefuse("part fetch failed") from None
+                import imaplib_part as part_mod
+
+                blob = part_mod.interpret_peek(data, offset)
                 n = len(blob)
                 counted = n
                 if declared is not None and declared > counted:

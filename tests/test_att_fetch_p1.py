@@ -583,48 +583,20 @@ class ImapPartClientTests(unittest.TestCase):
                 password_fn=lambda: SECRET,
             )
 
-    def test_default_transport_is_pinned_curl_imaps(self):
-        seen = {}
-
-        def fake_run(argv, input=None, capture_output=None, env=None, timeout=None, check=False):
-            del capture_output, env, timeout, check
-            seen.setdefault("argv", argv)
-            seen.setdefault("inputs", []).append(input)
-            text = input or b""
-            if b"UID FETCH" in text:
-                body = b"hello"
-                stdout = b"* 1 FETCH (BODY[2]<0> {5}\r\n" + body + b")\r\nA OK\r\n"
-            else:
-                stdout = b"* OK [READ-ONLY] EXAMINE completed\r\nA OK\r\n"
-            return subprocess.CompletedProcess(argv, 0, stdout, b"")
-
-        def boom(*_args, **_kwargs):
-            raise AssertionError("network is forbidden")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "part"
-            with mock.patch("socket.create_connection", boom), mock.patch(
-                "attachments.fetch_p1.subprocess.run", fake_run
-            ):
-                client = fetch_p1.ImapPartClient(
-                    "imap.example.com",
-                    "user@example.com",
-                    timeout=5,
-                    password_fn=lambda: SECRET,
-                )
-                with client:
-                    nbytes = client.fetch_part("INBOX", "9", "2", dest)
-            self.assertEqual(nbytes, 5)
-            self.assertEqual(dest.read_bytes(), b"hello")
-        self.assertEqual(seen["argv"][0], "/usr/bin/curl")
-        self.assertNotIn("--user", seen["argv"])
-        self.assertNotIn("-k", seen["argv"])
-        joined = b"\n".join(seen["inputs"])
-        self.assertIn(b"imaps://imap.example.com:993/", joined)
-        self.assertIn(b"EXAMINE", joined)
-        self.assertIn(b"UID FETCH 9 (BODY.PEEK[2]<0.", joined)
-        for arg in seen["argv"]:
-            self.assertNotIn(SECRET, str(arg))
+    def test_default_transport_is_imaplib_not_curl(self):
+        source = FETCH_SRC.read_text(encoding="utf-8")
+        enter = source.split("def __enter__", 1)[1].split("def __exit__", 1)[0]
+        self.assertIn("ImaplibPartConn", enter)
+        self.assertNotIn("_CurlPartConn", enter)
+        self.assertNotIn('"-X"', enter)
+        self.assertNotIn("CURL_BIN", enter)
+        client = fetch_p1.ImapPartClient(
+            "imap.example.invalid",
+            "fixture-user",
+            password_fn=lambda: SECRET,
+        )
+        self.assertIsNone(client._factory)
+        self.assertIsNone(client._conn)
 
 
 def _assert_pid_gone(testcase: unittest.TestCase, pid: int) -> None:

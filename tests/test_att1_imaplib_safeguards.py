@@ -190,8 +190,9 @@ class SafeguardTests(unittest.TestCase):
         self.assertNotIn('"-X"', text)
         self.assertNotIn("CERT_NONE", text)
         fetch = (SCRIPTS / "attachments" / "fetch_p1.py").read_text(encoding="utf-8")
-        self.assertIn("_CurlPartConn", fetch)
-        self.assertNotIn("imaplib_part", fetch)
+        enter = fetch.split("def __enter__", 1)[1].split("def __exit__", 1)[0]
+        self.assertIn("imaplib_part", enter)
+        self.assertNotIn("_CurlPartConn", enter)
 
     def test_sslkeylogfile_is_cleared_unless_allowlisted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
