@@ -1326,6 +1326,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev
         ARR_STATUS=needed
         return 1
     fi
+    say "hits_count=0 pids=[]"
     say HITS-OK
     _stage="$MA/backups/mailroom-arr-stage-${_wstamp}.sqlite"
     _sh="/tmp/att0-restore-${_wstamp}.sh"
@@ -1489,6 +1490,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))'; then
         say STOP-hits
         return 1
     fi
+    say "hits_count=0 pids=[]"
     say HITS-OK
     return 0
 }
@@ -1736,8 +1738,8 @@ do_window() {
         return
     fi
     say A2-RERUN-OK
-    _live_schema=$(schema_sha "$SOR") || { WANTED_RC=3; return; }
-    _reh_schema=$(schema_sha "$REH_DB") || { WANTED_RC=3; return; }
+    _live_schema=$(schema_sha "$SOR") || { say STOP-schema-sha; WANTED_RC=3; return; }
+    _reh_schema=$(schema_sha "$REH_DB") || { say STOP-schema-sha; WANTED_RC=3; return; }
     if [ -z "$_live_schema" ] || [ "$_live_schema" != "$_reh_schema" ]; then
         say STOP-schema-sha
         WANTED_RC=3

@@ -2,7 +2,7 @@
 
 Phase P is `phaseP_473b59a0.sh` (sha256 `1ff2204ba32e4adcd66f725cdb8c8dce52973813f74d1da0ea4df041d99c81b2`). This card does not place or rewrite it. It already passed for `P_STAMP=20260928-011821`. This card places `ops/att0/att0_l1.sh` and runs one mode per call. There is no `phasep` mode and no `keychain-primer` mode. The clone is `/tmp/pr48b`. The branch is `cursor/att0-l1-run-scripts`.
 
-Script sha256: `1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa`
+Script sha256: `4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb`
 
 Commit: `COMMIT_SHA_PENDING`
 
@@ -29,7 +29,7 @@ Exit codes: `0` done, `1` stopped before a live SoR write, `2` usage, `3` failur
 ## window
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
 ```
 
 The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, restore-daily, and report.
@@ -37,7 +37,7 @@ The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, res
 ## rollback
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
 ```
 
 ## restore-daily
@@ -45,7 +45,7 @@ cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/a
 Refuses unless `/tmp/att0w-done-<WINDOW_STAMP>.OK` or `/tmp/att0r-done-<WINDOW_STAMP>.OK` exists.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
 ```
 
 ## report
@@ -53,7 +53,7 @@ cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/a
 Read-only. No network, no Keychain, no writer.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 1e63013f4c398d15ed858417f39a42645f4131fe848e1a15145b2e92417e6baa ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = 4919e50a80bd64d309820f9f344bbc1dbb3d4513b8690937d1909095b797a8bb ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
 ```
 
 ## TODO-PIN

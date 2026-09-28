@@ -4,6 +4,10 @@ if [ "${1:-}" != "-a" ] || [ "${2:-}" != "256" ]; then
     exit 1
 fi
 shift 2
+if [ "$#" -eq 0 ]; then
+    /usr/bin/sha256sum
+    exit $?
+fi
 gate=505382b4e23dfed9f746d70fc6f3a79626524be37168aed955ac7bd8872d8345
 wrapper=1e7f5aeee8dd05bca363e8f517e046cc68e22d25c18c7c4dc487d4121dba4f77
 watchdog=bae404ccae07857d0dcb47cbc47a107f68e367c3fe7edff07eb202a01aeb8d43
