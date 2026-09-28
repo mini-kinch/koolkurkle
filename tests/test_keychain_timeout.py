@@ -121,6 +121,88 @@ class KeychainTimeoutTests(unittest.TestCase):
                 password = imap_keychain.read_imap_app_password(runner=runner, env=env)
         self.assertEqual(password, "from-config")
 
+    def _fill(self, password, runner):
+        steps = []
+
+        def read_password(*_args, **_kwargs):
+            steps.append("keychain")
+            return password()
+
+        def auth(*_args, **_kwargs):
+            steps.append("auth")
+            return runner()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _db(Path(tmp))
+            out = io.StringIO()
+            err = io.StringIO()
+            with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err), mock.patch.object(
+                meta, "read_imap_app_password", read_password
+            ), mock.patch("imap_curl.run_subprocess", auth):
+                rc = meta.main(
+                    [
+                        "--db", str(db), "--source", "imap", "--apply",
+                        "--max-messages", "0", "--timeout", "0",
+                    ],
+                    env={
+                        "MAILROOM_IMAP_HOST": "imap.example.invalid",
+                        "MAILROOM_IMAP_USER": "fixture-user",
+                        "MAILROOM_KEYCHAIN_ITEM": ITEM,
+                    },
+                )
+        return rc, out.getvalue(), err.getvalue(), steps
+
+    def test_timed_out_keychain_read_exits_5_without_auth(self) -> None:
+        classified = []
+        real = meta.report_auth_failed
+
+        def classify(report):
+            classified.append(True)
+            return real(report)
+
+        def timed_out():
+            raise imap_keychain.KeychainTimeout("imap keychain read timed out")
+
+        with mock.patch.object(meta, "report_auth_failed", classify):
+            rc, out, err, steps = self._fill(timed_out, lambda: (67, "", "no"))
+        self.assertEqual(rc, 5)
+        self.assertEqual(steps, ["keychain"])
+        self.assertEqual(classified, [])
+        self.assertIn(TIMEOUT_STDERR, err)
+        self.assertNotIn("imap auth failed", err)
+        self.assertIn("imap keychain read timed out", out)
+        self.assertNotIn("usage:", err)
+
+    def test_keychain_read_then_auth_failure_exits_4(self) -> None:
+        rc, out, err, steps = self._fill(
+            lambda: "example-secret-token",
+            lambda: (67, "", "no"),
+        )
+        self.assertEqual(steps, ["keychain", "auth"])
+        self.assertEqual(rc, 4)
+        self.assertIn("error: imap auth failed\n", err)
+        self.assertNotIn("imap keychain read timed out", err)
+        self.assertIn("rc 67", out)
+        self.assertNotIn("example-secret-token", out)
+        self.assertNotIn("usage:", err)
+
+    def test_keychain_read_then_auth_success_exits_0(self) -> None:
+        rc, out, err, steps = self._fill(
+            lambda: "example-secret-token",
+            lambda: (
+                0,
+                "* OK [UIDVALIDITY 5] UIDs valid\n"
+                '* 1 FETCH (UID 9 BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 4 1))\n',
+                "",
+            ),
+        )
+        self.assertEqual(steps, ["keychain", "auth"])
+        self.assertEqual(rc, 0)
+        self.assertIn("messages=1", out)
+        self.assertNotIn("imap auth failed", err)
+        self.assertNotIn("imap keychain read timed out", err)
+        self.assertNotIn("example-secret-token", out)
+
 
 if __name__ == "__main__":
     unittest.main()
