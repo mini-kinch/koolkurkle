@@ -547,10 +547,10 @@ except Exception:
     sys.stdout.write("STOP-p3-positive\n")
     raise SystemExit(1)
 sys.stdout.write("PR92-P3-ALLOW\n")
-raise SystemExit(2)
+raise SystemExit(7)
 PY
     _pos=$?
-    if [ "$_pos" -ne 2 ]; then
+    if [ "$_pos" -ne 7 ]; then
         fail p3 p3-positive
     fi
     mark p3 PR92-P3-OK
