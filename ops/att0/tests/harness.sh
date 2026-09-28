@@ -311,7 +311,7 @@ exit 0
 EOF
 chmod +x /tmp/att0-ps-fillcurl
 rm -f /tmp/att0-fillcurl-pgid /tmp/att0-fillcurl.log /tmp/att0-fillcurl-out.log
-mkdir -p /tmp/att0-fillcurl-ma
+mkdir -p /tmp/att0-fillcurl-ma /tmp/att0-fillcurl-state
 if [ ! -e /tmp/att0-fillcurl-ma/mailroom.write.lock ]; then
     : > /tmp/att0-fillcurl-ma/mailroom.write.lock
 fi
@@ -331,10 +331,12 @@ run_fillcurl() {
         TRANSCRIPT=
         MA=/tmp/att0-fillcurl-ma
         S_DIR="$FIX"
+        ATT0_STATE=/tmp/att0-fillcurl-state
+        export ATT0_STATE
         AWK=/usr/bin/awk
         PYTHON=/usr/bin/python3
         PERL=/usr/bin/perl
-        PGREP=/usr/bin/pgrep
+        PGREP="$FAKES/pgrep"
         LSOF="$FAKES/lsof"
         PS=/tmp/att0-ps-fillcurl
         STAMP=20260928-130077
@@ -790,7 +792,7 @@ _t0=$(/bin/date +%s)
 set +e
 /usr/bin/perl -e 'alarm 25; exec @ARGV or die' /usr/bin/perl "$_helper" 30 /tmp/att0-orphan-signal.log 5 /bin/sleep 30 > /tmp/att0-orphan-signal.meta &
 _sigpid=$!
-sleep 0.8
+/bin/sleep 0.8
 kill -TERM "$_sigpid"
 wait "$_sigpid"
 set -e
