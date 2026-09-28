@@ -1095,7 +1095,7 @@ class DarwinEpermAncestorTests(IdentityCase):
         def ppid(pid):
             return gate.darwin_ppid(pid, proc_pidinfo=fake)
 
-        return child, foreign, queried, ppid
+        return shell, foreign, queried, ppid
 
     def test_eperm_above_holder_matches_and_foreign_callers_refuse(self):
         sleeper = subprocess.Popen(
@@ -1110,7 +1110,8 @@ class DarwinEpermAncestorTests(IdentityCase):
         )
         try:
             holder = sleeper.pid
-            child, foreign_pid, queried, ppid = self._tree(holder, os.getpid())
+            child = os.getpid()
+            shell, foreign_pid, queried, ppid = self._tree(holder, child)
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 lock = root / "mailroom.write.lock"
@@ -1128,6 +1129,11 @@ class DarwinEpermAncestorTests(IdentityCase):
                     os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
                     os.environ[gate.FORCE_LIVE_CHECKS_ENV] = "1"
                     with patch("sor_writer_gate.ppid_of", ppid):
+                        chain = gate.ancestor_pids(child, ppid_fn=ppid)
+                        self.assertEqual(chain, [holder, shell, foreign_pid])
+                        self.assertEqual(
+                            queried, [child, holder, shell, foreign_pid]
+                        )
                         matched, why = gate._identity_decision(lock, child_pid=child)
                         self.assertTrue(matched, why)
                         self.assertEqual(why, "match")
@@ -1187,8 +1193,14 @@ class DarwinEpermAncestorTests(IdentityCase):
                 proc.wait()
 
     def test_eperm_on_the_first_hop_still_refuses(self):
+        start = 2_100_000_010
+        queried = []
+
         def fake(pid, flavor, arg, info, size):
+            queried.append(pid)
             self.assertEqual(flavor, gate.PROC_PIDTBSDINFO)
+            self.assertEqual(arg, 0)
+            self.assertEqual(size, ctypes.sizeof(gate.ProcBsdInfo))
             ctypes.set_errno(errno.EPERM)
             return 0
 
@@ -1196,8 +1208,49 @@ class DarwinEpermAncestorTests(IdentityCase):
             return gate.darwin_ppid(pid, proc_pidinfo=fake)
 
         with self.assertRaises(gate.AncestorWalkError) as ctx:
-            gate.ancestor_pids(2_100_000_010, ppid_fn=ppid)
+            gate.ancestor_pids(start, ppid_fn=ppid)
         self.assertEqual(ctx.exception.code, "syscall")
+        self.assertEqual(queried, [start])
+
+        sleeper = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            holder = sleeper.pid
+            child = os.getpid()
+            self.assertNotEqual(holder, child)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                lock = root / "mailroom.write.lock"
+                held = wwl.acquire_writer_lock(lock, "att0-migrate")
+                token = held.info.writer_token
+                try:
+                    lock.write_text(
+                        _replace_field(
+                            lock.read_text(encoding="utf-8"),
+                            "pid",
+                            str(holder),
+                        ),
+                        encoding="utf-8",
+                    )
+                    os.environ[wwl.LOCK_TOKEN_ENV] = token
+                    os.environ[wwl.LOCK_PURPOSE_ENV] = "att0-migrate"
+                    with patch("sor_writer_gate.ppid_of", ppid):
+                        matched, why = gate._identity_decision(
+                            lock, child_pid=child
+                        )
+                        self.assertFalse(matched)
+                        self.assertEqual(why, "ancestor walk error")
+                        self.assertIn(child, queried)
+                        self.assertEqual(queried, [start, child])
+                finally:
+                    wwl.release_writer_lock(held)
+        finally:
+            if sleeper.poll() is None:
+                sleeper.kill()
+            sleeper.wait()
 
 
 class InventoryTests(IdentityCase):
