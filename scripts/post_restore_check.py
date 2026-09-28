@@ -40,6 +40,13 @@ Urgent texts are ``notify_log`` rows since ``--since`` whose
 timestamp column when one exists, otherwise the linked message's
 ``ingested_at``. ``--since`` is inclusive for those counts. The daily
 stamp must be strictly newer than ``--since``.
+
+``send_urgent_texts`` delivers one urgent text per ``message_id``.
+The read-only report does not call it. The helper reads ``notify_log``
+under ``BEGIN IMMEDIATE``, calls the sender, and inserts the id only
+after that call returns. The ledger file is ``logs/notify_log.sqlite``
+with the same ``notify_log`` unique key. The report never deletes
+those rows and never writes ``mailroom.sqlite``.
 """
 
 from __future__ import annotations
@@ -65,6 +72,9 @@ SOR_BASENAME = "mailroom.sqlite"
 WRITE_LOCK_NAME = "mailroom.write.lock"
 DAILY_LOCK_NAME = "mailroom.daily.lock"
 BILLS_KEY_PREFIX = "bills-"
+URGENT_TEXT_CHANNEL = "imessage"
+URGENT_LEDGER_NAME = "notify_log.sqlite"
+_LEDGER_TIMEOUT_S = 30.0
 BILL_TIME_COLUMNS = (
     "created_at",
     "inserted_at",
@@ -252,6 +262,203 @@ def bills_added_since(conn: sqlite3.Connection, since: datetime) -> int:
     return _count_since([row[0] for row in rows], since)
 
 
+def urgent_ledger_path(archive: Path) -> Path:
+    """Durable ``notify_log`` beside the archive database.
+
+    Restore replaces ``mailroom.sqlite``. This file is not that database,
+    so a restore does not rewind ids that were already texted.
+    """
+    return Path(archive) / "logs" / URGENT_LEDGER_NAME
+
+
+def urgent_message_ids(conn: sqlite3.Connection) -> list[str]:
+    """Mail ids with ``urgent`` set. Order is by id."""
+    columns = table_columns(conn, "messages")
+    if "id" not in columns or "urgent" not in columns:
+        return []
+    rows = conn.execute(
+        "SELECT id FROM messages WHERE urgent = 1 OR urgent = '1' ORDER BY id"
+    ).fetchall()
+    found: list[str] = []
+    for row in rows:
+        if row[0] is None:
+            continue
+        found.append(str(row[0]))
+    return found
+
+
+def _ledger_file(ledger_path: Path | str) -> Path:
+    path = Path(ledger_path)
+    if path.name.casefold() == SOR_BASENAME.casefold():
+        raise CheckError("urgent texts do not write the archive sqlite")
+    return path
+
+
+def _ensure_notify_log(conn: sqlite3.Connection) -> None:
+    """Create ``notify_log`` if it is missing. Never deletes rows."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notify_log (
+          ts TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          result TEXT,
+          UNIQUE(message_id, channel)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "idx_notify_log_message_id_channel ON notify_log(message_id, channel)"
+    )
+
+
+def _connect_ledger(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(
+        str(path),
+        timeout=_LEDGER_TIMEOUT_S,
+        isolation_level=None,
+    )
+    try:
+        conn.execute("PRAGMA busy_timeout=%d" % int(_LEDGER_TIMEOUT_S * 1000))
+        _ensure_notify_log(conn)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _rollback(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("ROLLBACK")
+    except sqlite3.Error:
+        return
+
+
+def _send_one(path: Path, message_id: str, send) -> bool:
+    """Send ``message_id`` once. Return True only when this call sent it.
+
+    The write lock is held across the sender call so a second run cannot
+    pass the ledger check first. The row is inserted only after ``send``
+    returns. A raised ``send`` rolls the transaction back and leaves no row.
+    """
+    conn = _connect_ledger(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM notify_log WHERE message_id = ? AND channel = ?",
+                (message_id, URGENT_TEXT_CHANNEL),
+            ).fetchone()
+            if row is not None:
+                conn.execute("COMMIT")
+                return False
+            send(message_id)
+            conn.execute(
+                "INSERT INTO notify_log(ts, message_id, channel, result) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    message_id,
+                    URGENT_TEXT_CHANNEL,
+                    "ok",
+                ),
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            _rollback(conn)
+            raise
+    finally:
+        conn.close()
+
+
+def send_urgent_texts(ledger_path: Path | str, message_ids, send) -> int:
+    """Send each ``message_id`` at most once. Return how many this call sent.
+
+    ``send(message_id)`` must raise when the text is not confirmed. The
+    same id later in ``message_ids``, or in a later call, does not send
+    again. Failed calls leave the id unrecorded so a retry can send it.
+    """
+    path = _ledger_file(ledger_path)
+    sent = 0
+    seen: set[str] = set()
+    for raw in message_ids:
+        if raw is None:
+            continue
+        message_id = str(raw)
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        if _send_one(path, message_id, send):
+            sent += 1
+    return sent
+
+
+def rescan_urgent_texts(ledger_path: Path | str, message_ids, send) -> int:
+    """Post-restore re-scan. Does not delete or replace ledger rows."""
+    return send_urgent_texts(ledger_path, message_ids, send)
+
+
+def _retain_confirmed(path: Path, message_ids: list[str]) -> None:
+    """Copy ids already confirmed in the archive log. Does not send.
+
+    ``INSERT OR IGNORE`` keeps an existing row, including its timestamp.
+    """
+    if not message_ids:
+        return
+    conn = _connect_ledger(path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for message_id in message_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO notify_log"
+                    "(ts, message_id, channel, result) VALUES (?, ?, ?, ?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        message_id,
+                        URGENT_TEXT_CHANNEL,
+                        "ok",
+                    ),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            _rollback(conn)
+            raise
+    finally:
+        conn.close()
+
+
+def deliver_archive_urgent_texts(archive: Path, send) -> int:
+    """Text urgent mail ids from the archive once each.
+
+    Message ids come from ``messages.id`` where ``urgent`` is set. An id
+    already in the archive ``notify_log`` is pinned into the durable
+    ledger and is not texted. New ids go through ``send_urgent_texts``.
+    Nothing here is written to ``mailroom.sqlite``.
+    """
+    conn = open_readonly(Path(archive) / SOR_BASENAME)
+    try:
+        pending = urgent_message_ids(conn)
+        columns = table_columns(conn, "notify_log")
+        already: set[str] = set()
+        if "message_id" in columns and "channel" in columns:
+            rows = conn.execute(
+                "SELECT message_id FROM notify_log WHERE channel = ?",
+                (URGENT_TEXT_CHANNEL,),
+            ).fetchall()
+            already = {str(row[0]) for row in rows if row[0] is not None}
+    finally:
+        conn.close()
+    ledger = urgent_ledger_path(archive)
+    pinned = [message_id for message_id in pending if message_id in already]
+    fresh = [message_id for message_id in pending if message_id not in already]
+    _retain_confirmed(ledger, pinned)
+    return rescan_urgent_texts(ledger, fresh, send)
+
+
 def read_stamp(path: Path) -> str | None:
     if not path.is_file():
         return None
@@ -431,7 +638,11 @@ def build_lines(
     return lines
 
 
-def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
+def evaluate(
+    archive: Path,
+    since: datetime,
+    urgent_send=None,
+) -> tuple[list[str], int]:
     stamp_path = archive / "logs" / STAMP_NAME
     try:
         stamp_raw = read_stamp(stamp_path)
@@ -482,6 +693,8 @@ def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
         writers=writers,
         failed=failed,
     )
+    if urgent_send is not None and db_ok:
+        deliver_archive_urgent_texts(archive, urgent_send)
     return lines, code
 
 

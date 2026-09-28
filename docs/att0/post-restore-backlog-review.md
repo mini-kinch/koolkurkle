@@ -16,6 +16,8 @@ The once-per-id rule in this tree is `notify_log`'s unique `(message_id, channel
 
 There is no per-run urgent-text cap, because there is no urgent-text loop. Mail received long before the run is not eligible to be texted by this chain. A 40 hour ingest through these repo copies cannot burst urgent texts. The risk in the repo copy is absent, so no cap or max age was added. The post-restore script reports how many non-digest `notify_log` rows fall since `--since`. That report does not send.
 
+`send_urgent_texts` is the delivery helper on this module. It is not part of the report. One `message_id` produces one text: the helper consults `notify_log` under `BEGIN IMMEDIATE`, sends, and inserts the id only after the send returns. The file is `logs/notify_log.sqlite` (the same unique `(message_id, channel)` as `docs/pr0/mailroom_schema.sql`). Replacing `mailroom.sqlite` does not rewind it, and the helper does not delete its rows.
+
 ## (b) Bills already past due at run time
 
 `open_bills` loads every `bills` row with `status='open'` and does not compare `due_date` to the clock (`scripts/notify_bills.py:94-100`). When `due_date` is set, the digest text includes it (`scripts/notify_bills.py:112-113`). If any open row exists, the step sends one iMessage for `bills-<today>` unless that key is already logged (`scripts/notify_bills.py:179-191`). `--force` sends that same digest again. No repo script inserts into `bills`. `classify.py` does not. The chain creates no reminder row.

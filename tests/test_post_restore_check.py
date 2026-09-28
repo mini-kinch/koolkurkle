@@ -9,6 +9,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -691,6 +693,195 @@ class CliTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("messages_inserted_since=3\n", proc.stdout)
             self.assertTrue(proc.stdout.rstrip().endswith("POST-RESTORE PASS"))
+
+
+def _ledger_ids(path: Path) -> list[str]:
+    conn = sqlite3.connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT message_id FROM notify_log ORDER BY message_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [row[0] for row in rows]
+
+
+class UrgentTextOnceTests(unittest.TestCase):
+    def test_same_id_twice_in_one_run_sends_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "notify_log.sqlite"
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            sent = check.send_urgent_texts(ledger, ["msg-1", "msg-1"], send)
+            self.assertEqual(sent, 1)
+            self.assertEqual(calls, ["msg-1"])
+            self.assertEqual(_ledger_ids(ledger), ["msg-1"])
+
+    def test_same_id_across_two_runs_sends_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "notify_log.sqlite"
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            first = check.send_urgent_texts(ledger, ["msg-1"], send)
+            second = check.send_urgent_texts(ledger, ["msg-1"], send)
+            self.assertEqual(first, 1)
+            self.assertEqual(second, 0)
+            self.assertEqual(calls, ["msg-1"])
+            self.assertEqual(_ledger_ids(ledger), ["msg-1"])
+
+    def test_failed_send_then_retry_sends_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "notify_log.sqlite"
+            calls: list[str] = []
+            attempts = {"n": 0}
+
+            def send(message_id: str) -> None:
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise RuntimeError("transport down")
+                calls.append(message_id)
+
+            with self.assertRaises(RuntimeError):
+                check.send_urgent_texts(ledger, ["msg-1"], send)
+            self.assertEqual(_ledger_ids(ledger), [])
+            self.assertEqual(calls, [])
+            self.assertEqual(check.send_urgent_texts(ledger, ["msg-1"], send), 1)
+            self.assertEqual(check.send_urgent_texts(ledger, ["msg-1"], send), 0)
+            self.assertEqual(calls, ["msg-1"])
+            self.assertEqual(attempts["n"], 2)
+            self.assertEqual(_ledger_ids(ledger), ["msg-1"])
+
+    def test_post_restore_rescan_of_texted_ids_sends_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            db = archive / "mailroom.sqlite"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE messages ("
+                "id TEXT PRIMARY KEY, urgent INTEGER, ingested_at TEXT, "
+                "present_on_server INTEGER)"
+            )
+            conn.execute(
+                "CREATE TABLE notify_log ("
+                "ts TEXT NOT NULL, message_id TEXT NOT NULL, "
+                "channel TEXT NOT NULL, result TEXT, "
+                "UNIQUE(message_id, channel))"
+            )
+            conn.executemany(
+                "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    ("a", 1, NEWER, 1),
+                    ("b", 1, NEWER, 1),
+                    ("c", 1, NEWER, 1),
+                    ("quiet", 0, NEWER, 1),
+                ],
+            )
+            conn.execute(
+                "INSERT INTO notify_log (ts, message_id, channel, result) "
+                "VALUES (?, ?, ?, ?)",
+                ("2026-09-27T01:00:00Z", "c", check.URGENT_TEXT_CHANNEL, "ok"),
+            )
+            conn.commit()
+            conn.close()
+            _stamp(archive, NEWER)
+            (archive / check.WRITE_LOCK_NAME).write_text("", encoding="utf-8")
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            blob = db.read_bytes()
+            with self.assertRaises(check.CheckError):
+                check.send_urgent_texts(db, ["a"], send)
+            self.assertEqual(db.read_bytes(), blob)
+            self.assertEqual(calls, [])
+
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 2)
+            self.assertEqual(calls, ["a", "b"])
+            ledger = check.urgent_ledger_path(archive)
+            self.assertEqual(_ledger_ids(ledger), ["a", "b", "c"])
+            calls.clear()
+            self.assertEqual(check.rescan_urgent_texts(ledger, ["a", "b", "c"], send), 0)
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self.assertEqual(calls, [])
+
+            conn = sqlite3.connect(db)
+            conn.execute("DELETE FROM notify_log")
+            conn.commit()
+            conn.close()
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self.assertEqual(calls, [])
+            self.assertEqual(_ledger_ids(ledger), ["a", "b", "c"])
+
+            before = _ledger_ids(ledger)
+            saved_lsof = check.run_lsof
+            saved_pgrep = check.run_pgrep
+            check.run_lsof = _quiet_lsof
+            check.run_pgrep = _quiet_pgrep
+            try:
+                _lines, code = check.evaluate(
+                    archive, SINCE_DT, urgent_send=send
+                )
+            finally:
+                check.run_lsof = saved_lsof
+                check.run_pgrep = saved_pgrep
+            self.assertEqual(code, check.EXIT_OK)
+            self.assertEqual(calls, [])
+            self.assertEqual(_ledger_ids(ledger), before)
+
+    def test_two_distinct_ids_send_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "notify_log.sqlite"
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            sent = check.send_urgent_texts(ledger, ["a", "b"], send)
+            self.assertEqual(sent, 2)
+            self.assertEqual(calls, ["a", "b"])
+            self.assertEqual(_ledger_ids(ledger), ["a", "b"])
+
+    def test_concurrent_runs_send_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "notify_log.sqlite"
+            calls: list[str] = []
+            results: list[int] = []
+            errors: list[BaseException] = []
+            lock = threading.Lock()
+            start = threading.Barrier(2)
+
+            def worker() -> None:
+                def send(message_id: str) -> None:
+                    with lock:
+                        calls.append(message_id)
+                    time.sleep(0.2)
+
+                try:
+                    start.wait(timeout=5)
+                    sent = check.send_urgent_texts(ledger, ["msg-1"], send)
+                    with lock:
+                        results.append(sent)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(sum(results), 1)
+            self.assertEqual(calls, ["msg-1"])
+            self.assertEqual(_ledger_ids(ledger), ["msg-1"])
 
 
 class SourceContractTests(unittest.TestCase):
