@@ -1451,9 +1451,10 @@ if /bin/ps -ax -o command= | /usr/bin/awk 'index($0, "/bin/sleep 30") && index($
 fi
 printf '%s\n' "ORPHAN-SIGNAL-OK"
 
-# Sidecar-less WAL copy. SQLite 3.22+ recreates -wal/-shm when the
-# directory is writable, so the copy sits where those files cannot be
-# created. The old -readonly open fails. The URI open does not need them.
+# Sidecar-less WAL copy. This harness is root inside a user namespace,
+# so a mode-555 directory can still grow -wal/-shm. A read-only bind
+# mount cannot. The old -readonly open fails. The URI open does not
+# need those side files.
 _wdir=$(mktemp -d /tmp/att0-wal.XXXXXX)
 _wsrc="${_wdir}/src.sqlite"
 _wro="${_wdir}/ro"
@@ -1466,7 +1467,8 @@ _hex=$(od -An -t x1 -j 18 -N 2 "${_wro}/bk.sqlite" | tr -d ' \n')
 [ "$_hex" = "0202" ] || fail "wal header ${_hex}"
 test ! -e "${_wro}/bk.sqlite-wal" || fail "wal side file remained"
 test ! -e "${_wro}/bk.sqlite-shm" || fail "shm side file remained"
-chmod 555 "$_wro"
+mount --bind "$_wro" "$_wro"
+mount -o remount,bind,ro "$_wro"
 if /usr/bin/touch "${_wro}/probe-write" 2>/dev/null; then
     fail "wal copy dir still writable"
 fi
