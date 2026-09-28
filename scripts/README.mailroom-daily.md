@@ -166,16 +166,21 @@ the venv once:
 
 ## Keychain
 
-Service **name** is pinned: `mailroom.imap.app-password`.
-
-The wrapper does not read `MAILROOM_KEYCHAIN_ITEM`. The daily LaunchAgent
-plist does not set `MAILROOM_KEYCHAIN_ITEM`; the runner pins the Keychain
-item itself. The wrapper calls
+The item name is not compiled into the wrapper. Set `MAILROOM_KEYCHAIN_ITEM`
+to `<keychain-item>`, or put that name on the first non-comment line of a
+gitignored file and point `MAILROOM_KEYCHAIN_CONFIG` at it. The daily
+LaunchAgent plist does not set `MAILROOM_KEYCHAIN_ITEM`. The wrapper calls
 `/usr/bin/security find-generic-password -s … -w` and exports
 `IMAP_APP_PASSWORD` for child IMAP scripts only after that read. An
 inherited `IMAP_APP_PASSWORD` is unset before the lookup, so a preset
 value is not used. Nothing in this repo stores
 the value. Never echo or log the secret.
+
+A missing pin exits **4** with `error: keychain item is not pinned` and
+does not start the daily. A missing item or an empty password exits **4**
+with `error: keychain item is missing`. The `security` child is killed
+after 15 seconds (`MAILROOM_KEYCHAIN_TIMEOUT_S`); that exits **5** with
+`error: imap keychain read timed out`. There is no legacy fallback.
 
 Keychain must work from **launchd** (`launchctl start com.mailroom.daily`
 or the 20:05 calendar). A password that unlocks only in an interactive
@@ -183,12 +188,6 @@ Terminal session is not enough — the GUI session Keychain path is
 different. Prove the item from `launchctl start`, then read
 `~/MailArchive/logs/daily_rag.stderr.log` (length / IMAP success only;
 never paste the secret).
-
-One-time **read fallback**: if the pinned name is missing or empty, the
-wrapper tries legacy `mailroom.icloud.app-password` once and warns on
-stderr. It does not fail solely because only the old item exists.
-Prefer the new name; keep the legacy item until IMAP
-smoke PASSes on `mailroom.imap.app-password`.
 
 Human Terminal cards (one machine, one command per fence):
 **[docs/ops-terminal.md](../docs/ops-terminal.md)**.
@@ -198,12 +197,12 @@ the interactive prompt. Do not paste the secret into chat or git.
 
 ```zsh
 # Mini — create IMAP Keychain item (type the secret at the prompt)
-security add-generic-password -a "$USER" -s mailroom.imap.app-password -w
+security add-generic-password -a "$USER" -s <keychain-item> -w
 ```
 
 ```zsh
 # Mini — Keychain length check (no secret on stdout)
-security find-generic-password -s mailroom.imap.app-password -w | wc -c
+security find-generic-password -s <keychain-item> -w | wc -c
 ```
 
 Apple app-specific passwords are typically ~16–19 characters.
@@ -211,40 +210,29 @@ Apple app-specific passwords are typically ~16–19 characters.
 secret will not authenticate to IMAP (Login denied); regenerate at
 appleid.apple.com.
 
-### MBP / Mini migrate recipe
+### MBP / Mini create recipe
 
-Prefer `mailroom.imap.app-password`. Keep
-`mailroom.icloud.app-password` until IMAP smoke PASSes on the new name.
-Each `security` line is its own fence (one paste).
+Use `<keychain-item>` for the service name on that machine. Each
+`security` line is its own fence (one paste).
 
 ```zsh
 # MBP — create IMAP Keychain item (type the secret at the prompt)
-security add-generic-password -a "$USER" -s mailroom.imap.app-password -w
+security add-generic-password -a "$USER" -s <keychain-item> -w
 ```
 
 ```zsh
 # MBP — Keychain length check (no secret on stdout)
-security find-generic-password -s mailroom.imap.app-password -w | wc -c
-```
-
-```zsh
-# MBP — delete legacy Keychain item (only after IMAP smoke PASSes)
-# security delete-generic-password -s mailroom.icloud.app-password
+security find-generic-password -s <keychain-item> -w | wc -c
 ```
 
 ```zsh
 # Mini — create IMAP Keychain item (type the secret at the prompt)
-security add-generic-password -a "$USER" -s mailroom.imap.app-password -w
+security add-generic-password -a "$USER" -s <keychain-item> -w
 ```
 
 ```zsh
 # Mini — Keychain length check (no secret on stdout)
-security find-generic-password -s mailroom.imap.app-password -w | wc -c
-```
-
-```zsh
-# Mini — delete legacy Keychain item (only after IMAP smoke PASSes)
-# security delete-generic-password -s mailroom.icloud.app-password
+security find-generic-password -s <keychain-item> -w | wc -c
 ```
 
 ## Install on Mini (LaunchAgent)
@@ -318,7 +306,7 @@ Plist:
 - Label `com.mailroom.daily` (single existing driver)
 - `MAILROOM_DB=__HOME__/MailArchive/mailroom-copy.sqlite` (or
   `mailroom-daily-copy.sqlite` when rem embed still holds the copy)
-- Keychain item name is pinned in the runner (`mailroom.imap.app-password`); the plist does not set `MAILROOM_KEYCHAIN_ITEM`
+- Keychain item name is `<keychain-item>`, read from `MAILROOM_KEYCHAIN_ITEM` or `MAILROOM_KEYCHAIN_CONFIG`; the plist does not set `MAILROOM_KEYCHAIN_ITEM`
 - `OLLAMA_HOST=http://127.0.0.1:11434`
 - `StartCalendarInterval` 20:05 local (precursor Minute 0; 8pm bills
   digest stays a separate agent)
