@@ -18,9 +18,6 @@ def main(argv):
     if apply and live and os.environ.get("ATT0_FAKE_A3_RC"):
         sys.stderr.write("error: fill failed\n")
         return int(os.environ["ATT0_FAKE_A3_RC"])
-    if (not apply) and os.environ.get("ATT0_FAKE_PROBE_RC"):
-        sys.stderr.write("error: probe failed\n")
-        return int(os.environ["ATT0_FAKE_PROBE_RC"])
     sys.stdout.write("CANARY-SECRET-VALUE\n")
     if os.environ.get("ATT0_FAKE_FALLBACK") == "1":
         sys.stdout.write("warning: falling back to legacy item\n")
@@ -53,7 +50,11 @@ def main(argv):
         "partial_banner": "",
         "parts_truncated": 1,
         "uidvalidity_mismatch": 0,
-        "curl_failures": [],
+        "curl_failures": (
+            ["imap login failed"]
+            if apply and (not live) and os.environ.get("ATT0_FAKE_REH_CURL") == "1"
+            else []
+        ),
         "literal_dropped": 0,
         "literal_truncated": 0,
         "literal_folders": [],

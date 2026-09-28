@@ -13,9 +13,10 @@
 # phasep mode and does not invoke the Keychain binary. window requires
 # /tmp/phaseP-offline-<P_STAMP>.OK, /tmp/phaseP-p8-<P_STAMP>.OK and
 # /tmp/phaseP-state-<P_STAMP> before it creates a directory or a
-# transcript. The Keychain and IMAP pre-check is a meta_fill dry-run
-# on a scratch copy. report is read-only: it recomputes the window
-# verdict from that window's logs and markers, and it does not write.
+# transcript. The Keychain and IMAP gate before S is the in-window
+# rehearsal fill. There is no access probe. report is read-only: it
+# recomputes the window verdict from that window's logs and markers,
+# and it does not write.
 # Mailroom's posted verdict stays official. The +26 search-resume
 # deadline is written once, before search bootout, and dropped when A2
 # takes the writer lock. Nothing in window, rollback, or restore-daily
@@ -80,7 +81,6 @@ A3_LATEST_S=2520
 STEP6_TIMEOUT_S=120
 D_QUERY_TIMEOUT_S=60
 HEALTH_TIMEOUT_S=60
-PROBE_TIMEOUT_S=15
 REHEARSAL_TIMEOUT_S=300
 ARR_RESERVE_S=480
 S2_RESERVE_S=120
@@ -142,7 +142,6 @@ WANTED_RC=1
 SUMMARY_DONE=0
 CLEANED=0
 ASK_SHA=
-PROBE_DB=
 REH_DB=
 HELPER_PL=
 TRANSCRIPT=
@@ -1297,7 +1296,7 @@ if ($reader == 0) {
             $fb = 1;
             $keep = 1;
         }
-        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|summary_json=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|K_OK |K_FAIL |REFUSE_EXISTS|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|WAL-RESTORE-FAILED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
+        if ($line =~ /^(error:|a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|summary_json=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|K_OK |K_FAIL |REFUSE_EXISTS|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|WAL-RESTORE-FAILED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
             $keep = 1;
         }
         print $out $line if $keep;
@@ -2354,39 +2353,6 @@ do_window() {
     if ! sor_1c; then WANTED_RC=1; return; fi
     if ! legacy_rows_ok; then WANTED_RC=1; return; fi
     if ! imap_user_len; then WANTED_RC=1; return; fi
-    PROBE_DB="$MA/dryrun/att0-probe-${STAMP}/mailroom.sqlite"
-    if ! copy_db "$SOR" "$PROBE_DB"; then
-        say STOP-probe-copy
-        WANTED_RC=1
-        return
-    fi
-    say PROBE-COPY-OK
-    _plog="$LOGS/att0w-probe-${STAMP}.log"
-    if ! run_group "$PROBE_TIMEOUT_S" "$_plog" \
-        "$ENVBIN" MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \
-        PYTHONPATH="${S_DIR}:${S_DIR}/attachments" PYTHONDONTWRITEBYTECODE=1 \
-        "$PYTHON" "$S_DIR/attachments/meta_fill.py" --db "$PROBE_DB" --source imap \
-        --allow-mailroom-sqlite --max-messages 1 --timeout 10
-    then
-        if has_line "$_plog" "falling back" || [ "${RUN_FALLBACK:-0}" = "1" ]; then
-            say STOP-falling-back
-        else
-            say STOP-access-probe
-        fi
-        WANTED_RC=1
-        return
-    fi
-    if has_line "$_plog" "falling back"; then
-        say STOP-falling-back
-        WANTED_RC=1
-        return
-    fi
-    if ! has_line "$_plog" "dry_run=1"; then
-        say STOP-probe-not-dry
-        WANTED_RC=1
-        return
-    fi
-    say ACCESS-PROBE-OK
     REH_DB="$MA/dryrun/att0-window-${STAMP}/mailroom.sqlite"
     if ! copy_db "$SOR" "$REH_DB"; then
         say STOP-rehearsal-copy
@@ -2406,6 +2372,7 @@ do_window() {
     fi
     if ! log_ok_migrate "$_mlog" first; then WANTED_RC=1; return; fi
     # In-window 3.5L-b rehearsal fill. Own process group, live timer parent.
+    # This is the Keychain and IMAP gate before S. There is no access probe.
     _flog="$LOGS/att0w-reh-fill-${STAMP}.log"
     if ! run_group "$REHEARSAL_TIMEOUT_S" "$_flog" \
         "$ENVBIN" MAILROOM_IMAP_HOST=imap.mail.me.com MAILROOM_IMAP_USER="$IMAP_USER" \

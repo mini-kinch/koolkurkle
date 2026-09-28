@@ -157,6 +157,70 @@ printf '%s\n' "$_self" | /usr/bin/grep -q 'NO-WRITER-OK' || {
     fail "writer check self-match"
 }
 printf '%s\n' "$_self" | /usr/bin/grep -q '^RC=0$' || fail "writer check rc"
+if /usr/bin/grep -n -E 'PROBE_TIMEOUT_S|PROBE_DB|ACCESS-PROBE-OK|STOP-access-probe|STOP-probe-not-dry|STOP-probe-copy|PROBE-COPY-OK|att0w-probe-|att0-probe-' "$SCRIPT"; then
+    fail "access probe still present"
+fi
+if ! /usr/bin/grep -F -q '^(error:|' "$SCRIPT"; then
+    fail "keep list missing error prefix"
+fi
+/usr/bin/python3 - "$ROOT" <<'PY' || fail "refuse strings"
+import ast
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+bad = re.compile(r"/Users/|@[A-Za-z0-9._+-]+\.[A-Za-z]{2,}|\b/home/")
+
+def consts(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return consts(node.left)
+    if isinstance(node, ast.JoinedStr):
+        out = []
+        for part in node.values:
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                out.append(part.value)
+        return out
+    return []
+
+msgs = []
+for rel, names in (
+    ("scripts/attachments/meta_fill.py", ("FillRefuse",)),
+    ("scripts/imap_curl.py", ("CurlImapError",)),
+):
+    path = root / rel
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        func = node.exc.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name not in names or not node.exc.args:
+            continue
+        found = consts(node.exc.args[0])
+        if found:
+            msgs.extend(found)
+            continue
+        arg = node.exc.args[0]
+        forwarded = (
+            name == "FillRefuse"
+            and isinstance(arg, ast.Call)
+            and getattr(arg.func, "id", None) == "str"
+        )
+        if not forwarded:
+            sys.stderr.write("unparsed %s in %s\n" % (name, rel))
+            raise SystemExit(1)
+if len(msgs) < 8:
+    sys.stderr.write("too few refuse strings\n")
+    raise SystemExit(1)
+for msg in msgs:
+    if bad.search(msg):
+        sys.stderr.write("secret in refuse string\n")
+        raise SystemExit(1)
+PY
+printf '%s\n' "REFUSE-STRINGS-OK"
 # pgrep does not report itself, so the bad pattern has to sit in
 # another process's argv. [r]un_mailroom_daily contains mailroom_daily.
 _bad=$(
@@ -719,6 +783,45 @@ fi
 unset ATT0_FILLCURL_MODE
 printf '%s\n' "FILLCURL-GROUP-OK"
 
+# A refused child prints error: and exits 2. The keep list must retain that
+# line and still drop anything else. The sample is a FillRefuse schema line.
+rm -f /tmp/att0-error-child.log /tmp/att0-error-child.out
+mkdir -p /tmp/att0-error-ma /tmp/att0-error-state
+: > /tmp/att0-error-ma/mailroom.write.lock
+: > /tmp/att0-error-ma/mailroom.daily.lock
+set +e
+(
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    set +e
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    MA=/tmp/att0-error-ma
+    S_DIR="$FIX"
+    ATT0_STATE=/tmp/att0-error-state
+    export ATT0_STATE
+    AWK=/usr/bin/awk
+    PYTHON=/usr/bin/python3
+    PERL=/usr/bin/perl
+    PGREP="$FAKES/pgrep"
+    LSOF="$FAKES/lsof"
+    PS=/bin/ps
+    STAMP=20260928-130088
+    run_group 30 /tmp/att0-error-child.log /usr/bin/python3 -c 'import sys; sys.stderr.write("error: messages.has_attachments is missing; migrate first\n"); sys.stdout.write("NOT-KEPT-LINE\n"); raise SystemExit(2)'
+    printf '%s\n' "RC=$?"
+) > /tmp/att0-error-child.out 2>&1
+set -e
+/usr/bin/grep -q '^error: messages.has_attachments is missing; migrate first$' /tmp/att0-error-child.log || {
+    cat /tmp/att0-error-child.log /tmp/att0-error-child.out >&2
+    fail "error line dropped"
+}
+/usr/bin/grep -q 'NOT-KEPT-LINE' /tmp/att0-error-child.log && fail "non-kept line retained"
+/usr/bin/grep -q '/Users/\|@' /tmp/att0-error-child.log && fail "secret in error log"
+/usr/bin/grep -q '^RC=0$' /tmp/att0-error-child.out && fail "error child rc 0"
+printf '%s\n' "ERROR-LINE-OK"
+
 # W24. Leader exits 0 while a grandchild ignores TERM and holds the lock.
 # Continuing requires the group empty and the lock free.
 : > /tmp/att0-desc-lock
@@ -891,7 +994,7 @@ printf '%s\n' "STEP0-LOCK-OK"
 P_STAMP=20260928-010001
 ATT0_FAKE_STAMP=20260928-120001
 export ATT0_FAKE_STAMP
-unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
+unset ATT0_FAKE_REH_CURL ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
 setup_tree happy
 rc=$(run_mode /tmp/att0-happy window "$P_STAMP")
 expect_rc "$rc" 0 /tmp/att0-happy
@@ -978,6 +1081,50 @@ expect_rc "$rc" 0 /tmp/att0-report
 /usr/bin/grep -q 'ATT0-DONE RULE a4-r1v2 PASS' /tmp/att0-report || fail "report r1v2 rule"
 /usr/bin/grep -q 'ATT0-DONE RULE leak-w21 PASS' /tmp/att0-report || fail "report leak"
 /usr/bin/grep -q 'ATT0-DONE RULE search-restored PASS' /tmp/att0-report || fail "report search"
+if /usr/bin/grep -E 'PROBE-COPY-OK|STOP-probe-copy|STOP-access-probe|STOP-probe-not-dry|ACCESS-PROBE-OK|att0w-probe-|att0-probe-' /tmp/att0-happy; then
+    fail "happy probe line"
+fi
+test ! -e "$HOME/MailArchive/logs/att0w-probe-${ATT0_FAKE_STAMP}.log" || fail "happy probe log"
+test ! -d "$HOME/MailArchive/dryrun/att0-probe-${ATT0_FAKE_STAMP}" || fail "happy probe copy"
+if ! /usr/bin/awk '
+    $1 != "ATT0W" { next }
+    {
+        msg = $0
+        sub(/^ATT0W [0-9]+ /, "", msg)
+        num = $2 + 0
+    }
+    msg ~ /^imap_user_set len=/ && base == 0 {
+        base = num
+        next
+    }
+    msg ~ /^imap_user_set len=/ && base != 0 { exit 1 }
+    base > 0 && filled == 0 {
+        i++
+        if (num != base + i) bad = 1
+        got[i] = msg
+    }
+    base > 0 && filled == 0 && msg == "FILL-REPORT-OK" { filled = num }
+    msg == "DEADLINE-OK" { deadline = num }
+    msg == "SEARCH-BOOTED-OUT" { booted = num }
+    END {
+        if (base == 0 || filled == 0 || bad != 0 || i != 11) exit 1
+        if (got[1] != "GROUP-EMPTY") exit 1
+        if (got[2] != "FLOCK-WRITE-FREE") exit 1
+        if (got[3] != "FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks") exit 1
+        if (got[4] != "LEFTOVER-CLEAR") exit 1
+        if (got[5] != "MIGRATE-OK") exit 1
+        if (got[6] != "GROUP-EMPTY") exit 1
+        if (got[7] != "FLOCK-WRITE-FREE") exit 1
+        if (got[8] != "FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks") exit 1
+        if (got[9] != "LEFTOVER-CLEAR") exit 1
+        if (got[10] != "PARTS-TRUNCATED-INFO parts_truncated=1") exit 1
+        if (got[11] != "FILL-REPORT-OK") exit 1
+        if (deadline <= filled || booted <= deadline) exit 1
+        printf "PROBE-SLOT imap=%d rehearse-migrate=%d rehearse-fill=%d deadline=%d bootout=%d\n", base, base + 5, filled, deadline, booted
+    }
+' /tmp/att0-happy; then
+    fail "rehearsal step numbers"
+fi
 printf '%s\n' "HAPPY-WINDOW-OK"
 
 ATT0_FAKE_STAMP=20260928-120011
@@ -989,20 +1136,28 @@ expect_rc "$rc" 1 /tmp/att0-second
 /usr/bin/grep -q 'SEARCH-BOOTED-OUT' /tmp/att0-second && fail "second bootout"
 printf '%s\n' "SECOND-WINDOW-OK"
 
+# Rehearsal fill is the Keychain and IMAP gate before S. A child that
+# returns 0 with a non-empty curl_failures list stops here.
 P_STAMP=20260928-010002
 ATT0_FAKE_STAMP=20260928-120002
-export ATT0_FAKE_STAMP ATT0_FAKE_PROBE_RC=1
-setup_tree probe
-rc=$(run_mode /tmp/att0-probe window "$P_STAMP")
-expect_rc "$rc" 1 /tmp/att0-probe
-/usr/bin/grep -q 'STOP-access-probe' /tmp/att0-probe || fail "probe stop"
-/usr/bin/grep -q 'bootout' "${ATT0_STATE}/launchctl.log" && fail "probe booted search"
-ls "$HOME/MailArchive/backups"/mailroom-pre-att0-window-* >/dev/null 2>&1 && fail "probe backup"
-/usr/bin/grep -q 'A2-OK' /tmp/att0-probe && fail "probe migrated"
-/usr/bin/grep -q 'SAFE-STATE' /tmp/att0-probe || fail "probe safe"
-/usr/bin/grep -q 'SUMMARY stamp=20260928-120002 exit=1' /tmp/att0-probe || fail "probe summary"
-unset ATT0_FAKE_PROBE_RC
-printf '%s\n' "PROBE-FAIL-OK"
+export ATT0_FAKE_STAMP ATT0_FAKE_REH_CURL=1
+setup_tree reh-curl
+rc=$(run_mode /tmp/att0-reh-curl window "$P_STAMP")
+expect_rc "$rc" 1 /tmp/att0-reh-curl
+/usr/bin/grep -q 'STOP-curl-failures' /tmp/att0-reh-curl || fail "reh curl stop"
+/usr/bin/grep -E 'write_rc=|DEADLINE-OK|bootout_rc=|SEARCH-BOOTED-OUT|DEADLINE-26-MARGIN|A2-OK|BACKUP-OK|D-CHECK-OK' /tmp/att0-reh-curl && fail "reh curl reached S"
+/usr/bin/grep -q 'bootout' "${ATT0_STATE}/launchctl.log" && fail "reh curl booted search"
+test ! -e "/tmp/att0w-s1-${ATT0_FAKE_STAMP}" || fail "reh curl wrote s1"
+ls "$HOME/MailArchive/backups"/mailroom-pre-att0-window-* >/dev/null 2>&1 && fail "reh curl backup"
+/usr/bin/grep -q 'SAFE-STATE' /tmp/att0-reh-curl || fail "reh curl safe"
+/usr/bin/grep -q 'SUMMARY stamp=20260928-120002 exit=1' /tmp/att0-reh-curl || fail "reh curl summary"
+if /usr/bin/grep -E 'PROBE-COPY-OK|STOP-probe-copy|STOP-access-probe|STOP-probe-not-dry|ACCESS-PROBE-OK|att0w-probe-|att0-probe-' /tmp/att0-reh-curl; then
+    fail "reh curl probe line"
+fi
+test ! -e "$HOME/MailArchive/logs/att0w-probe-${ATT0_FAKE_STAMP}.log" || fail "reh curl probe log"
+test ! -d "$HOME/MailArchive/dryrun/att0-probe-${ATT0_FAKE_STAMP}" || fail "reh curl probe copy"
+unset ATT0_FAKE_REH_CURL
+printf '%s\n' "REH-CURL-OK"
 
 P_STAMP=20260928-010003
 ATT0_FAKE_STAMP=20260928-120003
