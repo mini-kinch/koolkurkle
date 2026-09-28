@@ -708,6 +708,42 @@ def _ledger_ids(path: Path) -> list[str]:
     return [row[0] for row in rows]
 
 
+def _connect_with_rules(rules, current=None):
+    """Ledger connections that raise OperationalError for selected SQL.
+
+    ``rules`` maps a message id (or None for every id) to ``begin``,
+    ``insert``, or ``commit``. ``current`` is the id ``_send_one`` is on.
+    """
+    real = check._connect_ledger
+
+    def connect(path):
+        conn = real(path)
+        real_execute = conn.execute
+
+        def execute(sql, *args, **kwargs):
+            text = sql if isinstance(sql, str) else ""
+            active = None if current is None else current.get("id")
+            fault = rules.get(active, rules.get(None))
+            if fault == "begin" and "BEGIN IMMEDIATE" in text:
+                raise sqlite3.OperationalError("database is locked")
+            if fault == "insert" and "INSERT INTO notify_log" in text:
+                raise sqlite3.OperationalError("disk I/O error")
+            if fault == "commit" and text == "COMMIT":
+                raise sqlite3.OperationalError("commit failed")
+            return real_execute(sql, *args, **kwargs)
+
+        class _Proxy:
+            def execute(self, sql, *args, **kwargs):
+                return execute(sql, *args, **kwargs)
+
+            def close(self):
+                conn.close()
+
+        return _Proxy()
+
+    return connect
+
+
 class UrgentTextOnceTests(unittest.TestCase):
     def test_same_id_twice_in_one_run_sends_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -749,8 +785,9 @@ class UrgentTextOnceTests(unittest.TestCase):
                     raise RuntimeError("transport down")
                 calls.append(message_id)
 
-            with self.assertRaises(RuntimeError):
-                check.send_urgent_texts(ledger, ["msg-1"], send)
+            first = check.send_urgent_texts(ledger, ["msg-1"], send)
+            self.assertEqual(first, 0)
+            self.assertEqual(first.failed, ("msg-1",))
             self.assertEqual(_ledger_ids(ledger), [])
             self.assertEqual(calls, [])
             self.assertEqual(check.send_urgent_texts(ledger, ["msg-1"], send), 1)
@@ -987,7 +1024,8 @@ class UrgentTextOnceTests(unittest.TestCase):
                 first = check.deliver_archive_urgent_texts(archive, send)
             self.assertEqual(first, check.URGENT_SEND_CAP)
             self.assertEqual(first.overflow, 5)
-            self.assertIn("urgent_texts_overflow=5\n", buf.getvalue())
+            self.assertEqual(list(first.lines), ["urgent_texts_overflow=5"])
+            self.assertNotIn("urgent_texts_overflow=", buf.getvalue())
             self.assertEqual(calls, fresh[: check.URGENT_SEND_CAP])
             ledger = check.urgent_ledger_path(archive)
             recorded = set(_ledger_ids(ledger))
@@ -1044,8 +1082,8 @@ class UrgentTextOnceTests(unittest.TestCase):
                 check.run_pgrep = saved_pgrep
             self.assertEqual(code, check.EXIT_OK)
             self.assertTrue(lines[-1].endswith("POST-RESTORE PASS"))
-            self.assertIn("urgent_text_deferred=lock-me", lines)
-            self.assertIn("urgent_text_deferred=lock-me\n", buf.getvalue())
+            self.assertEqual(lines.count("urgent_text_deferred=lock-me"), 1)
+            self.assertNotIn("urgent_text_deferred=", buf.getvalue())
             self.assertEqual(calls, ["ok-new"])
             self.assertNotIn("lock-me", _ledger_ids(check.urgent_ledger_path(archive)))
             self.assertIn("ok-new", _ledger_ids(check.urgent_ledger_path(archive)))
@@ -1075,6 +1113,195 @@ class UrgentTextOnceTests(unittest.TestCase):
             self.assertTrue(lines[-1].endswith("POST-RESTORE FAIL last_daily_rag_ok"))
             self.assertEqual(calls, [])
             self.assertFalse(check.urgent_ledger_path(archive).exists())
+
+    def _add_urgent(self, archive: Path, ids: list[str]) -> None:
+        conn = sqlite3.connect(archive / "mailroom.sqlite")
+        conn.executemany(
+            "INSERT INTO messages (id, urgent, ingested_at, present_on_server) "
+            "VALUES (?, 1, '2026-09-28T00:00:00Z', 1)",
+            [(message_id,) for message_id in ids],
+        )
+        conn.commit()
+        conn.close()
+
+    def _evaluate_send(self, archive: Path, send):
+        saved_lsof = check.run_lsof
+        saved_pgrep = check.run_pgrep
+        check.run_lsof = _quiet_lsof
+        check.run_pgrep = _quiet_pgrep
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                lines, code = check.evaluate(
+                    archive, SINCE_DT, urgent_send=send
+                )
+        finally:
+            check.run_lsof = saved_lsof
+            check.run_pgrep = saved_pgrep
+        return lines, code, buf.getvalue()
+
+    def test_raised_sender_records_neighbors_and_retries_that_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old"])
+            calls: list[str] = []
+            boom = {"armed": True}
+
+            def send(message_id: str) -> None:
+                if message_id == "2" and boom["armed"]:
+                    boom["armed"] = False
+                    raise RuntimeError("transport down")
+                calls.append(message_id)
+
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self.assertEqual(calls, [])
+            self._add_urgent(archive, ["1", "2", "3"])
+            lines, code, _stdout = self._evaluate_send(archive, send)
+            self.assertEqual(code, check.EXIT_OK)
+            self.assertEqual(lines.count("urgent_text_failed=2"), 1)
+            self.assertTrue(lines[-1].endswith("POST-RESTORE PASS"))
+            ledger = check.urgent_ledger_path(archive)
+            recorded = _ledger_ids(ledger)
+            self.assertIn("1", recorded)
+            self.assertIn("3", recorded)
+            self.assertNotIn("2", recorded)
+            self.assertEqual(calls, ["1", "3"])
+            calls.clear()
+            again = check.deliver_archive_urgent_texts(archive, send)
+            self.assertEqual(again, 1)
+            self.assertEqual(again.failed, ())
+            self.assertEqual(calls, ["2"])
+            self.assertIn("2", _ledger_ids(ledger))
+
+    def test_pre_send_lock_error_defers_without_sending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old"])
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                calls.append(message_id)
+
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            self._add_urgent(archive, ["lock-me"])
+            real_connect = check._connect_ledger
+            check._connect_ledger = _connect_with_rules({None: "begin"})
+            try:
+                lines, code, stdout = self._evaluate_send(archive, send)
+            finally:
+                check._connect_ledger = real_connect
+            self.assertEqual(code, check.EXIT_OK)
+            self.assertEqual(calls, [])
+            self.assertEqual(lines.count("urgent_text_deferred=lock-me"), 1)
+            self.assertNotIn("urgent_text_unconfirmed=", "\n".join(lines))
+            self.assertNotIn("urgent_text_deferred=", stdout)
+            self.assertNotIn(
+                "lock-me", _ledger_ids(check.urgent_ledger_path(archive))
+            )
+
+    def test_post_send_insert_or_commit_error_is_unconfirmed(self):
+        for fault in ("insert", "commit"):
+            with self.subTest(fault=fault):
+                with tempfile.TemporaryDirectory() as tmp:
+                    archive = Path(tmp)
+                    self._passing_archive(archive, ["old"])
+                    calls: list[str] = []
+
+                    def send(message_id: str) -> None:
+                        calls.append(message_id)
+
+                    self.assertEqual(
+                        check.deliver_archive_urgent_texts(archive, send), 0
+                    )
+                    self._add_urgent(archive, ["gone-out"])
+                    real_connect = check._connect_ledger
+                    check._connect_ledger = _connect_with_rules({None: fault})
+                    try:
+                        lines, code, _stdout = self._evaluate_send(archive, send)
+                    finally:
+                        check._connect_ledger = real_connect
+                    self.assertEqual(code, check.EXIT_OK)
+                    self.assertEqual(calls, ["gone-out"])
+                    self.assertEqual(
+                        lines.count("urgent_text_unconfirmed=gone-out"), 1
+                    )
+                    self.assertNotIn("urgent_text_deferred=", "\n".join(lines))
+                    self.assertNotIn(
+                        "gone-out",
+                        _ledger_ids(check.urgent_ledger_path(archive)),
+                    )
+
+    def test_notice_lines_are_returned_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp)
+            self._passing_archive(archive, ["old"])
+            calls: list[str] = []
+
+            def send(message_id: str) -> None:
+                if message_id == "b-fail":
+                    raise RuntimeError("transport down")
+                calls.append(message_id)
+
+            self.assertEqual(check.deliver_archive_urgent_texts(archive, send), 0)
+            ok_ids = ["a-ok-%02d" % n for n in range(17)]
+            self._add_urgent(
+                archive,
+                ok_ids
+                + [
+                    "b-fail",
+                    "c-lock",
+                    "d-unconfirmed",
+                    "e-over-1",
+                    "e-over-2",
+                    "e-over-3",
+                ],
+            )
+            current = {"id": None}
+            real_one = check._send_one
+            real_connect = check._connect_ledger
+
+            def send_one(path, message_id, sender):
+                current["id"] = message_id
+                try:
+                    return real_one(path, message_id, sender)
+                finally:
+                    current["id"] = None
+
+            check._send_one = send_one
+            check._connect_ledger = _connect_with_rules(
+                {"c-lock": "begin", "d-unconfirmed": "insert"},
+                current,
+            )
+            try:
+                lines, code, stdout = self._evaluate_send(archive, send)
+            finally:
+                check._send_one = real_one
+                check._connect_ledger = real_connect
+            self.assertEqual(code, check.EXIT_OK)
+            expected = (
+                "urgent_texts_overflow=3",
+                "urgent_text_deferred=c-lock",
+                "urgent_text_failed=b-fail",
+                "urgent_text_unconfirmed=d-unconfirmed",
+            )
+            shown = stdout + "\n".join(lines) + "\n"
+            for line in expected:
+                self.assertEqual(lines.count(line), 1)
+                self.assertNotIn(line, stdout)
+                self.assertEqual(shown.count(line + "\n"), 1)
+            self.assertEqual(calls, ok_ids + ["d-unconfirmed"])
+            recorded = set(_ledger_ids(check.urgent_ledger_path(archive)))
+            for message_id in ok_ids:
+                self.assertIn(message_id, recorded)
+            for message_id in (
+                "b-fail",
+                "c-lock",
+                "d-unconfirmed",
+                "e-over-1",
+                "e-over-2",
+                "e-over-3",
+            ):
+                self.assertNotIn(message_id, recorded)
 
 
 class SourceContractTests(unittest.TestCase):

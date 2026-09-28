@@ -44,15 +44,19 @@ stamp must be strictly newer than ``--since``.
 ``send_urgent_texts`` delivers one urgent text per ``message_id``.
 logs/notify_log.sqlite is the only per-message urgent ledger, and every future per-message urgent sender must go through send_urgent_texts.
 The helper is at-least-once if the process dies between the send returning and COMMIT.
+A database error after the send returns is the same at-least-once case.
 It reads ``notify_log`` under ``BEGIN IMMEDIATE``,
 calls the sender, and inserts the id only after that call returns.
 The first time that file is created, every urgent id that already
 exists is inserted with result ``baseline`` in that same transaction
 and is not sent. Each later call sends at most URGENT_SEND_CAP new
 ids. Ids over the cap stay unsent and unrecorded. A locked ledger
-defers that id and does not send it. The read-only report sends only
-when a sender is passed and the check result is 0. It never deletes
-ledger rows and never writes ``mailroom.sqlite``.
+defers that id and does not send it. A sender that raises rolls that
+id back and the remaining ids continue. A database error after the
+send returns leaves that id unconfirmed. Those notice lines are
+returned as data and printed once by the caller. The read-only report
+sends only when a sender is passed and the check result is 0. It never
+deletes ledger rows and never writes ``mailroom.sqlite``.
 """
 
 from __future__ import annotations
@@ -322,13 +326,40 @@ def _ensure_notify_log(conn: sqlite3.Connection) -> None:
     )
 
 
-class _SendReport(int):
-    """Sent count. ``overflow`` and ``deferred`` ride along."""
+def _urgent_notice_lines(overflow, deferred, failed, unconfirmed) -> tuple[str, ...]:
+    """Status lines for the caller to print once. This does not write."""
+    lines: list[str] = []
+    if overflow:
+        lines.append("urgent_texts_overflow=%d" % overflow)
+    for message_id in deferred:
+        lines.append("urgent_text_deferred=%s" % message_id)
+    for message_id in failed:
+        lines.append("urgent_text_failed=%s" % message_id)
+    for message_id in unconfirmed:
+        lines.append("urgent_text_unconfirmed=%s" % message_id)
+    return tuple(lines)
 
-    def __new__(cls, sent, overflow=0, deferred=()):
+
+class _SendFailed(Exception):
+    """The sender raised. The ledger transaction was rolled back."""
+
+
+class _SendUnconfirmed(Exception):
+    """The sender returned, then the ledger write failed."""
+
+
+class _SendReport(int):
+    """Sent count. Notice fields are data for the caller to print once."""
+
+    def __new__(cls, sent, overflow=0, deferred=(), failed=(), unconfirmed=()):
         obj = int.__new__(cls, sent)
         obj.overflow = overflow
         obj.deferred = tuple(deferred)
+        obj.failed = tuple(failed)
+        obj.unconfirmed = tuple(unconfirmed)
+        obj.lines = _urgent_notice_lines(
+            obj.overflow, obj.deferred, obj.failed, obj.unconfirmed
+        )
         return obj
 
 
@@ -455,9 +486,11 @@ def _send_one(path: Path, message_id: str, send) -> bool:
     pass the ledger check first. The row is inserted only after ``send``
     returns. A raised ``send`` rolls the transaction back and leaves no row.
     The helper is at-least-once if the process dies between the send
-    returning and COMMIT.
+    returning and COMMIT. A database error after the send returns is the
+    same at-least-once case.
     """
     conn = _connect_ledger(path)
+    phase = "before"
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -468,7 +501,9 @@ def _send_one(path: Path, message_id: str, send) -> bool:
             if row is not None:
                 conn.execute("COMMIT")
                 return False
+            phase = "send"
             send(message_id)
+            phase = "after"
             conn.execute(
                 "INSERT INTO notify_log(ts, message_id, channel, result) "
                 "VALUES (?, ?, ?, ?)",
@@ -481,8 +516,12 @@ def _send_one(path: Path, message_id: str, send) -> bool:
             )
             conn.execute("COMMIT")
             return True
-        except Exception:
+        except Exception as exc:
             _rollback(conn)
+            if phase == "send":
+                raise _SendFailed(message_id) from exc
+            if phase == "after":
+                raise _SendUnconfirmed(message_id) from exc
             raise
     finally:
         conn.close()
@@ -493,11 +532,14 @@ def send_urgent_texts(ledger_path: Path | str, message_ids, send) -> _SendReport
 
     ``send(message_id)`` must raise when the text is not confirmed. The
     same id later in ``message_ids``, or in a later call, does not send
-    again. Failed calls leave the id unrecorded so a retry can send it.
-    At most ``URGENT_SEND_CAP`` ids are sent. The rest stay unrecorded.
-    ``sqlite3.OperationalError`` defers that id and does not send it.
-    The helper is at-least-once if the process dies between the send
-    returning and COMMIT.
+    again. A raised send rolls that id back, leaves it unrecorded, and
+    the remaining ids still run. At most ``URGENT_SEND_CAP`` ids are
+    sent. The rest stay unrecorded. ``sqlite3.OperationalError`` before
+    the send defers that id and does not send it. A database error after
+    the send returns is unconfirmed. The helper is at-least-once if the
+    process dies between the send returning and COMMIT. A database error
+    after the send returns is the same at-least-once case. Notice lines
+    are returned on the report and are not printed here.
     """
     path = _ledger_file(ledger_path)
     recorded = _recorded_ids(path)
@@ -506,19 +548,23 @@ def send_urgent_texts(ledger_path: Path | str, message_ids, send) -> _SendReport
     overflow = len(pending) - len(chosen)
     sent = 0
     deferred: list[str] = []
+    failed: list[str] = []
+    unconfirmed: list[str] = []
     for message_id in chosen:
         try:
             did_send = _send_one(path, message_id, send)
+        except _SendUnconfirmed:
+            unconfirmed.append(message_id)
+            continue
+        except _SendFailed:
+            failed.append(message_id)
+            continue
         except sqlite3.OperationalError:
             deferred.append(message_id)
             continue
         if did_send:
             sent += 1
-    if overflow:
-        sys.stdout.write("urgent_texts_overflow=%d\n" % overflow)
-    for message_id in deferred:
-        sys.stdout.write("urgent_text_deferred=%s\n" % message_id)
-    return _SendReport(sent, overflow, deferred)
+    return _SendReport(sent, overflow, deferred, failed, unconfirmed)
 
 
 def rescan_urgent_texts(ledger_path: Path | str, message_ids, send) -> int:
@@ -825,13 +871,8 @@ def evaluate(
     )
     if urgent_send is not None and code == EXIT_OK:
         report = deliver_archive_urgent_texts(archive, urgent_send)
-        extra: list[str] = []
-        if report.overflow:
-            extra.append("urgent_texts_overflow=%d" % report.overflow)
-        for message_id in report.deferred:
-            extra.append("urgent_text_deferred=%s" % message_id)
-        if extra:
-            lines = lines[:-1] + extra + lines[-1:]
+        if report.lines:
+            lines = lines[:-1] + list(report.lines) + lines[-1:]
     return lines, code
 
 
