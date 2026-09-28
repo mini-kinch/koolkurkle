@@ -2540,7 +2540,7 @@ do_report() {
         _ragone=$D_GONE
         _raunsc=$D_UNSCANNED
     fi
-    _rm=
+    _rms=
     _re=
     _rcap=
     _rel=
@@ -2549,7 +2549,7 @@ do_report() {
     _acap=
     _ael=
     if fill_take "$_reh"; then
-        _rm=$FILL_MESSAGES
+        _rms=$FILL_MESSAGES
         _re=$FILL_ERRORS
         _rcap=$FILL_CAPPED
         _rel=$FILL_ELIGIBLE
@@ -2589,7 +2589,7 @@ do_report() {
     else
         _rule a2-fill FAIL
     fi
-    if is_uint "$_rm" && is_uint "$_re" && is_uint "$_rcap" && is_uint "$_rel" && [ $((_rm + _re + _rcap)) = "$_rel" ]; then
+    if is_uint "$_rms" && is_uint "$_re" && is_uint "$_rcap" && is_uint "$_rel" && [ $((_rms + _re + _rcap)) = "$_rel" ]; then
         _rule a2-identity PASS
     else
         _rule a2-identity FAIL
