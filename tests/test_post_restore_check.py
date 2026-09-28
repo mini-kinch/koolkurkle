@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only post-restore check. Temp sqlite only. No network, no Keychain."""
+"""Read-only post-restore check. Temp sqlite and PATH stubs only."""
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import sqlite3
@@ -11,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +23,92 @@ SINCE = "2026-09-26T15:50:00Z"
 SINCE_DT = check.parse_ts(SINCE)
 NEWER = "2026-09-28T04:00:00Z"
 OLDER = "2026-09-26T08:50:00Z"
+FOREIGN_PID = "424242"
+
+LSOF_STUB = """#!/usr/bin/env python3
+import os
+import sys
+
+log = os.environ.get("LSOF_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write("\\t".join(sys.argv) + "\\n")
+if "--" not in sys.argv:
+    sys.stderr.write("missing --\\n")
+    sys.exit(2)
+paths = sys.argv[sys.argv.index("--") + 1 :]
+if len(paths) != 1:
+    sys.stderr.write("multi-path\\n")
+    sys.exit(2)
+mode = os.environ.get("LSOF_MODE", "free")
+held = os.environ.get("LSOF_HELD_BASENAME", "")
+base = paths[0].rsplit("/", 1)[-1]
+if held and base == held:
+    sys.stdout.write("4242\\n")
+    sys.exit(0)
+if mode == "held":
+    sys.stdout.write("4242\\n")
+    sys.exit(0)
+if mode == "stderr":
+    sys.stderr.write("lsof: status error\\n")
+    sys.exit(1)
+if mode == "rc2":
+    sys.stderr.write("lsof failed\\n")
+    sys.exit(2)
+if mode == "nondigit":
+    sys.stdout.write("not-a-pid\\n")
+    sys.exit(0)
+if mode == "digit-and-junk":
+    sys.stdout.write("123\\nnot-a-pid\\n")
+    sys.exit(2)
+sys.exit(1)
+"""
+
+PGREP_STUB = """#!/usr/bin/env python3
+import os
+import sys
+
+log = os.environ.get("PGREP_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write("\\t".join(sys.argv) + "\\n")
+pattern = sys.argv[-1]
+mode = os.environ.get("PGREP_MODE", "absent")
+if mode == "self":
+    sys.stdout.write("%s\\n" % os.getppid())
+    sys.exit(0)
+if mode == "self-and-parent":
+    checker = os.getppid()
+    parent = 0
+    try:
+        status = open("/proc/%s/status" % checker, encoding="utf-8").read()
+    except OSError:
+        status = ""
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            parent = int(line.split()[1])
+            break
+    sys.stdout.write("%s\\n" % checker)
+    if parent > 0:
+        sys.stdout.write("%s\\n" % parent)
+    sys.exit(0)
+if mode == "present":
+    only = os.environ.get("PGREP_PRESENT_PATTERN", "")
+    if only and pattern != only:
+        sys.exit(1)
+    sys.stdout.write(os.environ.get("PGREP_PID", "424242") + "\\n")
+    sys.exit(0)
+if mode == "error":
+    only = os.environ.get("PGREP_ERROR_PATTERN", "")
+    if only and pattern != only:
+        sys.exit(1)
+    sys.stderr.write("pgrep failed\\n")
+    sys.exit(2)
+if mode == "rc1-noise":
+    sys.stdout.write("noise\\n")
+    sys.exit(1)
+sys.exit(1)
+"""
 
 
 def _sha256(path: Path) -> str:
@@ -91,12 +175,22 @@ def _stamp(archive: Path, value: str, note: str = "embed=skipped") -> None:
     (logs / check.STAMP_NAME).write_text(value + "\n" + note + "\n", encoding="utf-8")
 
 
-def _quiet_processes() -> dict[str, str]:
-    return {
-        "meta_fill": "absent",
-        "with_writer_lock": "absent",
-        "daily_process": "absent",
-    }
+def _install_stub(directory: Path, name: str, body: str) -> None:
+    path = directory / name
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _quiet_lsof(_path: str) -> tuple[int, str, str]:
+    return 1, "", ""
+
+
+def _quiet_pgrep(_pattern: str) -> tuple[int, str, str]:
+    return 1, "", ""
+
+
+def _writer_lines(state: str = "absent") -> list[str]:
+    return ["%s=%s" % (name, state) for name, _pattern in check.WRITER_CHECKS]
 
 
 class ParseAndCountTests(unittest.TestCase):
@@ -160,61 +254,105 @@ class ParseAndCountTests(unittest.TestCase):
         self.assertFalse(check.stamp_is_newer(None, SINCE_DT))
 
 
-class ProcessAndLockUnitTests(unittest.TestCase):
-    def test_classify_processes_matches_needles_only(self):
-        text = "\n".join(
-            [
-                "python3 scripts/post_restore_check.py --since 2026-09-26T00:00:00Z",
-                "python3 scripts/attachments/meta_fill.py --apply",
-                "python3 scripts/with_writer_lock.py --purpose x -- true",
-                "/bin/zsh scripts/run_mailroom_daily.sh",
-            ]
-        )
-        states = check.classify_processes(text)
-        self.assertEqual(states["meta_fill"], "running")
-        self.assertEqual(states["with_writer_lock"], "running")
-        self.assertEqual(states["daily_process"], "running")
+class LsofRuleTests(unittest.TestCase):
+    def test_digit_line_is_held_even_with_a_bad_status(self):
+        self.assertEqual(check.classify_lsof(0, "4242\n", ""), "held")
+        self.assertEqual(check.classify_lsof(2, "  123  \nnot-a-pid\n", "nope"), "held")
 
-    def test_absent_when_only_the_checker_is_listed(self):
-        states = check.classify_processes("python3 scripts/post_restore_check.py\n")
-        self.assertEqual(states, _quiet_processes())
+    def test_rc_1_empty_is_free(self):
+        self.assertEqual(check.classify_lsof(1, "", ""), "free")
+        self.assertEqual(check.classify_lsof(1, "\n", "  "), "free")
 
-    def test_missing_lock_file_is_free(self):
+    def test_other_results_are_lsof_error(self):
+        self.assertEqual(check.classify_lsof(0, "", ""), "lsof-error")
+        self.assertEqual(check.classify_lsof(0, "not-a-pid\n", ""), "lsof-error")
+        self.assertEqual(check.classify_lsof(1, "", "lsof: status error\n"), "lsof-error")
+        self.assertEqual(check.classify_lsof(2, "", ""), "lsof-error")
+        self.assertEqual(check.classify_lsof(1, "noise\n", ""), "lsof-error")
+
+    def test_missing_write_lock_is_bad_and_skips_lsof(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(check.lock_state(Path(tmp) / "mailroom.write.lock"), "free")
+            archive = Path(tmp)
 
-    def test_unlocked_file_is_free_via_proc_locks(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "mailroom.daily.lock"
-            path.write_text("idle\n", encoding="utf-8")
-            self.assertEqual(check.lock_state(path), "free")
+            def boom(_path: str) -> tuple[int, str, str]:
+                raise AssertionError("lsof must not run for a missing lock")
 
-    def test_proc_locks_token_matches_a_held_flock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "mailroom.write.lock"
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            original = check.run_lsof
+            check.run_lsof = boom
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                proc_locks = Path("/proc/locks").read_text(encoding="utf-8")
-                self.assertTrue(check.lock_held_in_proc(path, proc_locks))
-                self.assertEqual(check.lock_state(path), "held")
+                self.assertEqual(
+                    check.probe_lock_file(archive / check.WRITE_LOCK_NAME),
+                    "missing",
+                )
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                check.run_lsof = original
+
+    def test_missing_daily_lock_is_missing_without_lsof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / check.DAILY_LOCK_NAME
+            original = check.run_lsof
+            check.run_lsof = lambda _path: (_ for _ in ()).throw(
+                AssertionError("lsof must not run")
+            )
+            try:
+                self.assertEqual(check.probe_lock_file(path), "missing")
+            finally:
+                check.run_lsof = original
+
+
+class PgrepRuleTests(unittest.TestCase):
+    def test_rc_0_foreign_pid_is_present(self):
+        self.assertEqual(
+            check.classify_pgrep(0, FOREIGN_PID + "\n", "", {1, 2}),
+            "present",
+        )
+
+    def test_rc_1_empty_is_absent(self):
+        self.assertEqual(check.classify_pgrep(1, "", "", {1, 2}), "absent")
+
+    def test_other_results_are_error_not_absent(self):
+        self.assertEqual(check.classify_pgrep(2, "", "", {1}), "error")
+        self.assertEqual(check.classify_pgrep(1, "noise\n", "", {1}), "error")
+        self.assertEqual(check.classify_pgrep(1, "", "pgrep failed\n", {1}), "error")
+        self.assertEqual(check.classify_pgrep(0, "", "", {1}), "error")
+        self.assertEqual(check.classify_pgrep(0, "nope\n", "", {1}), "error")
+        self.assertEqual(check.classify_pgrep(127, "", "exec-failed", {1}), "error")
+
+    def test_self_and_parent_pids_are_not_writers(self):
+        self.assertEqual(
+            check.classify_pgrep(0, "10\n20\n", "", {10, 20}),
+            "absent",
+        )
+        self.assertEqual(
+            check.classify_pgrep(0, "10\n424242\n", "", {10, 20}),
+            "present",
+        )
+
+    def test_curl_pattern_is_anchored_argv(self):
+        patterns = {pattern for _name, pattern in check.WRITER_CHECKS}
+        self.assertIn("^/usr/bin/curl( |$)", patterns)
+        self.assertNotIn("curl.*imap", patterns)
+        self.assertIn("security find-generic", patterns)
+        self.assertIn("phaseP_", patterns)
 
 
 class EvaluateTests(unittest.TestCase):
     def setUp(self):
-        self._ps = check.read_process_table
-        check.read_process_table = lambda: ""
+        self._lsof = check.run_lsof
+        self._pgrep = check.run_pgrep
+        check.run_lsof = _quiet_lsof
+        check.run_pgrep = _quiet_pgrep
 
     def tearDown(self):
-        check.read_process_table = self._ps
+        check.run_lsof = self._lsof
+        check.run_pgrep = self._pgrep
 
-    def _archive(self, tmp: str) -> Path:
+    def _archive(self, tmp: str, *, write_lock: bool = True) -> Path:
         archive = Path(tmp)
         _write_db(archive / "mailroom.sqlite")
         _stamp(archive, NEWER)
+        if write_lock:
+            (archive / check.WRITE_LOCK_NAME).write_text("", encoding="utf-8")
         return archive
 
     def test_ok_lines_and_exit(self):
@@ -222,8 +360,8 @@ class EvaluateTests(unittest.TestCase):
             archive = self._archive(tmp)
             before = _sha256(archive / "mailroom.sqlite")
             names_before = sorted(p.name for p in archive.iterdir())
-            lines, bits = check.evaluate(archive, SINCE_DT)
-            self.assertEqual(bits, check.EXIT_OK)
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_OK)
             self.assertEqual(
                 lines,
                 [
@@ -233,53 +371,140 @@ class EvaluateTests(unittest.TestCase):
                     "urgent_texts_sent_since=2",
                     "bills_added_since=2",
                     "write.lock=free",
-                    "daily.lock=free",
-                    "meta_fill=absent",
-                    "with_writer_lock=absent",
-                    "daily_process=absent",
+                    "daily.lock=missing",
+                    *_writer_lines(),
+                    "POST-RESTORE PASS",
                 ],
             )
             self.assertEqual(_sha256(archive / "mailroom.sqlite"), before)
             self.assertEqual(sorted(p.name for p in archive.iterdir()), names_before)
 
-    def test_old_stamp_sets_stamp_bit(self):
+    def test_each_lock_is_a_separate_lsof_of_one_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self._archive(tmp)
+            (archive / check.DAILY_LOCK_NAME).write_text("", encoding="utf-8")
+            calls: list[str] = []
+
+            def record(path: str) -> tuple[int, str, str]:
+                calls.append(path)
+                return 1, "", ""
+
+            check.run_lsof = record
+            _lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_OK)
+            self.assertEqual(
+                [Path(path).name for path in calls],
+                [check.WRITE_LOCK_NAME, check.DAILY_LOCK_NAME],
+            )
+            for path in calls:
+                self.assertNotIn(" ", Path(path).name)
+
+    def test_old_stamp_exits_stamp_class(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = self._archive(tmp)
             _stamp(archive, OLDER)
-            _lines, bits = check.evaluate(archive, SINCE_DT)
-            self.assertEqual(bits & check.EXIT_STAMP, check.EXIT_STAMP)
-            self.assertEqual(bits & check.EXIT_DB, 0)
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_STAMP)
+            self.assertTrue(lines[-1].endswith("POST-RESTORE FAIL last_daily_rag_ok"))
 
-    def test_missing_sqlite_sets_db_bit_and_still_reports_stamp(self):
+    def test_missing_sqlite_is_db_class_and_still_reports_stamp(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp)
             _stamp(archive, NEWER)
-            lines, bits = check.evaluate(archive, SINCE_DT)
-            self.assertEqual(bits & check.EXIT_DB, check.EXIT_DB)
+            (archive / check.WRITE_LOCK_NAME).write_text("", encoding="utf-8")
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_DB)
             self.assertIn("G=unavailable", lines)
             self.assertIn(
                 "last_daily_rag_ok=%s newer_than_since=yes" % NEWER,
                 lines,
             )
+            self.assertEqual(lines[-1], "POST-RESTORE FAIL sqlite")
 
-    def test_held_lock_and_old_stamp_combine_bits(self):
+    def test_missing_write_lock_fails_and_missing_daily_lock_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self._archive(tmp, write_lock=False)
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_WRITE_LOCK)
+            self.assertIn("write.lock=missing", lines)
+            self.assertIn("daily.lock=missing", lines)
+            self.assertEqual(lines[-1], "POST-RESTORE FAIL write.lock")
+
+    def test_held_write_lock_and_old_stamp_use_the_earliest_class(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = self._archive(tmp)
             _stamp(archive, OLDER)
-            lock = archive / "mailroom.write.lock"
-            fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                lines, bits = check.evaluate(archive, SINCE_DT)
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
-            self.assertEqual(bits, check.EXIT_STAMP | check.EXIT_LOCK)
+
+            def held(path: str) -> tuple[int, str, str]:
+                if path.endswith(check.WRITE_LOCK_NAME):
+                    return 0, "4242\n", ""
+                return 1, "", ""
+
+            check.run_lsof = held
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_STAMP)
             self.assertIn("write.lock=held", lines)
-            self.assertIn("daily.lock=free", lines)
+            self.assertIn("daily.lock=missing", lines)
+            self.assertEqual(
+                lines[-1],
+                "POST-RESTORE FAIL last_daily_rag_ok,write.lock",
+            )
+
+    def test_pgrep_error_is_process_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self._archive(tmp)
+
+            def errored(pattern: str) -> tuple[int, str, str]:
+                if pattern == "meta_fill":
+                    return 2, "", "pgrep failed"
+                return 1, "", ""
+
+            check.run_pgrep = errored
+            lines, code = check.evaluate(archive, SINCE_DT)
+            self.assertEqual(code, check.EXIT_PROCESS)
+            self.assertIn("meta_fill=error", lines)
+            self.assertEqual(lines[-1], "POST-RESTORE FAIL meta_fill")
 
 
 class CliTests(unittest.TestCase):
+    def _env(self, tmp: str, stub: Path, **extra: str) -> dict[str, str]:
+        env = {
+            "PATH": "%s:%s" % (stub, os.environ.get("PATH", "")),
+            "HOME": tmp,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "LSOF_MODE": "free",
+            "PGREP_MODE": "absent",
+        }
+        env.update(extra)
+        return env
+
+    def _ready(self, tmp: str, *, write_lock: bool = True, daily_lock: bool = False) -> Path:
+        archive = Path(tmp)
+        _write_db(archive / "mailroom.sqlite")
+        _stamp(archive, NEWER)
+        if write_lock:
+            (archive / check.WRITE_LOCK_NAME).write_text("", encoding="utf-8")
+        if daily_lock:
+            (archive / check.DAILY_LOCK_NAME).write_text("", encoding="utf-8")
+        return archive
+
+    def _run(self, tmp: str, env: dict[str, str], argv: list[str] | None = None):
+        command = argv or [
+            sys.executable,
+            str(SCRIPTS / "post_restore_check.py"),
+            "--archive",
+            tmp,
+            "--since",
+            SINCE,
+        ]
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
     def test_usage_codes(self):
         self.assertEqual(check.main([]), check.EXIT_USAGE)
         self.assertEqual(check.main(["--since", SINCE]), check.EXIT_USAGE)
@@ -294,43 +519,163 @@ class CliTests(unittest.TestCase):
                 check.EXIT_USAGE,
             )
 
-    def test_cli_ok_against_temp_fixture(self):
+    def test_help_documents_exit_classes(self):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "post_restore_check.py"), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0)
+        text = proc.stdout
+        self.assertIn("POST-RESTORE PASS", text)
+        self.assertIn("POST-RESTORE FAIL", text)
+        for code in ("0", "1", "2", "3", "4", "5", "6"):
+            self.assertIn(code, text)
+        self.assertIn("lsof -t -- FILE", text)
+        self.assertIn("pgrep -f PATTERN", text)
+        self.assertIn("^/usr/bin/curl( |$)", text)
+        self.assertIn("missing write.lock", text)
+        self.assertIn("missing daily.lock", text)
+
+    def test_idle_stub_system_reports_no_writer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp)
-            db = archive / "mailroom.sqlite"
-            _write_db(db)
-            _stamp(archive, NEWER)
-            before = _sha256(db)
+            archive = self._ready(tmp, daily_lock=True)
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            _install_stub(stub, "lsof", LSOF_STUB)
+            _install_stub(stub, "pgrep", PGREP_STUB)
+            lsof_log = str(Path(tmp) / "lsof.log")
+            pgrep_log = str(Path(tmp) / "pgrep.log")
+            before = _sha256(archive / "mailroom.sqlite")
+            proc = self._run(
+                tmp,
+                self._env(tmp, stub, LSOF_LOG=lsof_log, PGREP_LOG=pgrep_log),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue(proc.stdout.rstrip().endswith("POST-RESTORE PASS"))
+            for name, _pattern in check.WRITER_CHECKS:
+                self.assertIn("%s=absent\n" % name, proc.stdout)
+            self.assertNotIn("=present", proc.stdout)
+            self.assertNotIn("=held", proc.stdout)
+            self.assertNotIn("lsof-error", proc.stdout)
+            self.assertIn("write.lock=free\n", proc.stdout)
+            self.assertIn("daily.lock=free\n", proc.stdout)
+            self.assertEqual(_sha256(archive / "mailroom.sqlite"), before)
+            lsof_lines = Path(lsof_log).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lsof_lines), 2)
+            paths = []
+            for line in lsof_lines:
+                parts = line.split("\t")
+                dash = parts.index("--")
+                self.assertEqual(parts[dash - 1], "-t")
+                tail = parts[dash + 1 :]
+                self.assertEqual(len(tail), 1)
+                paths.append(tail[0])
+            self.assertEqual(
+                [Path(path).name for path in paths],
+                [check.WRITE_LOCK_NAME, check.DAILY_LOCK_NAME],
+            )
+            pgrep_lines = Path(pgrep_log).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(
+                [line.split("\t")[-1] for line in pgrep_lines],
+                [pattern for _name, pattern in check.WRITER_CHECKS],
+            )
+            self.assertNotIn("curl.*imap", Path(pgrep_log).read_text(encoding="utf-8"))
+
+    def test_self_and_parent_pgrep_hits_are_not_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._ready(tmp)
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            _install_stub(stub, "lsof", LSOF_STUB)
+            _install_stub(stub, "pgrep", PGREP_STUB)
+            wrapper = (
+                "exec \"$PY\" \"$SCRIPT\" --archive \"$ARCHIVE\" --since \"$SINCE\"\n"
+                "# mailroom_daily imap_newmail imap_tombstone imap_fetch_bodies\n"
+                "# notify_bills rem-legacy meta_fill migrate_att0 embed_backfill\n"
+                "# embed_merge_shards embed_sidecar_apply post_rem_embed_batch\n"
+                "# with_writer_lock security find-generic phaseP_ /usr/bin/curl\n"
+            )
             proc = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPTS / "post_restore_check.py"),
-                    "--archive",
-                    tmp,
-                    "--since",
-                    SINCE,
-                ],
+                ["bash", "-c", wrapper],
                 check=False,
                 capture_output=True,
                 text=True,
-                env={
-                    "PATH": os.environ.get("PATH", ""),
-                    "HOME": tmp,
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
+                env=self._env(
+                    tmp,
+                    stub,
+                    PGREP_MODE="self-and-parent",
+                    PY=sys.executable,
+                    SCRIPT=str(SCRIPTS / "post_restore_check.py"),
+                    ARCHIVE=tmp,
+                    SINCE=SINCE,
+                ),
             )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertIn("G=2\n", proc.stdout)
-            self.assertIn("newer_than_since=yes\n", proc.stdout)
-            self.assertEqual(_sha256(db), before)
-            self.assertFalse((archive / "mailroom.sqlite-journal").exists())
-            self.assertFalse((archive / "mailroom.sqlite-wal").exists())
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue(proc.stdout.rstrip().endswith("POST-RESTORE PASS"))
+            self.assertNotIn("=present", proc.stdout)
+            self.assertNotIn("=error", proc.stdout)
+
+    def test_foreign_pgrep_pid_is_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._ready(tmp)
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            _install_stub(stub, "lsof", LSOF_STUB)
+            _install_stub(stub, "pgrep", PGREP_STUB)
+            proc = self._run(
+                tmp,
+                self._env(
+                    tmp,
+                    stub,
+                    PGREP_MODE="present",
+                    PGREP_PRESENT_PATTERN="meta_fill",
+                    PGREP_PID=FOREIGN_PID,
+                ),
+            )
+            self.assertNotEqual(int(FOREIGN_PID), os.getpid())
+            self.assertNotEqual(int(FOREIGN_PID), os.getppid())
+            self.assertEqual(proc.returncode, check.EXIT_PROCESS, proc.stdout)
+            self.assertIn("meta_fill=present\n", proc.stdout)
+            self.assertIn("mailroom_daily=absent\n", proc.stdout)
+            self.assertEqual(proc.stdout.rstrip().splitlines()[-1], "POST-RESTORE FAIL meta_fill")
+
+    def test_lsof_held_and_error_per_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._ready(tmp, daily_lock=True)
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            _install_stub(stub, "lsof", LSOF_STUB)
+            _install_stub(stub, "pgrep", PGREP_STUB)
+            held = self._run(
+                tmp,
+                self._env(tmp, stub, LSOF_HELD_BASENAME=check.WRITE_LOCK_NAME),
+            )
+            self.assertEqual(held.returncode, check.EXIT_WRITE_LOCK, held.stdout)
+            self.assertIn("write.lock=held\n", held.stdout)
+            self.assertIn("daily.lock=free\n", held.stdout)
+            self.assertEqual(
+                held.stdout.rstrip().splitlines()[-1],
+                "POST-RESTORE FAIL write.lock",
+            )
+            errored = self._run(tmp, self._env(tmp, stub, LSOF_MODE="rc2"))
+            self.assertEqual(errored.returncode, check.EXIT_WRITE_LOCK, errored.stdout)
+            self.assertIn("write.lock=lsof-error\n", errored.stdout)
+            self.assertIn("daily.lock=lsof-error\n", errored.stdout)
+            self.assertEqual(
+                errored.stdout.rstrip().splitlines()[-1],
+                "POST-RESTORE FAIL write.lock,daily.lock",
+            )
 
     def test_archive_root_env(self):
         with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp)
-            _write_db(archive / "mailroom.sqlite")
-            _stamp(archive, NEWER)
+            self._ready(tmp)
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            _install_stub(stub, "lsof", LSOF_STUB)
+            _install_stub(stub, "pgrep", PGREP_STUB)
+            env = self._env(tmp, stub, ARCHIVE_ROOT=tmp)
             proc = subprocess.run(
                 [
                     sys.executable,
@@ -341,102 +686,11 @@ class CliTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
-                env={
-                    "PATH": os.environ.get("PATH", ""),
-                    "HOME": tmp,
-                    "ARCHIVE_ROOT": tmp,
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
+                env=env,
             )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("messages_inserted_since=3\n", proc.stdout)
-
-    def test_subprocess_sees_held_lock_and_does_not_take_it(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp)
-            _write_db(archive / "mailroom.sqlite")
-            _stamp(archive, NEWER)
-            lock = archive / "mailroom.daily.lock"
-            fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                proc = subprocess.run(
-                    [
-                        sys.executable,
-                        str(SCRIPTS / "post_restore_check.py"),
-                        "--archive",
-                        tmp,
-                        "--since",
-                        SINCE,
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    env={
-                        "PATH": os.environ.get("PATH", ""),
-                        "HOME": tmp,
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                    },
-                )
-                self.assertEqual(proc.returncode, check.EXIT_LOCK, proc.stderr)
-                self.assertIn("daily.lock=held\n", proc.stdout)
-                self.assertIn("write.lock=free\n", proc.stdout)
-                probe = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        (
-                            "import fcntl, os, sys\n"
-                            "fd = os.open(sys.argv[1], os.O_RDWR)\n"
-                            "try:\n"
-                            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                            "except BlockingIOError:\n"
-                            "    sys.exit(0)\n"
-                            "sys.exit(3)\n"
-                        ),
-                        str(lock),
-                    ],
-                    check=False,
-                )
-                self.assertEqual(probe.returncode, 0)
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
-
-    def test_real_ps_sees_meta_fill_process(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp)
-            _write_db(archive / "mailroom.sqlite")
-            _stamp(archive, NEWER)
-            sleeper = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(120)", "meta_fill.py"]
-            )
-            try:
-                proc = subprocess.run(
-                    [
-                        sys.executable,
-                        str(SCRIPTS / "post_restore_check.py"),
-                        "--archive",
-                        tmp,
-                        "--since",
-                        SINCE,
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    env={
-                        "PATH": os.environ.get("PATH", ""),
-                        "HOME": tmp,
-                        "PYTHONDONTWRITEBYTECODE": "1",
-                    },
-                )
-                self.assertEqual(proc.returncode, check.EXIT_PROCESS, proc.stderr)
-                self.assertIn("meta_fill=running\n", proc.stdout)
-                self.assertIn("daily_process=absent\n", proc.stdout)
-                self.assertIn("with_writer_lock=absent\n", proc.stdout)
-            finally:
-                sleeper.kill()
-                sleeper.wait(timeout=5)
+            self.assertTrue(proc.stdout.rstrip().endswith("POST-RESTORE PASS"))
 
 
 class SourceContractTests(unittest.TestCase):
@@ -444,10 +698,14 @@ class SourceContractTests(unittest.TestCase):
         text = (SCRIPTS / "post_restore_check.py").read_text(encoding="utf-8")
         self.assertIn("mode=ro", text)
         self.assertIn("PRAGMA query_only=ON", text)
+        self.assertIn('["lsof", "-t", "--", path]', text)
+        self.assertIn('["pgrep", "-f", pattern]', text)
         self.assertNotIn("fcntl.flock", text)
         self.assertNotIn("LOCK_EX", text)
         self.assertNotIn("LOCK_SH", text)
         self.assertNotIn("find-generic-password", text)
+        self.assertNotIn("curl.*imap", text)
+        self.assertNotIn("&&", text)
         self.assertNotIn("urllib", text)
         self.assertNotIn("imaplib", text)
         self.assertNotIn("/Users/", text)

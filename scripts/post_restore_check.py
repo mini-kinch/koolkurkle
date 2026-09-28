@@ -2,28 +2,44 @@
 """Read-only post-restore check for the mail archive.
 
 Opens ``<archive>/mailroom.sqlite`` with a ``mode=ro`` URI and
-``PRAGMA query_only``. Never takes ``flock`` (lock state comes from
-``/proc/locks``, or from ``lsof`` only when that file cannot be read).
-Never calls Keychain. Never opens the network.
+``PRAGMA query_only``. Does not take a lock. Does not call Keychain.
+Does not open the network.
 
 Archive root: ``--archive``, else ``ARCHIVE_ROOT``, else ``MAILARCHIVE``.
 There is no default path.
 
-Stdout is one fact per line. Exit 0 when every check is OK. Other
-exits are bits, OR-ed when more than one class fails:
+Each lock file is its own ``lsof -t -- FILE`` with stderr captured.
+An all-digit stdout line means held. Exit 1 with empty stdout and
+empty stderr means free. Any other lsof result is lsof-error (fail
+closed). A missing write.lock is a failure. A missing daily.lock is
+not a holder.
 
-  1  usage (archive root or --since)
+Each writer pattern is its own ``pgrep -f`` with stderr captured.
+Exit 0 with a pid other than this process or its parent means
+present. Exit 1 with empty output means absent. Any other pgrep
+result is an error (fail closed). Return codes are branched
+explicitly. A non-zero status other than 1 is never treated as absent.
+
+Stdout is one line per check, then ``POST-RESTORE PASS`` or
+``POST-RESTORE FAIL <checks>``. Exit status (also in ``--help``):
+
+  0  every check passed
+  1  usage (archive root or --since), before the checks run
   2  sqlite missing, unreadable, or counts unavailable
-  4  last_daily_rag_ok missing or not newer than --since
-  8  write.lock or daily.lock held, or the probe could not run
-  16 meta_fill, with_writer_lock, or daily process running, or ps failed
+  3  last_daily_rag_ok missing or not newer than --since
+  4  write.lock missing, held, or lsof-error
+  5  daily.lock held or lsof-error
+  6  a writer is present, or pgrep errored
+
+If several of 2-6 fail, the status is the earliest of those classes.
+The FAIL line still names every failed check, in that same order.
 
 ``G`` is the current count of messages with ``present_on_server`` 0.
 Urgent texts are ``notify_log`` rows since ``--since`` whose
-``message_id`` does not start with ``bills-`` (the daily digest key).
-Bill rows use a timestamp column when one exists, otherwise the
-ingested time of the linked message. ``--since`` is inclusive for
-those counts. The daily stamp must be strictly newer than ``--since``.
+``message_id`` does not start with ``bills-``. Bill rows use a
+timestamp column when one exists, otherwise the linked message's
+``ingested_at``. ``--since`` is inclusive for those counts. The daily
+stamp must be strictly newer than ``--since``.
 """
 
 from __future__ import annotations
@@ -39,9 +55,10 @@ from pathlib import Path
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_DB = 2
-EXIT_STAMP = 4
-EXIT_LOCK = 8
-EXIT_PROCESS = 16
+EXIT_STAMP = 3
+EXIT_WRITE_LOCK = 4
+EXIT_DAILY_LOCK = 5
+EXIT_PROCESS = 6
 
 STAMP_NAME = "last_daily_rag_ok"
 SOR_BASENAME = "mailroom.sqlite"
@@ -55,12 +72,59 @@ BILL_TIME_COLUMNS = (
     "ts",
     "ingested_at",
 )
-PROCESS_NEEDLES = (
-    ("meta_fill", ("meta_fill.py",)),
-    ("with_writer_lock", ("with_writer_lock.py",)),
-    ("daily_process", ("mailroom_daily.py", "run_mailroom_daily.sh")),
+# Check name, then the pgrep -f pattern. curl is an anchored argv
+# expression. The other patterns are literal process fragments.
+WRITER_CHECKS = (
+    ("mailroom_daily", "mailroom_daily"),
+    ("imap_newmail", "imap_newmail"),
+    ("imap_tombstone", "imap_tombstone"),
+    ("imap_fetch_bodies", "imap_fetch_bodies"),
+    ("notify_bills", "notify_bills"),
+    ("rem-legacy", "rem-legacy"),
+    ("meta_fill", "meta_fill"),
+    ("migrate_att0", "migrate_att0"),
+    ("embed_backfill", "embed_backfill"),
+    ("embed_merge_shards", "embed_merge_shards"),
+    ("embed_sidecar_apply", "embed_sidecar_apply"),
+    ("post_rem_embed_batch", "post_rem_embed_batch"),
+    ("with_writer_lock", "with_writer_lock"),
+    ("security_find_generic", "security find-generic"),
+    ("phaseP_", "phaseP_"),
+    ("curl", "^/usr/bin/curl( |$)"),
 )
 _TABLES = frozenset({"messages", "notify_log", "bills"})
+
+HELP_EPILOG = """
+exit status:
+  0  POST-RESTORE PASS
+  1  usage: archive root or --since (no check lines)
+  2  sqlite missing, unreadable, or counts unavailable
+  3  last_daily_rag_ok missing or not newer than --since
+  4  write.lock missing, held, or lsof-error
+  5  daily.lock held or lsof-error (a missing daily.lock is OK)
+  6  a writer process is present, or pgrep returned an error
+
+If several of 2-6 fail, the status is the earliest class in that list.
+The last stdout line is POST-RESTORE PASS, or POST-RESTORE FAIL plus
+every failed check name in the same order.
+
+Locks, one file per invocation, stderr captured:
+  lsof -t -- FILE
+  any all-digit stdout line -> held (bad)
+  exit 1 and empty stdout and empty stderr -> free
+  anything else -> lsof-error (bad, fail closed)
+  missing write.lock -> bad
+  missing daily.lock -> ok
+
+Processes, one pattern per invocation, stderr captured:
+  pgrep -f PATTERN
+  exit 0 with a pid other than this process or its parent -> present (bad)
+  exit 0 listing only this process and/or its parent -> absent
+  exit 1 and empty stdout and empty stderr -> absent
+  any other pgrep result -> error (bad, fail closed)
+  curl PATTERN is ^/usr/bin/curl( |$)
+  security_find_generic PATTERN is: security find-generic
+""".strip()
 
 
 class CheckError(RuntimeError):
@@ -211,84 +275,108 @@ def stamp_is_newer(value: str | None, since: datetime) -> bool:
     return parsed > since
 
 
-def _inode_token(path: Path) -> str:
-    stat = path.stat()
-    return "%02x:%02x:%d" % (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino)
+def _nonempty_lines(text: str) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
 
 
-def lock_held_in_proc(path: Path, proc_locks: str) -> bool:
-    token = _inode_token(path)
-    for line in proc_locks.splitlines():
-        parts = line.split()
-        if len(parts) < 6:
-            continue
-        if parts[1] in {"FLOCK", "POSIX", "OFDLCK"} and parts[5] == token:
-            return True
-    return False
-
-
-def lock_state(path: Path) -> str:
-    """Return free, held, or unavailable. Does not take a lock."""
-    if not path.exists():
-        return "free"
-    try:
-        proc_locks = Path("/proc/locks").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        proc_locks = None
-    if proc_locks is not None:
-        try:
-            return "held" if lock_held_in_proc(path, proc_locks) else "free"
-        except OSError:
-            return "unavailable"
-    return _lsof_state(path)
-
-
-def _lsof_state(path: Path) -> str:
-    try:
-        proc = subprocess.run(
-            ["lsof", "-F", "p", "--", str(path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return "unavailable"
-    if proc.returncode == 0 and (proc.stdout or "").strip():
+def classify_lsof(rc: int, stdout: str, stderr: str) -> str:
+    """Return free, held, or lsof-error. One file's lsof result only."""
+    lines = _nonempty_lines(stdout)
+    if any(line.isdigit() for line in lines):
         return "held"
-    if proc.returncode == 1:
+    if rc == 1 and not lines and not (stderr or "").strip():
         return "free"
-    return "unavailable"
+    return "lsof-error"
 
 
-def read_process_table() -> str | None:
+def run_lsof(path: str) -> tuple[int, str, str]:
+    """Run ``lsof -t -- FILE`` for one path. Stderr is captured."""
     try:
         proc = subprocess.run(
-            ["ps", "-ax", "-o", "args="],
+            ["lsof", "-t", "--", path],
             check=False,
             capture_output=True,
             text=True,
         )
     except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout or ""
+        return 127, "", "exec-failed"
+    return int(proc.returncode), proc.stdout or "", proc.stderr or ""
 
 
-def classify_processes(ps_text: str) -> dict[str, str]:
-    found = {name: False for name, _needles in PROCESS_NEEDLES}
-    for line in ps_text.splitlines():
-        for name, needles in PROCESS_NEEDLES:
-            if any(needle in line for needle in needles):
-                found[name] = True
-    return {name: ("running" if flag else "absent") for name, flag in found.items()}
+def probe_lock_file(path: Path) -> str:
+    """Return missing, free, held, or lsof-error. Does not take a lock."""
+    if not path.exists():
+        return "missing"
+    rc, stdout, stderr = run_lsof(str(path))
+    return classify_lsof(rc, stdout, stderr)
 
 
-def process_states() -> dict[str, str]:
-    text = read_process_table()
-    if text is None:
-        return {name: "unavailable" for name, _needles in PROCESS_NEEDLES}
-    return classify_processes(text)
+def current_self_pids() -> set[int]:
+    """This process and its parent. Neither is a writer match."""
+    pids = {os.getpid()}
+    try:
+        parent = os.getppid()
+    except OSError:
+        parent = 0
+    if isinstance(parent, int) and parent > 0:
+        pids.add(parent)
+    return pids
+
+
+def classify_pgrep(
+    rc: int,
+    stdout: str,
+    stderr: str,
+    self_pids: set[int],
+) -> str:
+    """Return absent, present, or error.
+
+    Exit 0 is present only when a pid other than this process or its
+    parent remains. Exit 1 with empty output is absent. Every other
+    result is error. There is no branch that maps a failed probe to
+    absent.
+    """
+    lines = _nonempty_lines(stdout)
+    if rc == 0:
+        foreign: list[int] = []
+        if not lines:
+            return "error"
+        for line in lines:
+            if not line.isdigit():
+                return "error"
+            pid = int(line)
+            if pid not in self_pids:
+                foreign.append(pid)
+        if foreign:
+            return "present"
+        return "absent"
+    if rc == 1 and not lines and not (stderr or "").strip():
+        return "absent"
+    return "error"
+
+
+def run_pgrep(pattern: str) -> tuple[int, str, str]:
+    """Run ``pgrep -f PATTERN`` for one pattern. Stderr is captured."""
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", pattern],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return 127, "", "exec-failed"
+    return int(proc.returncode), proc.stdout or "", proc.stderr or ""
+
+
+def probe_writers(self_pids: set[int] | None = None) -> list[tuple[str, str]]:
+    """One pgrep per writer pattern. Returns (check name, state)."""
+    mine = current_self_pids() if self_pids is None else set(self_pids)
+    found: list[tuple[str, str]] = []
+    for name, pattern in WRITER_CHECKS:
+        rc, stdout, stderr = run_pgrep(pattern)
+        found.append((name, classify_pgrep(rc, stdout, stderr, mine)))
+    return found
 
 
 def _db_counts(path: Path, since: datetime) -> tuple[str, str, str, str]:
@@ -303,6 +391,14 @@ def _db_counts(path: Path, since: datetime) -> tuple[str, str, str, str]:
     return gone, inserted, urgent, bills
 
 
+def _earliest(current: int, candidate: int) -> int:
+    if current == EXIT_OK:
+        return candidate
+    if candidate == EXIT_OK:
+        return current
+    return min(current, candidate)
+
+
 def build_lines(
     *,
     stamp_value: str,
@@ -313,9 +409,10 @@ def build_lines(
     bills_added: str,
     write_lock: str,
     daily_lock: str,
-    processes: dict[str, str],
+    writers: list[tuple[str, str]],
+    failed: list[str],
 ) -> list[str]:
-    return [
+    lines = [
         "last_daily_rag_ok=%s newer_than_since=%s"
         % (stamp_value, "yes" if stamp_newer else "no"),
         "G=%s" % gone,
@@ -324,30 +421,14 @@ def build_lines(
         "bills_added_since=%s" % bills_added,
         "write.lock=%s" % write_lock,
         "daily.lock=%s" % daily_lock,
-        "meta_fill=%s" % processes["meta_fill"],
-        "with_writer_lock=%s" % processes["with_writer_lock"],
-        "daily_process=%s" % processes["daily_process"],
     ]
-
-
-def _failure_bits(
-    *,
-    db_ok: bool,
-    stamp_newer: bool,
-    write_lock: str,
-    daily_lock: str,
-    processes: dict[str, str],
-) -> int:
-    bits = EXIT_OK
-    if not db_ok:
-        bits |= EXIT_DB
-    if not stamp_newer:
-        bits |= EXIT_STAMP
-    if write_lock != "free" or daily_lock != "free":
-        bits |= EXIT_LOCK
-    if any(state != "absent" for state in processes.values()):
-        bits |= EXIT_PROCESS
-    return bits
+    for name, state in writers:
+        lines.append("%s=%s" % (name, state))
+    if failed:
+        lines.append("POST-RESTORE FAIL %s" % ",".join(failed))
+    else:
+        lines.append("POST-RESTORE PASS")
+    return lines
 
 
 def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
@@ -358,9 +439,9 @@ def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
         stamp_raw = None
     stamp_value = stamp_raw if stamp_raw is not None else "missing"
     newer = stamp_is_newer(stamp_raw, since)
-    write_lock = lock_state(archive / WRITE_LOCK_NAME)
-    daily_lock = lock_state(archive / DAILY_LOCK_NAME)
-    processes = process_states()
+    write_lock = probe_lock_file(archive / WRITE_LOCK_NAME)
+    daily_lock = probe_lock_file(archive / DAILY_LOCK_NAME)
+    writers = probe_writers()
     db_path = archive / SOR_BASENAME
     try:
         gone, inserted, urgent, bills = _db_counts(db_path, since)
@@ -371,6 +452,24 @@ def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
     except sqlite3.Error:
         gone = inserted = urgent = bills = "unavailable"
         db_ok = False
+    failed: list[str] = []
+    code = EXIT_OK
+    if not db_ok:
+        failed.append("sqlite")
+        code = _earliest(code, EXIT_DB)
+    if not newer:
+        failed.append("last_daily_rag_ok")
+        code = _earliest(code, EXIT_STAMP)
+    if write_lock != "free":
+        failed.append("write.lock")
+        code = _earliest(code, EXIT_WRITE_LOCK)
+    if daily_lock not in ("free", "missing"):
+        failed.append("daily.lock")
+        code = _earliest(code, EXIT_DAILY_LOCK)
+    for name, state in writers:
+        if state != "absent":
+            failed.append(name)
+            code = _earliest(code, EXIT_PROCESS)
     lines = build_lines(
         stamp_value=stamp_value,
         stamp_newer=newer,
@@ -380,29 +479,10 @@ def evaluate(archive: Path, since: datetime) -> tuple[list[str], int]:
         bills_added=bills,
         write_lock=write_lock,
         daily_lock=daily_lock,
-        processes=processes,
+        writers=writers,
+        failed=failed,
     )
-    bits = _failure_bits(
-        db_ok=db_ok,
-        stamp_newer=newer,
-        write_lock=write_lock,
-        daily_lock=daily_lock,
-        processes=processes,
-    )
-    return lines, bits
-
-
-def _note_failures(bits: int) -> None:
-    if bits & EXIT_DB:
-        sys.stderr.write("error: sqlite missing or unreadable\n")
-    if bits & EXIT_STAMP:
-        sys.stderr.write("error: last_daily_rag_ok missing or not newer than --since\n")
-    if bits & EXIT_LOCK:
-        sys.stderr.write("error: write.lock or daily.lock held or unprobed\n")
-    if bits & EXIT_PROCESS:
-        sys.stderr.write(
-            "error: meta_fill, with_writer_lock, or daily process running or unprobed\n"
-        )
+    return lines, code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -410,7 +490,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Read-only post-restore check. "
             "Archive root is --archive, ARCHIVE_ROOT, or MAILARCHIVE."
-        )
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=HELP_EPILOG,
     )
     parser.add_argument(
         "--archive",
@@ -447,11 +529,9 @@ def main(argv: list[str] | None = None) -> int:
     if not archive.is_dir():
         sys.stderr.write("error: archive root is not a directory\n")
         return EXIT_USAGE
-    lines, bits = evaluate(archive, since)
+    lines, code = evaluate(archive, since)
     sys.stdout.write("\n".join(lines) + "\n")
-    if bits != EXIT_OK:
-        _note_failures(bits)
-    return bits
+    return code
 
 
 if __name__ == "__main__":
