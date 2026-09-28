@@ -32,10 +32,10 @@ each folder, stderr gets ``HH:MM PT | folder n/N | rc=N`` (index only,
 no folder name) and is flushed. The password is read from macOS Keychain
 (``scripts/imap_keychain.py``). The binary is pinned to
 ``/usr/bin/security``. The lookup is
-``/usr/bin/security find-generic-password -s mailroom.imap.app-password -w``,
-with one fallback to ``mailroom.icloud.app-password`` when the default
-item misses. An empty IMAP user fails closed in the curl client before
-LOGIN.
+``/usr/bin/security find-generic-password -s <keychain-item> -w``.
+An empty IMAP user fails closed in the curl client before
+LOGIN. A Keychain or login failure is process status 4
+(``error: imap auth failed``), not status 2 and not status 0.
 Curl receives the password only on stdin (``-K -``,
 ``user = "..."``), never in argv, the environment, or a file. TLS
 verification stays on (no ``-k``). There is no password option and no
@@ -118,6 +118,8 @@ _DEFAULT_MAX_MESSAGES = 200
 _DEFAULT_MAX_PARTS = 100
 _DEFAULT_TIMEOUT_S = 30
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
+# Auth/keychain open failure. Not argparse, not the writer lock (both 2).
+AUTH_EXIT = 4
 
 
 class FillRefuse(RuntimeError):
@@ -1266,6 +1268,25 @@ def _env_text(env: dict[str, str], args_value: str | None, key: str) -> str | No
     return value
 
 
+def report_auth_failed(report: dict[str, Any]) -> bool:
+    """True when the fill recorded a Keychain or login failure.
+
+    A later empty body or a connect/certificate curl status is not auth.
+    ``imap keychain read timed out`` is a different status and is not this one.
+    """
+    for item in report.get("curl_failures") or []:
+        text = str(item)
+        if text == "imap keychain read timed out":
+            continue
+        if text == "imap keychain password is missing":
+            return True
+        if text == "imap login failed":
+            return True
+        if "authentication failed" in text.lower() or "(rc 67)" in text:
+            return True
+    return False
+
+
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -1323,6 +1344,9 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         sys.stderr.write("error: sqlite fill failed (%s)\n" % type(exc).__name__)
         return 2
     sys.stdout.write(format_report(report))
+    if report_auth_failed(report):
+        sys.stderr.write("error: imap auth failed\n")
+        return AUTH_EXIT
     return 0
 
 
