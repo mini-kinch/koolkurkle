@@ -4,7 +4,7 @@ Phase P is `phaseP_473b59a0.sh` (sha256 `1ff2204ba32e4adcd66f725cdb8c8dce5297381
 
 Script sha256: `bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341`
 
-Commit: `COMMIT_SHA_PENDING`
+Commit: `cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c`
 
 Run each one-liner from a shell that has `set -C`. Placement writes `/tmp/att0_l1.sh` only when that path is absent. If the path already exists, the sha256 must already match; a different sha stops the chain before `<MODE>-PLACED`. Each step prints its own marker. `window`, `rollback`, and `restore-daily` print a stamp, numbered step lines, a `SAFE-STATE` line, and one `SUMMARY` line. `report` prints a stamp and a `SUMMARY` line and does not run `SAFE-STATE`. The script does not call the Keychain binary. `window` refuses, before it creates a directory or a transcript, unless `/tmp/phaseP-offline-<P_STAMP>.OK`, `/tmp/phaseP-p8-<P_STAMP>.OK`, and `/tmp/phaseP-state-<P_STAMP>` are present.
 
@@ -33,7 +33,7 @@ Exit codes: `0` done, `1` stopped before a live SoR write, `2` usage, `3` failur
 ## window
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
 ```
 
 The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, restore-daily, and report.
@@ -41,7 +41,7 @@ The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, res
 ## rollback
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
 ```
 
 ## restore-daily
@@ -49,7 +49,7 @@ cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/a
 Refuses unless `/tmp/att0w-done-<WINDOW_STAMP>.OK` or `/tmp/att0r-done-<WINDOW_STAMP>.OK` exists.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
 ```
 
 ## report
@@ -63,7 +63,7 @@ Each rule is one line, `ATT0-DONE RULE <id> PASS` or `FAIL`. The last line is `A
 Nothing in `window`, `rollback`, or `restore-daily` arms the watchdog's +26 minute search restore, or any other restore timer, in the free-lock gap between A2 and A3. That gap calls `search_resume_watchdog.py status` only. The only deadline there is the S+50 file written before search bootout, plus the S+51 budget.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
 ```
 
 ## W-criteria
