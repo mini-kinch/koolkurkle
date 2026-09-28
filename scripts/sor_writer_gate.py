@@ -64,6 +64,7 @@ REM_LOCK_PURPOSE_NEEDLES = (
 
 # Lock-file purposes a wrapped child may recognize. Exact match.
 # att0-migrate: A2 wrapper purpose for scripts/attachments/migrate_att0_schema.py.
+# att0-restore: AR-R step 5. Exact string. Not an alias of att0-migrate.
 # att0 meta fill: A3 job name in scripts/attachments/meta_fill.py.
 # embed_batch: embed_backfill.py and embed_lib.py default.
 # embed_backfill: docs/pr0/with_writer_lock_DESIGN.md example.
@@ -74,6 +75,7 @@ REM_LOCK_PURPOSE_NEEDLES = (
 WRITER_PURPOSE_ALLOWLIST = frozenset(
     (
         "att0-migrate",
+        "att0-restore",
         "att0 meta fill",
         "embed_batch",
         "embed_backfill",

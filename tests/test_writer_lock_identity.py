@@ -1111,6 +1111,7 @@ class InventoryTests(IdentityCase):
             frozenset(
                 (
                     "att0-migrate",
+                    "att0-restore",
                     "att0 meta fill",
                     "embed_batch",
                     "embed_backfill",

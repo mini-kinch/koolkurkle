@@ -145,7 +145,12 @@ def parse_lock_payload(raw: str) -> LockInfo:
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
-        fields[key.strip()] = value.strip()
+        key = key.strip()
+        # Purpose is exact. Do not trim it into another allowlist entry.
+        if key == "purpose":
+            fields[key] = value
+        else:
+            fields[key] = value.strip()
     pid_raw = fields.get("pid", "")
     try:
         pid = int(pid_raw) if pid_raw else None
@@ -236,6 +241,42 @@ def release_writer_lock(held: HeldLock) -> None:
         held.fd.close()
 
 
+def _drop_failed(detail: object) -> WriterLockError:
+    return WriterLockError(
+        "search resume +26 drop failed; child not started: %s" % detail
+    )
+
+
+def _drop_search_resume_plus_26() -> None:
+    # Caller input: MAILROOM_SEARCH_RESUME_RUN_ID only.
+    # Absent: do not read the deadline file, do not drop, run the child.
+    # Present and equal to the file run_id: drop +26, then re-read status.
+    # d26_live=yes after that drop stops the child. A mismatch, or a
+    # missing or unreadable file, stops the child. Never invent a run-id.
+    run_id = os.environ.get("MAILROOM_SEARCH_RESUME_RUN_ID", "").strip()
+    if not run_id:
+        return
+    try:
+        import search_resume_watchdog
+    except Exception as exc:
+        # Import failure must be caught before any use of the module
+        # name. Otherwise a later attribute lookup raises UnboundLocalError
+        # and main() prints a traceback (rc 1).
+        raise _drop_failed(exc) from exc
+    try:
+        search_resume_watchdog.drop_early_deadline(run_id)
+    except Exception as exc:
+        raise _drop_failed(exc) from exc
+    status, parsed = search_resume_watchdog.load_deadline(
+        search_resume_watchdog.deadline_path()
+    )
+    if status != "ok" or parsed is None:
+        raise _drop_failed("deadline status %s" % status)
+    lines = search_resume_watchdog.format_status(parsed).splitlines()
+    if "d26_live=yes" in lines:
+        raise _drop_failed("d26_live=yes")
+
+
 def run_with_lock(
     purpose: str,
     cmd: list[str],
@@ -259,6 +300,9 @@ def run_with_lock(
         now=now,
     )
     try:
+        # BEGIN search-resume +26 drop (PR #89 on PR #90).
+        _drop_search_resume_plus_26()
+        # END search-resume +26 drop.
         token = held.info.writer_token
         if not token:
             raise WriterLockError("writer lock token missing")
