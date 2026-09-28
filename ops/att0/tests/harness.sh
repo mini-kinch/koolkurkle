@@ -891,7 +891,7 @@ printf '%s\n' "STEP0-LOCK-OK"
 P_STAMP=20260928-010001
 ATT0_FAKE_STAMP=20260928-120001
 export ATT0_FAKE_STAMP
-unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_FAKE_S_LATE ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
+unset ATT0_FAKE_PROBE_RC ATT0_FAKE_A3_RC ATT0_FAKE_A3_HANG ATT0_FAKE_FALLBACK ATT0_FAKE_DATE_BREACH ATT0_TEST_MAX_ALARM ATT0_FAKE_SECURITY_RC ATT0_WRITE_HELD
 setup_tree happy
 rc=$(run_mode /tmp/att0-happy window "$P_STAMP")
 expect_rc "$rc" 0 /tmp/att0-happy
@@ -903,7 +903,8 @@ expect_rc "$rc" 0 /tmp/att0-happy
 /usr/bin/grep -q 'A3-D-OK' /tmp/att0-happy || fail "happy a3 d"
 /usr/bin/grep -q 'A4-OK' /tmp/att0-happy || fail "happy a4"
 /usr/bin/grep -q 'source=phasep-scratch' /tmp/att0-happy || fail "happy dp source"
-/usr/bin/grep -q 'P-STAMP-AGE-OK' /tmp/att0-happy || fail "happy age"
+/usr/bin/grep -q 'P-STAMP-AGE-OK' /tmp/att0-happy && fail "happy age gate"
+/usr/bin/grep -q 'STOP-p-stamp-age' /tmp/att0-happy && fail "happy age stop"
 /usr/bin/grep -q 'PHASEP-MARKERS-OK' /tmp/att0-happy || fail "happy markers"
 /usr/bin/grep -q 'STAMPS-OK' /tmp/att0-happy || fail "happy stamps"
 /usr/bin/grep -q 'G=992' /tmp/att0-happy || fail "happy gone"
@@ -1046,20 +1047,22 @@ expect_rc "$rc" 1 /tmp/att0-budget
 unset ATT0_FAKE_DATE_BREACH
 printf '%s\n' "BUDGET-OK"
 
-# 1b-1. Entry is under 12h. The third +%s, immediately before S, is over 12h.
-P_STAMP=20260928-010018
+# P_STAMP is 48h before the fake window clock. There is no start deadline.
+P_STAMP=20260926-120018
 ATT0_FAKE_STAMP=20260928-120018
-export ATT0_FAKE_STAMP ATT0_FAKE_S_LATE=1
-setup_tree age-at-s
-rc=$(run_mode /tmp/att0-age-s window "$P_STAMP")
-expect_rc "$rc" 1 /tmp/att0-age-s
-/usr/bin/grep -q 'STOP-p-stamp-age-at-S' /tmp/att0-age-s || fail "age at S"
-/usr/bin/grep -q 'A2-OK' /tmp/att0-age-s && fail "age at S wrote A2"
-/usr/bin/grep -q 'write_rc=' /tmp/att0-age-s && fail "age at S wrote deadline"
-/usr/bin/grep -q 'SEARCH-BOOTED-OUT' /tmp/att0-age-s && fail "age at S bootout"
-/usr/bin/grep -q 'RESULT ar-r=not-run search=left-up' /tmp/att0-age-s || fail "age at S result"
-unset ATT0_FAKE_S_LATE
-printf '%s\n' "AGE-AT-S-OK"
+export ATT0_FAKE_STAMP
+setup_tree old-stamp
+rc=$(run_mode /tmp/att0-old-stamp window "$P_STAMP")
+expect_rc "$rc" 0 /tmp/att0-old-stamp
+/usr/bin/grep -q 'STOP-p-stamp-age' /tmp/att0-old-stamp && fail "old stamp age stop"
+/usr/bin/grep -q 'P-STAMP-AGE-OK' /tmp/att0-old-stamp && fail "old stamp age gate"
+/usr/bin/grep -q 'PHASEP-MARKERS-OK' /tmp/att0-old-stamp || fail "old stamp markers"
+/usr/bin/grep -q 'D-BAND D_P=27 low=27 high=77' /tmp/att0-old-stamp || fail "old stamp band"
+/usr/bin/grep -q 'STEP0-LOCKS-OK' /tmp/att0-old-stamp || fail "old stamp locks"
+/usr/bin/grep -q 'BUDGET-OK a2' /tmp/att0-old-stamp || fail "old stamp budget"
+/usr/bin/grep -q 'WINDOW-DONE' /tmp/att0-old-stamp || fail "old stamp done"
+/usr/bin/grep -q 'SUMMARY stamp=20260928-120018 exit=0' /tmp/att0-old-stamp || fail "old stamp summary"
+printf '%s\n' "OLD-STAMP-OK"
 
 P_STAMP=20260928-010006
 ATT0_FAKE_STAMP=20260928-120006

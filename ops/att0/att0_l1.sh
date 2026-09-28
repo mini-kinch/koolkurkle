@@ -72,10 +72,7 @@ EXPECT_PRE=25
 EXPECT_AFTER=34
 R1V2_TIMEOUT_S=60
 R1V2_SHA=45ef12295c21f028b2e99dc4cba81fe4025cf45af9debe08e04c6231d577f3aa
-# P_STAMP_MAX_AGE is 12h. It is a start gate: entry, and again
-# immediately before S. The window may finish after that.
-P_STAMP_MAX_AGE_H=12
-P_STAMP_MAX_AGE_S=$((P_STAMP_MAX_AGE_H * 3600))
+# S+51 budget. There is no P_STAMP start deadline.
 HARD_LIMIT_S=3060
 A2_TIMEOUT_S=120
 A3_CAP_S=300
@@ -659,28 +656,8 @@ ask_hash_same() {
     return 0
 }
 
-epoch_of_stamp() {
-    "$DATEBIN" -j -f '%Y%m%d-%H%M%S' "$1" +%s
-}
-
 now_epoch() {
     "$DATEBIN" +%s
-}
-
-age_ok() {
-    _then=$(epoch_of_stamp "$P_STAMP") || return 1
-    _now=$(now_epoch) || return 1
-    _age=$((_now - _then))
-    if [ "$_age" -lt 0 ]; then
-        say STOP-p-stamp-future
-        return 1
-    fi
-    if [ "$_age" -gt "$P_STAMP_MAX_AGE_S" ]; then
-        say STOP-p-stamp-age
-        return 1
-    fi
-    say P-STAMP-AGE-OK
-    return 0
 }
 
 phasep_markers_ok() {
@@ -704,7 +681,7 @@ phasep_markers_ok() {
     return 0
 }
 
-# Entry re-check after the markers and the 12h age check. Both Phase P
+# Entry re-check after the markers. Both Phase P
 # stamps are the daily and imap stamps. G and D_P come from the read-only
 # P8 query on the Phase P scratch copy. The A2 band is [D_P, D_P+D_BAND].
 entry_dp_ok() {
@@ -2353,7 +2330,6 @@ do_window() {
     fi
     if ! env_check; then WANTED_RC=1; return; fi
     if ! phasep_markers_ok; then WANTED_RC=1; return; fi
-    if ! age_ok; then WANTED_RC=1; return; fi
     if ! step0_locks; then WANTED_RC=1; return; fi
     "$MKDIR" -p "$LOGS" "$MA/backups" "$MA/dryrun" "$MA/state" || { WANTED_RC=1; return; }
     TRANSCRIPT="$LOGS/att0-window-${STAMP}.transcript"
@@ -2494,11 +2470,6 @@ do_window() {
         return
     fi
     S_EPOCH=$(now_epoch) || { WANTED_RC=1; return; }
-    if ! age_ok; then
-        say STOP-p-stamp-age-at-S
-        WANTED_RC=1
-        return
-    fi
     _wrc=0
     "$PYTHON" "$S_DIR/search_resume_watchdog.py" write --run-id "$RUN_ID" || _wrc=$?
     say "write_rc=${_wrc}"
