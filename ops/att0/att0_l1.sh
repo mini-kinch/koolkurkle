@@ -1174,6 +1174,8 @@ run_group() {
     if [ "$RUN_CHILD_RC" != "0" ]; then
         _fail=1
     fi
+    # group_empty=0 means a descendant is still in the leader's group.
+    # That is a STOP even when the leader already dropped the writer lock.
     if [ "${RUN_GROUP_EMPTY:-0}" != "1" ]; then
         _fail=1
     fi
@@ -1376,6 +1378,12 @@ leftover_clear() {
     _st=$(lock_probe_file "$MA/mailroom.daily.lock" 1)
     if [ "$_st" != "free" ]; then
         say STOP-daily-lock-held
+        return 1
+    fi
+    # Second check, same exclusive flock with_writer_lock.py takes.
+    # Released immediately. A descendant that still holds it is a STOP,
+    # which is the case where the leader already dropped its own lock.
+    if ! flock_probe; then
         return 1
     fi
     say "FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks"
@@ -1684,6 +1692,11 @@ arr_body() {
         ARR_STATUS=needed
         return 1
     fi
+    if ! flock_probe; then
+        say "ROLLBACK-NEEDED lock-held"
+        ARR_STATUS=needed
+        return 1
+    fi
     _hits=$("$PYTHON" -c 'import os,sys
 sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
 import sor_writer_gate as g
@@ -1747,6 +1760,12 @@ safe_state() {
         _ok=0
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
+    if [ "$_st" != "free" ]; then
+        _ok=0
+    elif ! flock_probe; then
+        _ok=0
+    fi
+    _st=$(lock_probe_file "$MA/mailroom.daily.lock" 1)
     if [ "$_st" != "free" ]; then
         _ok=0
     fi
@@ -2222,6 +2241,7 @@ do_rollback() {
     say "WINDOW_STAMP=${W_STAMP}"
     "$MKDIR" -p "$LOGS" "$MA/backups" "$MA/state" || { WANTED_RC=1; return; }
     if ! env_check; then WANTED_RC=1; return; fi
+    if ! locks_ok; then WANTED_RC=1; return; fi
     if ! arr_body "$W_STAMP"; then
         if [ "$ARR_STATUS" = "not-run" ]; then
             ARR_STATUS=failed

@@ -43,6 +43,36 @@ fi
 if /usr/bin/grep -n -E 'curl\.\*imap|run_mailroom_daily' "$SCRIPT"; then
     fail "fail-open process pattern"
 fi
+if /usr/bin/grep -n 'mailroom.write.lock.*mailroom.daily.lock\|mailroom.daily.lock.*mailroom.write.lock' "$SCRIPT"; then
+    fail "combined lock check"
+fi
+_lsof_n=$(/usr/bin/grep -c '"\$LSOF" -t -- "\$_path"' "$SCRIPT" || true)
+if [ "$_lsof_n" != "1" ]; then
+    fail "lsof invocation count ${_lsof_n}"
+fi
+_wlock_n=$(/usr/bin/grep -c 'lock_probe_file "\$MA/mailroom.write.lock"' "$SCRIPT" || true)
+_dlock_n=$(/usr/bin/grep -c 'lock_probe_file "\$MA/mailroom.daily.lock"' "$SCRIPT" || true)
+if [ "$_wlock_n" -lt 3 ] || [ "$_dlock_n" -lt 3 ]; then
+    fail "per-file lock probes write=${_wlock_n} daily=${_dlock_n}"
+fi
+_cpat=$(/usr/bin/awk -F"'" '/^CURL_PAT=/{ print $2; exit }' "$SCRIPT")
+if [ "$_cpat" != '^/usr/bin/curl( |$)' ]; then
+    fail "curl pat ${_cpat}"
+fi
+_pinned='/usr/bin/curl --silent --show-error --fail-early -K -'
+if printf '%s\n' "$_pinned" | /usr/bin/grep -E 'curl.*imap' >/dev/null; then
+    fail "imap pattern matches pinned curl argv"
+fi
+if ! printf '%s\n' "$_pinned" | /usr/bin/grep -E "$_cpat" >/dev/null; then
+    fail "curl pat misses pinned argv"
+fi
+if ! /usr/bin/awk '
+    /^run_group\(\)/ { on = 1 }
+    on && /RUN_GROUP_EMPTY/ && /!= "1"/ { hit = 1 }
+    on && /^}/ { exit hit ? 0 : 1 }
+' "$SCRIPT"; then
+    fail "run_group ignores a live process group"
+fi
 _wpat=$(/usr/bin/awk -F"'" '/^WRITER_PAT=/{ print $2; exit }' "$SCRIPT")
 /usr/bin/pgrep -fl "$_wpat" >/tmp/att0-pgrep-self.out 2>&1
 _prc=$?
@@ -75,6 +105,194 @@ fi
 
 /usr/bin/perl -e 'print "wrapped-perl\n"' | /usr/bin/grep -q wrapped-perl || fail "perl wrapper"
 printf '%s\n' "OVERLAY-OK"
+
+# W22. Combined lsof exits 1 when any listed file is not open.
+# The script must still report the held file.
+ATT0_LSOF_LOG=/tmp/att0-lsof-combined.log
+export ATT0_LSOF_LOG
+: > "$ATT0_LSOF_LOG"
+ATT0_WRITE_HELD=1
+ATT0_DAILY_HELD=0
+ATT0_LSOF_ERROR=0
+export ATT0_WRITE_HELD ATT0_DAILY_HELD ATT0_LSOF_ERROR
+set +e
+"$FAKES/lsof-split" "$HOME/MailArchive/mailroom.write.lock" "$HOME/MailArchive/mailroom.daily.lock" > /tmp/att0-lsof-combined.out
+_crc=$?
+set -e
+if [ "$_crc" -ne 1 ] || [ -s /tmp/att0-lsof-combined.out ]; then
+    fail "combined lsof fixture rc=${_crc}"
+fi
+
+run_locks() {
+    _name=$1
+    ATT0_LSOF_LOG="/tmp/att0-lsof-${_name}.log"
+    export ATT0_LSOF_LOG
+    MA="/tmp/att0-lock-${_name}"
+    mkdir -p "$MA"
+    if [ ! -e "$MA/mailroom.write.lock" ]; then
+        : > "$MA/mailroom.write.lock"
+    fi
+    if [ ! -e "$MA/mailroom.daily.lock" ]; then
+        : > "$MA/mailroom.daily.lock"
+    fi
+    : > "$ATT0_LSOF_LOG"
+    set +e
+    _out=$(
+        set +C
+        # shellcheck disable=SC1090
+        . "$SCRIPT"
+        PFX=ATT0T
+        N=0
+        TRANSCRIPT=
+        MA="/tmp/att0-lock-${_name}"
+        AWK=/usr/bin/awk
+        PYTHON=/usr/bin/python3
+        LSOF="$FAKES/lsof-split"
+        locks_ok
+    )
+    _rc=$?
+    set -e
+    printf '%s\n' "$_out" > "/tmp/att0-lock-${_name}.out"
+    printf '%s\n' "$_rc"
+}
+
+ATT0_WRITE_HELD=1
+ATT0_DAILY_HELD=0
+ATT0_LSOF_ERROR=0
+export ATT0_WRITE_HELD ATT0_DAILY_HELD ATT0_LSOF_ERROR
+_rc=$(run_locks write-held)
+if [ "$_rc" = "0" ]; then
+    fail "write held reported free"
+fi
+/usr/bin/grep -q 'STOP-write-lock-held' /tmp/att0-lock-write-held.out || fail "write held stop"
+/usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-write-held.out && fail "write held printed free"
+if /usr/bin/grep -q 'mailroom.daily.lock' /tmp/att0-lsof-write-held.log; then
+    fail "write probe also named daily"
+fi
+/usr/bin/grep -q 'mailroom.write.lock' /tmp/att0-lsof-write-held.log || fail "write probe missing"
+
+ATT0_WRITE_HELD=0
+ATT0_DAILY_HELD=1
+export ATT0_WRITE_HELD ATT0_DAILY_HELD
+_rc=$(run_locks daily-held)
+if [ "$_rc" = "0" ]; then
+    fail "daily held reported free"
+fi
+/usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-daily-held.out || fail "daily held write line"
+/usr/bin/grep -q 'STOP-daily-lock-held' /tmp/att0-lock-daily-held.out || fail "daily held stop"
+/usr/bin/grep -q 'LOCK-DAILY-FREE' /tmp/att0-lock-daily-held.out && fail "daily held printed free"
+_lines=$(/usr/bin/grep -c . /tmp/att0-lsof-daily-held.log || true)
+if [ "$_lines" != "2" ]; then
+    fail "daily held lsof calls ${_lines}"
+fi
+
+ATT0_WRITE_HELD=0
+ATT0_DAILY_HELD=0
+ATT0_LSOF_ERROR=1
+export ATT0_WRITE_HELD ATT0_DAILY_HELD ATT0_LSOF_ERROR
+_rc=$(run_locks lsof-error)
+if [ "$_rc" = "0" ]; then
+    fail "lsof error reported free"
+fi
+/usr/bin/grep -q 'STOP-lsof-write' /tmp/att0-lock-lsof-error.out || fail "lsof error stop"
+/usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-lsof-error.out && fail "lsof error printed free"
+
+ATT0_LSOF_ERROR=0
+export ATT0_LSOF_ERROR
+_rc=$(run_locks both-free)
+if [ "$_rc" != "0" ]; then
+    cat /tmp/att0-lock-both-free.out >&2
+    fail "both free rc ${_rc}"
+fi
+/usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-both-free.out || fail "both free write"
+/usr/bin/grep -q 'LOCK-DAILY-FREE' /tmp/att0-lock-both-free.out || fail "both free daily"
+/usr/bin/grep -q 'FLOCK-WRITE-FREE' /tmp/att0-lock-both-free.out || fail "both free flock"
+_lines=$(/usr/bin/grep -c . /tmp/att0-lsof-both-free.log || true)
+if [ "$_lines" != "2" ]; then
+    fail "both free lsof calls ${_lines}"
+fi
+if /usr/bin/grep 'mailroom.write.lock.*mailroom.daily.lock' /tmp/att0-lsof-both-free.log >/dev/null; then
+    fail "both free combined lsof"
+fi
+
+_hold_lock=/tmp/att0-lock-flock-held/mailroom.write.lock
+mkdir -p /tmp/att0-lock-flock-held
+: > "$_hold_lock"
+/usr/bin/python3 -c 'import fcntl, time, sys
+fh = open(sys.argv[1], "a+")
+fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+time.sleep(20)
+' "$_hold_lock" &
+_hold_pid=$!
+sleep 0.2
+_rc=$(run_locks flock-held)
+kill "$_hold_pid" 2>/dev/null || true
+wait "$_hold_pid" 2>/dev/null || true
+if [ "$_rc" = "0" ]; then
+    fail "flock held reported free"
+fi
+/usr/bin/grep -q 'STOP-flock-held' /tmp/att0-lock-flock-held.out || fail "flock held stop"
+unset ATT0_WRITE_HELD ATT0_DAILY_HELD ATT0_LSOF_ERROR ATT0_LSOF_LOG
+printf '%s\n' "LOCK-SPLIT-OK"
+
+# W23. The pinned curl argv has no imap text. The URL is on stdin.
+cat > /tmp/att0-sleeper.c <<'EOF'
+#include <unistd.h>
+int main(void) {
+    sleep(30);
+    return 0;
+}
+EOF
+gcc -O2 -o /tmp/att0-sleeper /tmp/att0-sleeper.c
+printf '%s\n' 'imaps://imap.mail.me.com/INBOX' | /usr/bin/python3 -c 'import os
+os.execv("/tmp/att0-sleeper", ["/usr/bin/curl", "--silent", "--show-error", "--fail-early", "-K", "-"])' &
+_curl_pid=$!
+sleep 0.3
+/usr/bin/pgrep -af '^/usr/bin/curl( |$)' > /tmp/att0-curl-pat.out || fail "curl pat missed pinned argv"
+/usr/bin/grep -F '/usr/bin/curl --silent --show-error --fail-early -K -' /tmp/att0-curl-pat.out >/dev/null || fail "curl pat missed pinned argv"
+if /usr/bin/grep -F imap /tmp/att0-curl-pat.out >/dev/null; then
+    kill "$_curl_pid" 2>/dev/null || true
+    fail "curl pat output contains imap"
+fi
+if /usr/bin/pgrep -af 'curl.*imap' | /usr/bin/grep -F '/usr/bin/curl --silent --show-error --fail-early -K -' >/dev/null; then
+    kill "$_curl_pid" 2>/dev/null || true
+    fail "curl imap pattern matched pinned argv"
+fi
+kill "$_curl_pid" 2>/dev/null || true
+wait "$_curl_pid" 2>/dev/null || true
+printf '%s\n' "CURL-ARGV-OK"
+
+# W24. Leader exits 0 while a grandchild ignores TERM and holds the lock.
+# Continuing requires the group empty and the lock free.
+: > /tmp/att0-desc-lock
+rm -f /tmp/att0-desc.meta /tmp/att0-desc.log /tmp/att0-desc-helper
+(
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    STAMP=20260928-130099
+    write_helper_pl
+    printf '%s\n' "$HELPER_PL"
+) > /tmp/att0-desc-helper
+_helper=$(cat /tmp/att0-desc-helper)
+test -n "$_helper" && test -f "$_helper" || fail "desc helper missing"
+_t0=$(/bin/date +%s)
+set +e
+/usr/bin/perl -e 'alarm 20; exec @ARGV or die' /usr/bin/perl "$_helper" 30 /tmp/att0-desc.log 5 /usr/bin/perl -e 'use Fcntl qw(LOCK_EX O_RDWR); my $p = fork(); die "fork\n" unless defined $p; if ($p == 0) { $SIG{TERM} = "IGNORE"; $SIG{HUP} = "IGNORE"; sysopen my $fh, "/tmp/att0-desc-lock", O_RDWR or die "open\n"; flock $fh, LOCK_EX or die "flock\n"; sleep 30; exit 0; } exit 0;' > /tmp/att0-desc.meta
+set -e
+_t1=$(/bin/date +%s)
+if [ $((_t1 - _t0)) -gt 15 ]; then
+    fail "desc reap too slow $((_t1 - _t0))"
+fi
+/usr/bin/grep -q '^child_rc=0$' /tmp/att0-desc.meta || fail "desc child rc"
+/usr/bin/grep -q '^harness=normal$' /tmp/att0-desc.meta || fail "desc harness"
+/usr/bin/grep -q '^group_empty=1$' /tmp/att0-desc.meta || fail "desc group"
+/usr/bin/python3 -c 'import fcntl, sys
+fh = open(sys.argv[1], "a+")
+fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+' /tmp/att0-desc-lock || fail "desc lock still held"
+printf '%s\n' "DESC-LOCK-OK"
 
 seed_db() {
     /usr/bin/sqlite3 "$1" <<'SQL'
