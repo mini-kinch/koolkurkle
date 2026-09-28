@@ -95,7 +95,8 @@ HEALTH_URL=http://127.0.0.1:8743/health
 # unguarded (for example [r]un_mailroom_daily) self-matches.
 WRITER_PAT='[m]ailroom_daily|[i]map_newmail|[i]map_tombstone|[i]map_fetch_bodies|[n]otify_bills|[r]em-legacy|[m]eta_fill|[m]igrate_att0|[e]mbed_backfill|[e]mbed_merge_shards|[e]mbed_sidecar_apply|[p]ost_rem_embed_batch|[w]ith_writer_lock|[s]ecurity find-generic|[p]haseP_'
 CURL_PAT='^/usr/bin/curl( |$)'
-PERL_PAT='[p]erl'
+PERL_PAT='^/usr/bin/perl( |$)'
+SECURITY_PAT='^/usr/bin/security( |$)'
 TIME_PAT='^/usr/bin/time( |$)'
 SCRIPT_PAT='[a]tt0_l1\.sh'
 P5_LEFTOVER_NAME=mailroom-pre-att0-live-20260927-2019.sqlite
@@ -1692,7 +1693,7 @@ leftover_clear() {
     for _pat in \
         "$WRITER_PAT" \
         "$CURL_PAT" \
-        '[s]ecurity' \
+        "$SECURITY_PAT" \
         "$PERL_PAT" \
         "$TIME_PAT"
     do

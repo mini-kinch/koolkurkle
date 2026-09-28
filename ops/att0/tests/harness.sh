@@ -16,6 +16,7 @@ fail() {
 }
 
 /bin/bash -n "$SCRIPT" || fail "bash -n"
+/bin/bash "$ROOT/ops/att0/tests/test_leftover_patterns.sh" || fail "leftover patterns"
 _r1z="$ROOT/ops/att0/r1v2_digest.zsh"
 _r1tail=$(tail -n 39 "$_r1z" | /usr/bin/shasum -a 256 | /usr/bin/awk '{print $1; exit}')
 if [ "$_r1tail" != "f862c5ba3ad2ae2b86fe1be19ca348f34b39eea1c016bf4a56b9375fbd9e9cf0" ]; then
@@ -28,8 +29,15 @@ fi
 if /usr/bin/grep -n -E 'declare -A|mapfile|readarray|\[\[ -v|wait -n|\|&|\$\{[A-Za-z_][A-Za-z0-9_]*,,|\$\{[A-Za-z_][A-Za-z0-9_]*\^\^' "$SCRIPT"; then
     fail "forbidden construct"
 fi
-if /usr/bin/grep -n '/Users/\|unlock-keychain\|set-generic-password\|partition-list\|/usr/bin/security' "$SCRIPT"; then
+if /usr/bin/grep -n -E '/Users/|unlock-keychain|set-generic-password|partition-list' "$SCRIPT"; then
     fail "forbidden path or keychain workaround"
+fi
+# /usr/bin/security may appear only as the anchored pgrep pattern.
+# The window script does not invoke the keychain binary.
+_sec_bad=$(/usr/bin/grep -n '/usr/bin/security' "$SCRIPT" | /usr/bin/grep -v -F "SECURITY_PAT='^/usr/bin/security( |$)'" || true)
+if [ -n "$_sec_bad" ]; then
+    printf '%s\n' "$_sec_bad" >&2
+    fail "forbidden security invocation"
 fi
 if /usr/bin/grep -n -E '(^|[^a-zA-Z])rm( |$)' "$SCRIPT"; then
     fail "rm in script"
