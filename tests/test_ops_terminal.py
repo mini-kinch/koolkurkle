@@ -3,10 +3,16 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+import imap_keychain  # noqa: E402
+
 OPS = ROOT / "docs" / "ops-terminal.md"
 DAILY = ROOT / "scripts" / "README.mailroom-daily.md"
 README = ROOT / "README.md"
@@ -188,10 +194,13 @@ class OpsTerminalDocTests(unittest.TestCase):
         self.assertIn("MBP", text)
         self.assertIn("Mini", text)
         self.assertIn("one command per fence", text)
-        self.assertIn("security add-generic-password -a \"$USER\" -s mailroom.imap.app-password -w", text)
+        self.assertIn(
+            'security add-generic-password -a "$USER" -s %s -w' % imap_keychain.KEYCHAIN_DEFAULT,
+            text,
+        )
         self.assertIn("wc -c", text)
-        self.assertIn("mailroom.imap.app-password", text)
-        self.assertIn("mailroom.icloud.app-password", text)
+        self.assertIn(imap_keychain.KEYCHAIN_DEFAULT, text)
+        self.assertIn(imap_keychain.KEYCHAIN_LEGACY, text)
         self.assertIn("16–19", text)
         self.assertIn("appleid.apple.com", text)
         self.assertIn("Login denied", text)
@@ -349,11 +358,15 @@ class OpsTerminalDocTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("ops-terminal.md", text, msg=path.name)
 
-    def test_daily_readme_keeps_legacy_fallback(self):
+    def test_daily_readme_pins_without_a_legacy_fallback(self):
         text = DAILY.read_text(encoding="utf-8")
-        self.assertIn("mailroom.icloud.app-password", text)
-        self.assertIn("read fallback", text)
-        self.assertIn("keep the legacy item until IMAP", text)
+        self.assertIn("<keychain-item>", text)
+        self.assertIn("MAILROOM_KEYCHAIN_ITEM", text)
+        self.assertIn("error: keychain item is not pinned", text)
+        self.assertNotIn("read fallback", text)
+        self.assertNotIn("keep the legacy item until IMAP", text)
+        self.assertNotIn(imap_keychain.KEYCHAIN_DEFAULT, text)
+        self.assertNotIn(imap_keychain.KEYCHAIN_LEGACY, text)
         self.assertIn("# MBP — create IMAP Keychain item", text)
         self.assertIn("# Mini — create IMAP Keychain item", text)
         self.assertNotIn("EXAMPLE_USER_LOCAL", text)

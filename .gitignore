@@ -13,3 +13,6 @@ htmlcov/
 
 # Local classifier lists. Never commit personal rule data.
 classify_rules.local.json
+
+# Local Keychain item pin (the item name, not the secret).
+.mailroom-keychain-item
