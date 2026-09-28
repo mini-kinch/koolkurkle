@@ -72,6 +72,12 @@ must_match() {
     fi
 }
 
+must_miss() {
+    if matches "$1" "$2"; then
+        fail "anchored pattern hit: $2  pat=$1"
+    fi
+}
+
 # The retired substring still matches securityd. The anchored pattern must not.
 if ! matches '[s]ecurity' '/usr/libexec/securityd'; then
     fail "fixture no longer shows the unanchored securityd hit"
@@ -99,6 +105,26 @@ done <<'EOF'
 /bin/bash /tmp/att0_l1.sh window 20260928-011821
 /bin/bash
 -zsh
+EOF
+
+# Confirmed Mini pgrep -fl '[s]ecurity' lines, then the same commands
+# without the pid. pgrep -f matches the command; -l only prefixes the
+# pid in the printout. This harness applies the regex to the given
+# string, so both forms are subjects.
+while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    if ! matches '[s]ecurity' "$_line"; then
+        fail "retired substring missed confirmed line: ${_line}"
+    fi
+    must_clear "$_line"
+    must_miss "$SECURITY_PAT" "$_line"
+    must_miss "$PERL_PAT" "$_line"
+    must_miss "$TIME_PAT" "$_line"
+done <<'EOF'
+386 /usr/sbin/securityd -i
+8552 /usr/libexec/securityd_system
+/usr/sbin/securityd -i
+/usr/libexec/securityd_system
 EOF
 
 # Real leftover children. The command field starts with the pinned binary.
