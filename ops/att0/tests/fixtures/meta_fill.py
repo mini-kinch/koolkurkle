@@ -24,21 +24,41 @@ def main(argv):
     sys.stdout.write("CANARY-SECRET-VALUE\n")
     if os.environ.get("ATT0_FAKE_FALLBACK") == "1":
         sys.stdout.write("warning: falling back to legacy item\n")
-    sys.stdout.write("att0 meta fill\n")
-    sys.stdout.write("dry_run=%s\n" % (0 if apply else 1))
+    # Same printer as scripts/attachments/meta_fill.py format_report.
     # unscanned_all on the seeded db is 1063, and 992+44+27 = 1063.
-    sys.stdout.write("messages=0\n")
-    sys.stdout.write("errors=1063\n")
-    sys.stdout.write("capped=0\n")
-    sys.stdout.write("eligible=1063\n")
-    sys.stdout.write("bytes_stored=0\n")
-    sys.stdout.write("filenames=0\n")
-    sys.stdout.write("uidvalidity_mismatch=0\n")
-    sys.stdout.write("literal_dropped=0\n")
-    sys.stdout.write("literal_truncated=0\n")
-    sys.stdout.write("curl_failures=[]\n")
-    sys.stdout.write("has_attachments=0\n")
-    sys.stdout.write("parts_truncated=1\n")
+    src = os.environ.get("ATT0_REAL_META_FILL", "")
+    if not src:
+        sys.stderr.write("error: ATT0_REAL_META_FILL unset\n")
+        return 2
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("att0_real_meta_fill", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    report = {
+        "dry_run": not apply,
+        "source": "imap",
+        "db_basename": "mailroom.sqlite",
+        "messages": 0,
+        "parts": 0,
+        "has_attachments": 0,
+        "filenames": 0,
+        "bytes_stored": 0,
+        "scanned": 1063,
+        "stopped": "",
+        "capped": 0,
+        "errors": 1063,
+        "eligible": 1063,
+        "skipped": 0,
+        "partial": False,
+        "partial_banner": "",
+        "parts_truncated": 1,
+        "uidvalidity_mismatch": 0,
+        "curl_failures": [],
+        "literal_dropped": 0,
+        "literal_truncated": 0,
+        "literal_folders": [],
+    }
+    sys.stdout.write(mod.format_report(report))
     if apply:
         conn = sqlite3.connect(db)
         conn.execute(

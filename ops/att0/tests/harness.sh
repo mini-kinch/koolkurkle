@@ -5,6 +5,7 @@ set -o pipefail
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 SCRIPT="$ROOT/ops/att0/att0_l1.sh"
+export ATT0_REAL_META_FILL="$ROOT/scripts/attachments/meta_fill.py"
 FAKES="$ROOT/ops/att0/tests/fakes"
 FIX="$ROOT/ops/att0/tests/fixtures"
 CANARY=CANARY-SECRET-VALUE
@@ -395,20 +396,59 @@ printf '%s\n' "$_dout" | /usr/bin/grep -q 'STOP-print-disabled' || {
 printf '%s\n' "$_dout" | /usr/bin/grep -q 'DAILY-DISABLED' && fail "print-disabled rc looked disabled"
 printf '%s\n' "PROC-RC-OK"
 
+# Fixture fill logs come from the real format_report, not hand-written lines.
+write_fill_log() {
+    /usr/bin/python3 - "$ATT0_REAL_META_FILL" "$1" "$2" <<'PY'
+import importlib.util
+import sys
+src, dest, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("att0_real_meta_fill", src)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+report = {
+    "dry_run": False,
+    "source": "imap",
+    "db_basename": "mailroom.sqlite",
+    "messages": 0,
+    "parts": 0,
+    "has_attachments": 0,
+    "filenames": 0,
+    "bytes_stored": 0,
+    "scanned": 1063,
+    "stopped": "",
+    "capped": 0,
+    "errors": 1063,
+    "eligible": 1063,
+    "skipped": 0,
+    "partial": False,
+    "partial_banner": "",
+    "parts_truncated": 1,
+    "uidvalidity_mismatch": 0,
+    "curl_failures": [],
+    "literal_dropped": 0,
+    "literal_truncated": 0,
+    "literal_folders": [],
+}
+if mode == "curl":
+    report["curl_failures"] = ["imap login failed"]
+if mode == "partial":
+    report["partial"] = True
+    report["partial_banner"] = "PARTIAL: scanned 0 of 1063 (limit 1)"
+text = mod.format_report(report)
+lines = text.splitlines()
+if mode == "missing":
+    lines = [ln for ln in lines if not ln.startswith("summary_json=")]
+elif mode == "dup":
+    lines.append(next(ln for ln in lines if ln.startswith("summary_json=")))
+elif mode == "badjson":
+    lines = ["summary_json={" if ln.startswith("summary_json=") else ln for ln in lines]
+text = "\n".join(lines) + "\n"
+open(dest, "w").write(text)
+PY
+}
+
 _kvlog=/tmp/att0-kv-good.log
-cat > "$_kvlog" <<'EOF'
-att0 meta fill
-messages=0
-errors=1063
-capped=0
-eligible=1063
-bytes_stored=0
-filenames=0
-uidvalidity_mismatch=0
-literal_dropped=0
-literal_truncated=0
-curl_failures=[]
-EOF
+write_fill_log "$_kvlog" clean
 _kv=$(
     set +e
     set +C
@@ -418,7 +458,7 @@ _kv=$(
     N=0
     TRANSCRIPT=
     AWK=/usr/bin/awk
-    log_ok_fill /tmp/att0-kv-good.log 0
+    log_ok_fill /tmp/att0-kv-good.log 1
     printf 'RC=%s\n' "$?"
 )
 printf '%s\n' "$_kv" | /usr/bin/grep -q 'FILL-REPORT-OK' || {
@@ -436,7 +476,7 @@ _kv=$(
     N=0
     TRANSCRIPT=
     AWK=/usr/bin/awk
-    log_ok_fill /tmp/att0-kv-good.log 0
+    log_ok_fill /tmp/att0-kv-good.log 1
     printf 'RC=%s\n' "$?"
 )
 printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv duplicate"
@@ -451,7 +491,7 @@ _kv=$(
     N=0
     TRANSCRIPT=
     AWK=/usr/bin/awk
-    log_ok_fill /tmp/att0-kv-good.log 0
+    log_ok_fill /tmp/att0-kv-good.log 1
     printf 'RC=%s\n' "$?"
 )
 printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv missing"
@@ -465,10 +505,100 @@ _kv=$(
     N=0
     TRANSCRIPT=
     AWK=/usr/bin/awk
-    log_ok_fill /tmp/att0-kv-good.log 0
+    log_ok_fill /tmp/att0-kv-good.log 1
     printf 'RC=%s\n' "$?"
 )
 printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-capped' || fail "kv nonzero"
+write_fill_log /tmp/att0-kv-curl.log curl
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-curl.log 1
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-curl-failures' || fail "kv curl"
+write_fill_log /tmp/att0-kv-miss.log missing
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-miss.log 1
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-curl-failures' || fail "kv summary missing"
+write_fill_log /tmp/att0-kv-dupjson.log dup
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-dupjson.log 1
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-curl-failures' || fail "kv summary dup"
+write_fill_log /tmp/att0-kv-badjson.log badjson
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-badjson.log 1
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-curl-failures' || fail "kv summary bad"
+write_fill_log /tmp/att0-kv-partial.log partial
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    log_ok_fill /tmp/att0-kv-partial.log 1
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q 'STOP-partial' || fail "kv partial"
+write_fill_log /tmp/att0-kv-good.log clean
+_kv=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    AWK=/usr/bin/awk
+    fill_gates_ok /tmp/att0-kv-good.log
+    printf 'GATE=%s\n' "$?"
+    fill_gates_ok /tmp/att0-kv-curl.log
+    printf 'GATECURL=%s\n' "$?"
+    fill_gates_ok /tmp/att0-kv-partial.log
+    printf 'GATEPART=%s\n' "$?"
+)
+printf '%s\n' "$_kv" | /usr/bin/grep -q '^GATE=0$' || fail "report fill gate"
+printf '%s\n' "$_kv" | /usr/bin/grep -q '^GATECURL=0$' && fail "report curl gate"
+printf '%s\n' "$_kv" | /usr/bin/grep -q '^GATEPART=0$' && fail "report partial gate"
 printf '%s\nuser_version=1\nuser_version=1\nlegacy_attachments=renamed_empty\n' x > /tmp/att0-kv-mig.log
 _kv=$(
     set +e

@@ -849,7 +849,7 @@ d_indexes_ok() {
 
 # A2, before any live SoR write. D_late is not this check.
 # 1 scanned_gone=0 on every index. 2 TOTAL gone=G. 3 unscanned_all=R_errors.
-# 4 rehearsal curl/literal/capped/uidvalidity/PARTIAL/rc, in log_ok_fill.
+# 4 rehearsal curl/literal/capped/uidvalidity/partial=0, in log_ok_fill.
 # 5 0<=D_W<=D_MAX. 6 D_P<=D_W<=D_P+D_BAND. 7 index bound. 8 fill identity.
 d_check() {
     _log=$1
@@ -1319,7 +1319,7 @@ if ($reader == 0) {
             $fb = 1;
             $keep = 1;
         }
-        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|K_OK |K_FAIL |REFUSE_EXISTS|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|WAL-RESTORE-FAILED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
+        if ($line =~ /^(a4_|att0 meta fill|att0 schema migrate|dry_run=|source=|db_basename=|messages=|parts=|has_attachments=|filenames=|bytes_stored=|scanned=|eligible=|stopped=|capped=|capped: |skipped=|errors=|partial=|parts_truncated=|uidvalidity_mismatch=|literal_|curl_failures=|summary_json=|user_version=|legacy_attachments=|attachments=|attachment_|message_embeddings=|fts=|hits_count=|TOTAL |idx=|ok$|[0-9]+$|K_OK |K_FAIL |REFUSE_EXISTS|RESTORE-SWAPPED|REFUSE-|WAL-RETURNED|WAL-RESTORE-FAILED|QUICK-CHECK-FAILED|SWAP-FAILED|run_id=|deadline_26=|deadline_50=|d26_live=|status=)/) {
             $keep = 1;
         }
         print $out $line if $keep;
@@ -1500,6 +1500,26 @@ run_group() {
     return 0
 }
 
+# format_report puts curl_failures only inside one summary_json= line.
+summary_curl_ok() {
+    _log=$1
+    _n=$("$AWK" 'index($0, "summary_json=") == 1 { n++ } END { print n + 0 }' "$_log")
+    if [ "${_n:-0}" != "1" ]; then
+        return 1
+    fi
+    "$AWK" 'index($0, "summary_json=") == 1 { print substr($0, 14); exit }' "$_log" | "$PYTHON" -c 'import json, sys
+raw = sys.stdin.read()
+if raw.endswith("\n"):
+    raw = raw[:-1]
+try:
+    obj = json.loads(raw)
+except Exception:
+    raise SystemExit(2)
+if not isinstance(obj, dict) or obj.get("curl_failures") != []:
+    raise SystemExit(1)
+'
+}
+
 log_ok_fill() {
     _log=$1
     _apply=$2
@@ -1507,16 +1527,20 @@ log_ok_fill() {
         say STOP-falling-back
         return 1
     fi
-    if [ "$_apply" = "1" ] && has_line "$_log" "PARTIAL"; then
-        say STOP-partial
-        return 1
+    # format_report always emits partial=0 or partial=1. The PARTIAL: banner
+    # is not a kept line. Apply runs require the key to be exactly 0.
+    if [ "$_apply" = "1" ]; then
+        if ! kv_one "$_log" partial 0; then
+            say STOP-partial
+            return 1
+        fi
     fi
     # parts_truncated is meta_fill's --max-parts default. It is not a gate.
     _pt=$("$AWK" -F= '/^parts_truncated=/ { print $2; exit }' "$_log")
     if [ -n "${_pt:-}" ]; then
         say "PARTS-TRUNCATED-INFO parts_truncated=${_pt}"
     fi
-    if ! kv_one "$_log" curl_failures '[]'; then
+    if ! summary_curl_ok "$_log"; then
         say STOP-curl-failures
         return 1
     fi
@@ -2911,10 +2935,10 @@ fill_gates_ok() {
     if has_line "$_log" "falling back"; then
         return 1
     fi
-    if has_line "$_log" "PARTIAL"; then
+    if ! kv_one "$_log" partial 0; then
         return 1
     fi
-    if ! kv_one "$_log" curl_failures '[]'; then
+    if ! summary_curl_ok "$_log"; then
         return 1
     fi
     if ! kv_one "$_log" bytes_stored 0; then
