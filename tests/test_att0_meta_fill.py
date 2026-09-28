@@ -1470,6 +1470,10 @@ class FillTests(unittest.TestCase):
                 db,
                 [("ex-60", "jsonl-import", None, 0, length, "synthetic-60", None)],
             )
+            # A process-wide tracer (-X tracemalloc=N) keeps extra frames and
+            # moves this peak. Measure with the default one-frame trace.
+            if tracemalloc.is_tracing():
+                tracemalloc.stop()
             tracemalloc.start()
             try:
                 report = meta.fill_metadata(

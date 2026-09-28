@@ -176,20 +176,23 @@ def main() -> int:
         log(f"missing {DB}")
         return 1
     conn = sqlite3.connect(DB)
-    rows = open_bills(conn)
-    if not rows:
-        log("quiet: no open bills")
+    try:
+        rows = open_bills(conn)
+        if not rows:
+            log("quiet: no open bills")
+            return 0
+        key = f"bills-{today}"
+        if already_sent(conn, key) and not args.force:
+            log("already sent today")
+            return 0
+        body = digest(rows)
+        phone = keychain_phone()
+        send_imessage(phone, body)
+        mark_sent(conn, key, "ok")
+        log(f"sent {len(rows)} open bills")
         return 0
-    key = f"bills-{today}"
-    if already_sent(conn, key) and not args.force:
-        log("already sent today")
-        return 0
-    body = digest(rows)
-    phone = keychain_phone()
-    send_imessage(phone, body)
-    mark_sent(conn, key, "ok")
-    log(f"sent {len(rows)} open bills")
-    return 0
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

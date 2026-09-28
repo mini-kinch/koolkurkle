@@ -68,45 +68,54 @@ def _add(
 class LiveMailboxFilterTests(unittest.TestCase):
     def test_live_mailboxes_filters_folders(self):
         conn = _conn()
-        _add(conn, "inbox-1", present=1, folder="INBOX")
-        _add(conn, "sent-1", present=1, folder="Sent")
-        _add(conn, "del-1", present=1, folder="Deleted")
-        _add(conn, "gone-1", present=0, folder="INBOX")
-        hist = ss.fts_search(conn, "SDGE bill", k=10, live=False)
-        self.assertEqual({h["message_id"] for h in hist}, {"inbox-1", "sent-1", "del-1", "gone-1"})
-        boxed = ss.fts_search(
-            conn, "SDGE bill", k=10, live=True, live_mailboxes="INBOX,Sent"
-        )
-        self.assertEqual({h["message_id"] for h in boxed}, {"inbox-1", "sent-1"})
+        try:
+            _add(conn, "inbox-1", present=1, folder="INBOX")
+            _add(conn, "sent-1", present=1, folder="Sent")
+            _add(conn, "del-1", present=1, folder="Deleted")
+            _add(conn, "gone-1", present=0, folder="INBOX")
+            hist = ss.fts_search(conn, "SDGE bill", k=10, live=False)
+            self.assertEqual({h["message_id"] for h in hist}, {"inbox-1", "sent-1", "del-1", "gone-1"})
+            boxed = ss.fts_search(
+                conn, "SDGE bill", k=10, live=True, live_mailboxes="INBOX,Sent"
+            )
+            self.assertEqual({h["message_id"] for h in boxed}, {"inbox-1", "sent-1"})
+        finally:
+            conn.close()
 
     def test_trash_live_opt_in_adds_deleted(self):
         conn = _conn()
-        _add(conn, "inbox-1", present=1, folder="INBOX")
-        _add(conn, "del-1", present=1, folder="Deleted")
-        no_trash = ss.fts_search(
-            conn, "SDGE bill", k=10, live=True, live_mailboxes="INBOX"
-        )
-        self.assertEqual([h["message_id"] for h in no_trash], ["inbox-1"])
-        with_trash = ss.fts_search(
-            conn,
-            "SDGE bill",
-            k=10,
-            live=True,
-            live_mailboxes="INBOX",
-            trash_live=True,
-        )
-        self.assertEqual({h["message_id"] for h in with_trash}, {"inbox-1", "del-1"})
+        try:
+            _add(conn, "inbox-1", present=1, folder="INBOX")
+            _add(conn, "del-1", present=1, folder="Deleted")
+            no_trash = ss.fts_search(
+                conn, "SDGE bill", k=10, live=True, live_mailboxes="INBOX"
+            )
+            self.assertEqual([h["message_id"] for h in no_trash], ["inbox-1"])
+            with_trash = ss.fts_search(
+                conn,
+                "SDGE bill",
+                k=10,
+                live=True,
+                live_mailboxes="INBOX",
+                trash_live=True,
+            )
+            self.assertEqual({h["message_id"] for h in with_trash}, {"inbox-1", "del-1"})
+        finally:
+            conn.close()
 
     def test_q2_deferred_bare_live_unchanged(self):
         conn = _conn()
-        _add(conn, "inbox-1", present=1, folder="INBOX")
-        _add(conn, "del-1", present=1, folder="Deleted")
-        live = ss.fts_search(conn, "SDGE bill", k=10, live=True)
-        self.assertEqual({h["message_id"] for h in live}, {"inbox-1", "del-1"})
-        trash_alone = ss.fts_search(
-            conn, "SDGE bill", k=10, live=True, trash_live=True
-        )
-        self.assertEqual({h["message_id"] for h in trash_alone}, {"inbox-1", "del-1"})
+        try:
+            _add(conn, "inbox-1", present=1, folder="INBOX")
+            _add(conn, "del-1", present=1, folder="Deleted")
+            live = ss.fts_search(conn, "SDGE bill", k=10, live=True)
+            self.assertEqual({h["message_id"] for h in live}, {"inbox-1", "del-1"})
+            trash_alone = ss.fts_search(
+                conn, "SDGE bill", k=10, live=True, trash_live=True
+            )
+            self.assertEqual({h["message_id"] for h in trash_alone}, {"inbox-1", "del-1"})
+        finally:
+            conn.close()
 
     def test_cli_flags_default_off(self):
         parser = ask_mail.build_parser()
