@@ -2,9 +2,9 @@
 
 Phase P is `phaseP_473b59a0.sh` (sha256 `1ff2204ba32e4adcd66f725cdb8c8dce52973813f74d1da0ea4df041d99c81b2`). This card does not place or rewrite it. It already passed for `P_STAMP=20260928-011821`. This card places `ops/att0/att0_l1.sh` and runs one mode per call. There is no `phasep` mode and no `keychain-primer` mode. The clone is `/tmp/pr48b`. The branch is `cursor/att0-l1-run-scripts`.
 
-Script sha256: `bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341`
+Script sha256: `ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9`
 
-Commit: `cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c`
+Commit: `COMMIT_SHA_PENDING`
 
 Run each one-liner from a shell that has `set -C`. Placement writes `/tmp/att0_l1.sh` only when that path is absent. If the path already exists, the sha256 must already match; a different sha stops the chain before `<MODE>-PLACED`. Each step prints its own marker. `window`, `rollback`, and `restore-daily` print a stamp, numbered step lines, a `SAFE-STATE` line, and one `SUMMARY` line. `report` prints a stamp and a `SUMMARY` line and does not run `SAFE-STATE`. The script does not call the Keychain binary. `window` refuses, before it creates a directory or a transcript, unless `/tmp/phaseP-offline-<P_STAMP>.OK`, `/tmp/phaseP-p8-<P_STAMP>.OK`, and `/tmp/phaseP-state-<P_STAMP>` are present.
 
@@ -33,7 +33,7 @@ Exit codes: `0` done, `1` stopped before a live SoR write, `2` usage, `3` failur
 ## window
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo WINDOW-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ] && echo WINDOW-SHA-OK && /bin/bash /tmp/att0_l1.sh window 20260928-011821
 ```
 
 The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, restore-daily, and report.
@@ -41,7 +41,7 @@ The first line is `ATT0W STAMP=<window stamp>`. Pass that stamp to rollback, res
 ## rollback
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo ROLLBACK-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ] && echo ROLLBACK-SHA-OK && /bin/bash /tmp/att0_l1.sh rollback WINDOW_STAMP
 ```
 
 ## restore-daily
@@ -49,7 +49,7 @@ cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/a
 Refuses unless `/tmp/att0w-done-<WINDOW_STAMP>.OK` or `/tmp/att0r-done-<WINDOW_STAMP>.OK` exists.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo RESTORE-DAILY-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ] && echo RESTORE-DAILY-SHA-OK && /bin/bash /tmp/att0_l1.sh restore-daily WINDOW_STAMP
 ```
 
 ## report
@@ -63,7 +63,7 @@ Each rule is one line, `ATT0-DONE RULE <id> PASS` or `FAIL`. The last line is `A
 Nothing in `window`, `rollback`, or `restore-daily` arms the watchdog's +26 minute search restore, or any other restore timer, in the free-lock gap between A2 and A3. That gap calls `search_resume_watchdog.py status` only. The only deadline there is the S+50 file written before search bootout, plus the S+51 budget.
 
 ```
-cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ]; else git show cb8b98d8fadccfa59c5c9ac9bbb869e8218e0a9c:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = bdba1af3db486c8068c30d4f752ad57b269e5ec2415221ab1a0aec5920b7f341 ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
+cd /tmp/pr48b && git fetch origin cursor/att0-l1-run-scripts && { if [ -e /tmp/att0_l1.sh ]; then [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ]; else git show COMMIT_SHA_PENDING:ops/att0/att0_l1.sh > /tmp/att0_l1.sh; fi; } && echo REPORT-PLACED && [ "$(shasum -a 256 /tmp/att0_l1.sh | cut -d' ' -f1)" = ebcfb7542021424c0751e5801aaac7865c63765612af22d692e642d2429792e9 ] && echo REPORT-SHA-OK && /bin/bash /tmp/att0_l1.sh report WINDOW_STAMP
 ```
 
 ## W-criteria
@@ -72,7 +72,8 @@ W22, W23, and W24 are required on top of W1–W21.
 
 | id | criterion | implemented | tested |
 | --- | --- | --- | --- |
-| W22 | One `lsof -t -- FILE` per lock. Non-empty stdout means held, which is a STOP. A non-blocking flock goes through `with_writer_lock.py` (`LOCK_EX\|LOCK_NB`, released immediately). rc 2 or held is a STOP. lsof rc alone is not success. Step 0 of `window` runs the writer and per-file lock re-checks and stops before any directory, transcript, or SoR write. | `lock_probe_file`, `flock_probe`, `step0_locks` | `LOCK-SPLIT-OK`, `STEP0-LOCK-OK` |
+| W22 | One `lsof -t -- FILE 2>&1` per lock. An all-digit line means held, which is a STOP. rc 1 with empty output means free. Anything else is `LSOF-ERROR`. A missing write lock is a STOP. A missing daily lock is free. A non-blocking flock goes through `with_writer_lock.py` (`LOCK_EX\|LOCK_NB`, released immediately). rc 2 or held is a STOP. lsof rc alone is not success. Step 0 of `window` runs the writer, daily, lock, action-required, hits, health, and watchdog re-checks and stops before any directory, transcript, or SoR write. | `lock_probe_file`, `flock_probe`, `step0_locks` | `LOCK-SPLIT-OK`, `STEP0-LOCK-OK` |
+| process | `pgrep -f` uses the full P1 writer list once, bracket-guarded, with no redundant alternative that contains another name unguarded. rc 0 is present, rc 1 is absent, any other rc is `PGREP-ERROR`. `launchctl print` on the daily: rc 0 is loaded, rc 113 or `Could not find service` is not-loaded, anything else is `DAILY-UNCLEAR`. A non-zero `print-disabled` rc is a STOP. Health is exactly `200`. `ACTION_REQUIRED` is absent for both `-e` and `-L`. `rem_process_hits()` is empty. At window entry the watchdog is `status=missing` with rc 1. The same helpers feed step 0, SAFE-STATE, rollback, and restore-daily. | `pgrep_state`, `no_writer`, `daily_print_state`, `daily_disabled`, `hits_clear`, `health_ok`, `watchdog_missing`, `safe_state` | `STATIC-OK` writer argv check, `PROC-RC-OK`, `PRINT-DISABLED-RC-OK` |
 | W23 | Curl matches argv `^/usr/bin/curl( \|$)` or the pinned argv `/usr/bin/curl --silent --show-error --fail-early -K -`, and membership of the fill group. A `curl.*imap` pattern alone is a failure. | `CURL_PAT`, `fill_curl_in_group` in the timer parent | `CURL-ARGV-OK`, `FILLCURL-GROUP-OK`, happy `fill_curl=0` |
 | W24 | The 3.5L-b rehearsal fill and the live fill after A2 each run in their own process group under a live timer parent (`fork` plus `setpgrp`, not alarm-then-exec). On timeout, INT, TERM, or any exit: TERM, wait 5 seconds, KILL the group, then assert the group is empty before a verdict line. INT and TERM share that path. | `write_helper_pl`, `run_group` `GROUP-EMPTY` | `DESC-LOCK-OK`, `ORPHAN-NORMAL-OK`, `ORPHAN-TIMEOUT-OK`, `ORPHAN-SIGNAL-OK`, happy `GROUP-EMPTY` before both `FILL-REPORT-OK` lines |
 

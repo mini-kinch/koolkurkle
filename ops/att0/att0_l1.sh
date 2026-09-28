@@ -83,8 +83,9 @@ S2_RESERVE_S=120
 LOCK_WAIT_S=30
 TERM_WAIT_S=5
 HEALTH_URL=http://127.0.0.1:8743/health
-# Bracket-guarded so pgrep -f does not match its own argv. Do not add a
-# second alternative that contains one of these names unguarded.
+# Bracket-guarded so pgrep -f does not match its own argv. Each name
+# appears once. A second alternative that contains one of these names
+# unguarded (for example [r]un_mailroom_daily) self-matches.
 WRITER_PAT='[m]ailroom_daily|[i]map_newmail|[i]map_tombstone|[i]map_fetch_bodies|[n]otify_bills|[r]em-legacy|[m]eta_fill|[m]igrate_att0|[e]mbed_backfill|[e]mbed_merge_shards|[e]mbed_sidecar_apply|[p]ost_rem_embed_batch|[w]ith_writer_lock|[s]ecurity find-generic|[p]haseP_'
 CURL_PAT='^/usr/bin/curl( |$)'
 PERL_PAT='[p]erl'
@@ -307,14 +308,36 @@ sha_five_ok() {
     return 1
 }
 
-daily_not_loaded() {
-    _out=$("$LAUNCHCTL" print "$(gui_target com.mailroom.daily)" 2>&1)
+# rc 0 is loaded. rc 113 or the not-found text is not-loaded.
+# Any other rc is unclear. Both loaded and unclear are bad for a held daily.
+daily_print_state() {
+    _out=$("$LAUNCHCTL" print "$(gui_target "$1")" 2>&1)
     _rc=$?
+    DAILY_PRINT_OUT=$_out
+    DAILY_PRINT_RC=$_rc
+    if [ "$_rc" -eq 0 ]; then
+        DAILY_PRINT_STATE=loaded
+        return 0
+    fi
     if [ "$_rc" -eq 113 ] || text_has "$_out" "Could not find service"; then
+        DAILY_PRINT_STATE=not-loaded
+        return 0
+    fi
+    DAILY_PRINT_STATE=unclear
+    return 0
+}
+
+daily_not_loaded() {
+    daily_print_state com.mailroom.daily || return 1
+    if [ "$DAILY_PRINT_STATE" = "not-loaded" ]; then
         say DAILY-NOT-LOADED
         return 0
     fi
-    say "STOP-daily-loaded rc=${_rc}"
+    if [ "$DAILY_PRINT_STATE" = "loaded" ]; then
+        say "STOP-daily-loaded rc=${DAILY_PRINT_RC}"
+        return 1
+    fi
+    say "DAILY-UNCLEAR rc=${DAILY_PRINT_RC}"
     return 1
 }
 
@@ -336,8 +359,8 @@ daily_disabled() {
     return 1
 }
 
-# Prints absent, present, or error. rc 1 is absent. rc 0 is present.
-# Any other rc is an error. Do not fold those with && / ||.
+# Prints absent, present, or error. rc 1 is absent (OK). rc 0 is
+# present (BAD). Any other rc is PGREP-ERROR (BAD). Never fold with && / ||.
 pgrep_state() {
     _pat=$1
     _out=$("$PGREP" -fl "$_pat" 2>&1)
@@ -357,6 +380,7 @@ pgrep_state() {
 no_writer() {
     _st=$(pgrep_state "$WRITER_PAT")
     if [ "$_st" = "error" ]; then
+        say PGREP-ERROR
         say STOP-pgrep-error
         return 1
     fi
@@ -365,7 +389,12 @@ no_writer() {
         return 1
     fi
     _st=$(pgrep_state "$CURL_PAT")
-    if [ "$_st" != "absent" ]; then
+    if [ "$_st" = "error" ]; then
+        say PGREP-ERROR
+        say STOP-pgrep-error
+        return 1
+    fi
+    if [ "$_st" = "present" ]; then
         say STOP-curl-running
         return 1
     fi
@@ -373,9 +402,9 @@ no_writer() {
     return 0
 }
 
-# One file per lsof -t. Non-empty stdout means held. rc 1 and empty
-# stdout means not open. That is not success by itself. Any other rc
-# is an error. A missing write lock is not free.
+# One lsof -t -- FILE per lock, stderr included. An all-digit line is
+# held. rc 1 with empty output is free. Anything else is LSOF-ERROR.
+# A missing write lock is not free. A missing daily lock is free.
 lock_probe_file() {
     _path=$1
     _missing_ok=$2
@@ -387,13 +416,13 @@ lock_probe_file() {
         fi
         return 0
     fi
-    _out=$("$LSOF" -t -- "$_path" 2>/dev/null)
+    _out=$("$LSOF" -t -- "$_path" 2>&1)
     _rc=$?
-    if [ -n "$_out" ]; then
+    if [ -n "$_out" ] && printf '%s\n' "$_out" | "$AWK" 'BEGIN { f = 0 } $0 ~ /^[0-9]+$/ { f = 1 } END { exit f ? 0 : 1 }'; then
         printf '%s\n' held
         return 0
     fi
-    if [ "$_rc" -eq 1 ]; then
+    if [ "$_rc" -eq 1 ] && [ -z "$_out" ]; then
         printf '%s\n' free
         return 0
     fi
@@ -421,13 +450,32 @@ flock_probe() {
     return 1
 }
 
-# Step 0. Read-only writer and per-file lock re-check. Caller must
-# invoke this before it creates a directory, a transcript, or a SoR copy.
+# Step 0. Writer, daily, lock, action-required, hits, health, and
+# watchdog re-check. Caller must invoke this before it creates a
+# directory, a transcript, or a SoR copy. Probe logs stay under /tmp.
 step0_locks() {
     if ! no_writer; then
         return 1
     fi
+    if ! daily_not_loaded; then
+        return 1
+    fi
+    if ! daily_disabled; then
+        return 1
+    fi
     if ! locks_ok; then
+        return 1
+    fi
+    if ! no_action_required; then
+        return 1
+    fi
+    if ! hits_clear "/tmp/att0-step0-hits-${STAMP}-$$.log"; then
+        return 1
+    fi
+    if ! health_ok "/tmp/att0-step0-health-${STAMP}-$$.log"; then
+        return 1
+    fi
+    if ! watchdog_missing "/tmp/att0-step0-wd-${STAMP}-$$.log"; then
         return 1
     fi
     say STEP0-LOCKS-OK
@@ -445,6 +493,7 @@ locks_ok() {
         return 1
     fi
     if [ "$_st" != "free" ]; then
+        say LSOF-ERROR
         say STOP-lsof-write
         return 1
     fi
@@ -455,6 +504,7 @@ locks_ok() {
         return 1
     fi
     if [ "$_st" != "free" ]; then
+        say LSOF-ERROR
         say STOP-lsof-daily
         return 1
     fi
@@ -1381,6 +1431,7 @@ script_others() {
         return 0
     fi
     if [ "$_rc" -ne 0 ]; then
+        say PGREP-ERROR
         say STOP-pgrep-error
         return 1
     fi
@@ -1398,14 +1449,17 @@ leftover_clear() {
     # Names are bracket-guarded so pgrep does not match its own argv.
     for _pat in \
         "$WRITER_PAT" \
-        '[w]ith_writer_lock' \
-        '[m]eta_fill' \
         "$CURL_PAT" \
         '[s]ecurity' \
         "$PERL_PAT" \
         "$TIME_PAT"
     do
         _st=$(pgrep_state "$_pat")
+        if [ "$_st" = "error" ]; then
+            say PGREP-ERROR
+            say STOP-leftover-process
+            return 1
+        fi
         if [ "$_st" != "absent" ]; then
             say STOP-leftover-process
             return 1
@@ -1415,11 +1469,21 @@ leftover_clear() {
         return 1
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        say STOP-write-lock-held
+        return 1
+    fi
     if [ "$_st" != "free" ]; then
         say STOP-write-lock-held
         return 1
     fi
     _st=$(lock_probe_file "$MA/mailroom.daily.lock" 1)
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        say STOP-daily-lock-held
+        return 1
+    fi
     if [ "$_st" != "free" ]; then
         say STOP-daily-lock-held
         return 1
@@ -1523,9 +1587,12 @@ schema_sha() {
 }
 
 health_ok() {
-    _log="$LOGS/att0w-health-${STAMP}.log"
-    if [ -e "$_log" ]; then
-        _log="$LOGS/att0w-health-${STAMP}-$$.log"
+    _log=${1:-}
+    if [ -z "$_log" ]; then
+        _log="$LOGS/att0w-health-${STAMP}.log"
+        if [ -e "$_log" ]; then
+            _log="$LOGS/att0w-health-${STAMP}-$$.log"
+        fi
     fi
     run_group "$HEALTH_TIMEOUT_S" "$_log" "$CURL" -s -o /dev/null -w '%{http_code}' --max-time 3 "$HEALTH_URL" || return 1
     if ! "$AWK" 'BEGIN { f = 0 } $0 == "200" { f = 1 } END { exit f ? 0 : 1 }' "$_log"; then
@@ -1540,6 +1607,12 @@ s2_body() {
         return 1
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        say STOP-s2-lock-held
+        SEARCH_STATUS=not-restored
+        return 1
+    fi
     if [ "$_st" != "free" ]; then
         say STOP-s2-lock-held
         SEARCH_STATUS=not-restored
@@ -1731,6 +1804,12 @@ arr_body() {
         return 1
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        say "ROLLBACK-NEEDED lock-held"
+        ARR_STATUS=needed
+        return 1
+    fi
     if [ "$_st" != "free" ]; then
         say "ROLLBACK-NEEDED lock-held"
         ARR_STATUS=needed
@@ -1741,18 +1820,11 @@ arr_body() {
         ARR_STATUS=needed
         return 1
     fi
-    _hits=$("$PYTHON" -c 'import os,sys
-sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
-import sor_writer_gate as g
-h = g.rem_process_hits()
-sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))' 2>/dev/null || true)
-    if [ "$_hits" != "hits_count=0 pids=[]" ]; then
+    if ! hits_clear "/tmp/att0-arr-hits-${_wstamp}-$$.log"; then
         say ROLLBACK-NEEDED
         ARR_STATUS=needed
         return 1
     fi
-    say "hits_count=0 pids=[]"
-    say HITS-OK
     _stage="$MA/backups/mailroom-arr-stage-${_wstamp}.sqlite"
     _sh="/tmp/att0-restore-${_wstamp}.sh"
     write_restore_sh "$_sh" || {
@@ -1797,50 +1869,78 @@ safe_state() {
     _kind=$1
     _ok=1
     _st=$(search_loaded)
-    if [ "$_st" != "loaded" ]; then
+    if [ "$_st" = "unclear" ]; then
+        _ok=0
+    elif [ "$_st" != "loaded" ]; then
         _ok=0
     fi
-    if ! health_ok; then
+    if ! health_ok "/tmp/att0-safe-health-${STAMP}-$$.log"; then
         _ok=0
     fi
     _st=$(lock_probe_file "$MA/mailroom.write.lock" 0)
-    if [ "$_st" != "free" ]; then
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        _ok=0
+    elif [ "$_st" != "free" ]; then
         _ok=0
     elif ! flock_probe; then
         _ok=0
     fi
     _st=$(lock_probe_file "$MA/mailroom.daily.lock" 1)
-    if [ "$_st" != "free" ]; then
+    if [ "$_st" = "error" ]; then
+        say LSOF-ERROR
+        _ok=0
+    elif [ "$_st" != "free" ]; then
         _ok=0
     fi
     _st=$(pgrep_state "$WRITER_PAT")
-    if [ "$_st" != "absent" ]; then
+    if [ "$_st" = "error" ]; then
+        say PGREP-ERROR
+        _ok=0
+    elif [ "$_st" != "absent" ]; then
         _ok=0
     fi
     _st=$(pgrep_state "$CURL_PAT")
-    if [ "$_st" != "absent" ]; then
+    if [ "$_st" = "error" ]; then
+        say PGREP-ERROR
+        _ok=0
+    elif [ "$_st" != "absent" ]; then
+        _ok=0
+    fi
+    if ! no_action_required; then
+        _ok=0
+    fi
+    if ! hits_clear "/tmp/att0-safe-hits-${STAMP}-$$.log"; then
         _ok=0
     fi
     if [ "$_kind" = "held" ]; then
-        _out=$("$LAUNCHCTL" print "$(gui_target com.mailroom.daily)" 2>&1)
-        _rc=$?
-        if [ "$_rc" -ne 113 ] && ! text_has "$_out" "Could not find service"; then
+        daily_print_state com.mailroom.daily || _ok=0
+        if [ "$DAILY_PRINT_STATE" = "unclear" ]; then
+            say "DAILY-UNCLEAR rc=${DAILY_PRINT_RC}"
+            _ok=0
+        elif [ "$DAILY_PRINT_STATE" != "not-loaded" ]; then
             _ok=0
         fi
-        _dis=$("$LAUNCHCTL" print-disabled "gui/$(uid_now)" 2>&1 || true)
-        if ! printf '%s\n' "$_dis" | "$AWK" '{
-            gsub(/^[ \t]+|[ \t]+$/, "")
-            if ($0 == "\"com.mailroom.daily\" => disabled" || $0 == "\"com.mailroom.daily\" => true") found = 1
-        } END { exit found ? 0 : 1 }'; then
+        if ! daily_disabled; then
             _ok=0
         fi
     else
-        _out=$("$LAUNCHCTL" print "$(gui_target com.mailroom.daily)" 2>&1) || true
-        if ! text_has "$_out" "last exit code = 0"; then
+        daily_print_state com.mailroom.daily || _ok=0
+        if [ "$DAILY_PRINT_STATE" = "unclear" ]; then
+            say "DAILY-UNCLEAR rc=${DAILY_PRINT_RC}"
+            _ok=0
+        elif [ "$DAILY_PRINT_STATE" != "loaded" ] || ! text_has "$DAILY_PRINT_OUT" "last exit code = 0"; then
             _ok=0
         fi
-        _st=$(pgrep_state '[m]ailroom_daily')
-        if [ "$_st" != "absent" ]; then
+        _dis=$("$LAUNCHCTL" print-disabled "gui/$(uid_now)" 2>&1)
+        _prc=$?
+        if [ "$_prc" -ne 0 ]; then
+            say STOP-print-disabled
+            _ok=0
+        elif printf '%s\n' "$_dis" | "$AWK" '{
+            gsub(/^[ \t]+|[ \t]+$/, "")
+            if ($0 == "\"com.mailroom.daily\" => disabled" || $0 == "\"com.mailroom.daily\" => true") found = 1
+        } END { exit found ? 0 : 1 }'; then
             _ok=0
         fi
     fi
@@ -1908,7 +2008,7 @@ meta_fill_cmd() {
 }
 
 hits_clear() {
-    _log="$LOGS/att0-hits-entry-${STAMP}.log"
+    _log=${1:-"$LOGS/att0-hits-entry-${STAMP}.log"}
     if ! run_group 30 "$_log" "$PYTHON" -c 'import os,sys
 sys.path.insert(0, os.path.expanduser("~/MailArchive/scripts"))
 import sor_writer_gate as g
@@ -1927,7 +2027,7 @@ sys.stdout.write("hits_count=%d pids=%s\n" % (len(h), [p for p,_ in h]))'; then
 }
 
 watchdog_missing() {
-    _log="$LOGS/att0-watchdog-entry-${STAMP}.log"
+    _log=${1:-"$LOGS/att0-watchdog-entry-${STAMP}.log"}
     run_group 30 "$_log" "$PYTHON" "$S_DIR/search_resume_watchdog.py" status || true
     if [ "$RUN_HOW" != "normal" ] || [ "${RUN_GROUP_EMPTY:-0}" != "1" ] || [ "${RUN_FILL_CURL:-1}" != "0" ]; then
         say STOP-watchdog-status
@@ -2288,7 +2388,11 @@ do_rollback() {
     say "WINDOW_STAMP=${W_STAMP}"
     "$MKDIR" -p "$LOGS" "$MA/backups" "$MA/state" || { WANTED_RC=1; return; }
     if ! env_check; then WANTED_RC=1; return; fi
+    if ! no_writer; then WANTED_RC=1; return; fi
+    if ! daily_not_loaded; then WANTED_RC=1; return; fi
+    if ! daily_disabled; then WANTED_RC=1; return; fi
     if ! locks_ok; then WANTED_RC=1; return; fi
+    if ! no_action_required; then WANTED_RC=1; return; fi
     if ! arr_body "$W_STAMP"; then
         if [ "$ARR_STATUS" = "not-run" ]; then
             ARR_STATUS=failed
@@ -2382,6 +2486,8 @@ do_restore_daily() {
     if ! sha_five_ok; then WANTED_RC=1; return; fi
     if ! no_writer; then WANTED_RC=1; return; fi
     if ! locks_ok; then WANTED_RC=1; return; fi
+    if ! no_action_required; then WANTED_RC=1; return; fi
+    if ! hits_clear "/tmp/att0-daily-hits-${STAMP}-$$.log"; then WANTED_RC=1; return; fi
     if ! plist_checks; then WANTED_RC=1; return; fi
     if ! daily_not_loaded; then WANTED_RC=1; return; fi
     if ! stamps_ok; then WANTED_RC=1; return; fi
@@ -2400,7 +2506,13 @@ do_restore_daily() {
         return
     fi
     say "enable_rc=0"
-    _dis=$("$LAUNCHCTL" print-disabled "gui/${_uid}" 2>&1 || true)
+    _dis=$("$LAUNCHCTL" print-disabled "gui/${_uid}" 2>&1)
+    _prc=$?
+    if [ "$_prc" -ne 0 ]; then
+        say STOP-print-disabled
+        WANTED_RC=3
+        return
+    fi
     if printf '%s\n' "$_dis" | "$AWK" '{
         gsub(/^[ \t]+|[ \t]+$/, "")
         if ($0 == "\"com.mailroom.daily\" => disabled" || $0 == "\"com.mailroom.daily\" => true") found = 1
@@ -2410,7 +2522,7 @@ do_restore_daily() {
         return
     fi
     say ENABLED-OK
-    _st=$(pgrep_state '[m]ailroom_daily|[i]map_newmail|[i]map_tombstone|[i]map_fetch_bodies|[n]otify_bills')
+    _st=$(pgrep_state "$WRITER_PAT")
     _lk=$(lock_probe_file "$MA/mailroom.daily.lock" 1)
     if [ "$_st" != "absent" ] || [ "$_lk" != "free" ]; then
         say STOP-daily-running-no-bootstrap
@@ -2428,7 +2540,7 @@ do_restore_daily() {
     _seen=0
     _max=20
     while [ "$_seen" -lt "$_max" ]; do
-        _st=$(pgrep_state '[m]ailroom_daily|[i]map_newmail|[i]map_tombstone|[i]map_fetch_bodies|[n]otify_bills')
+        _st=$(pgrep_state "$WRITER_PAT")
         if [ "$_st" = "present" ]; then
             say STILL-RUNNING
             "$SLEEP" 120
@@ -2436,13 +2548,25 @@ do_restore_daily() {
             continue
         fi
         if [ "$_st" != "absent" ]; then
+            say PGREP-ERROR
             say STOP-pgrep-error
             WANTED_RC=3
             return
         fi
         say CHAIN-EXITED
-        _out=$("$LAUNCHCTL" print "gui/${_uid}/com.mailroom.daily" 2>&1 || true)
-        if ! text_has "$_out" "last exit code = 0"; then
+        daily_print_state com.mailroom.daily || {
+            say DAILY-UNCLEAR
+            say STOP-exit-nonzero
+            WANTED_RC=3
+            return
+        }
+        if [ "$DAILY_PRINT_STATE" = "unclear" ]; then
+            say "DAILY-UNCLEAR rc=${DAILY_PRINT_RC}"
+            say STOP-exit-nonzero
+            WANTED_RC=3
+            return
+        fi
+        if [ "$DAILY_PRINT_STATE" != "loaded" ] || ! text_has "$DAILY_PRINT_OUT" "last exit code = 0"; then
             say STOP-exit-nonzero
             WANTED_RC=3
             return

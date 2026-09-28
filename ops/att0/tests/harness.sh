@@ -50,6 +50,12 @@ _lsof_n=$(/usr/bin/grep -c '"\$LSOF" -t -- "\$_path"' "$SCRIPT" || true)
 if [ "$_lsof_n" != "1" ]; then
     fail "lsof invocation count ${_lsof_n}"
 fi
+if ! /usr/bin/grep -q '"\$LSOF" -t -- "\$_path" 2>&1' "$SCRIPT"; then
+    fail "lsof does not merge stderr"
+fi
+if /usr/bin/grep -n -E '\$PGREP[^\\n]*&&|pgrep [^\\n]*&&' "$SCRIPT"; then
+    fail "pgrep folded with &&"
+fi
 _wlock_n=$(/usr/bin/grep -c 'lock_probe_file "\$MA/mailroom.write.lock"' "$SCRIPT" || true)
 _dlock_n=$(/usr/bin/grep -c 'lock_probe_file "\$MA/mailroom.daily.lock"' "$SCRIPT" || true)
 if [ "$_wlock_n" -lt 3 ] || [ "$_dlock_n" -lt 3 ]; then
@@ -113,6 +119,35 @@ if [ "$_prc" -eq 0 ]; then
 fi
 if [ "$_prc" -ne 1 ]; then
     fail "writer pattern pgrep rc ${_prc}"
+fi
+_self=$(
+    set +e
+    /bin/bash -c '
+        set +C
+        # shellcheck disable=SC1090
+        . "$1"
+        PFX=ATT0T
+        N=0
+        TRANSCRIPT=
+        PGREP=/usr/bin/pgrep
+        no_writer
+        printf "RC=%s\n" "$?"
+    ' bash "$SCRIPT" "$_wpat" 2>&1
+)
+printf '%s\n' "$_self" | /usr/bin/grep -q 'NO-WRITER-OK' || {
+    printf '%s\n' "$_self" >&2
+    fail "writer check self-match"
+}
+printf '%s\n' "$_self" | /usr/bin/grep -q '^RC=0$' || fail "writer check rc"
+# pgrep does not report itself, so the bad pattern has to sit in
+# another process's argv. [r]un_mailroom_daily contains mailroom_daily.
+_bad=$(
+    /bin/bash -c '/usr/bin/pgrep -fl "$1" >/tmp/att0-pgrep-bad.out; printf "%s\n" "$?"' \
+        bash '[m]ailroom_daily|[r]un_mailroom_daily'
+)
+if [ "$_bad" != "0" ]; then
+    cat /tmp/att0-pgrep-bad.out >&2
+    fail "bad writer pattern did not self-match"
 fi
 printf '%s\n' "STATIC-OK"
 
@@ -227,7 +262,19 @@ if [ "$_rc" = "0" ]; then
     fail "lsof error reported free"
 fi
 /usr/bin/grep -q 'STOP-lsof-write' /tmp/att0-lock-lsof-error.out || fail "lsof error stop"
+/usr/bin/grep -q 'LSOF-ERROR' /tmp/att0-lock-lsof-error.out || fail "lsof error token"
 /usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-lsof-error.out && fail "lsof error printed free"
+
+ATT0_LSOF_ERROR=0
+ATT0_LSOF_GARBAGE=1
+export ATT0_LSOF_ERROR ATT0_LSOF_GARBAGE
+_rc=$(run_locks lsof-garbage)
+if [ "$_rc" = "0" ]; then
+    fail "lsof garbage reported free"
+fi
+/usr/bin/grep -q 'LSOF-ERROR' /tmp/att0-lock-lsof-garbage.out || fail "lsof garbage token"
+/usr/bin/grep -q 'LOCK-WRITE-FREE' /tmp/att0-lock-lsof-garbage.out && fail "lsof garbage printed free"
+unset ATT0_LSOF_GARBAGE
 
 ATT0_LSOF_ERROR=0
 export ATT0_LSOF_ERROR
@@ -266,6 +313,78 @@ fi
 /usr/bin/grep -q 'STOP-flock-held' /tmp/att0-lock-flock-held.out || fail "flock held stop"
 unset ATT0_WRITE_HELD ATT0_DAILY_HELD ATT0_LSOF_ERROR ATT0_LSOF_LOG
 printf '%s\n' "LOCK-SPLIT-OK"
+
+cat > /tmp/att0-pgrep-rc2 <<'EOF'
+#!/bin/bash
+exit 2
+EOF
+chmod +x /tmp/att0-pgrep-rc2
+_pout=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    PGREP=/tmp/att0-pgrep-rc2
+    no_writer
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_pout" | /usr/bin/grep -q 'PGREP-ERROR' || {
+    printf '%s\n' "$_pout" >&2
+    fail "pgrep rc 2"
+}
+printf '%s\n' "$_pout" | /usr/bin/grep -q 'NO-WRITER-OK' && fail "pgrep rc 2 looked absent"
+printf '%s\n' "$_pout" | /usr/bin/grep -q '^RC=0$' && fail "pgrep rc 2 returned success"
+
+cat > /tmp/att0-lc-unclear <<'EOF'
+#!/bin/bash
+echo "launchctl failed" >&2
+exit 7
+EOF
+chmod +x /tmp/att0-lc-unclear
+_lout=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    LAUNCHCTL=/tmp/att0-lc-unclear
+    IDBIN=/usr/bin/id
+    AWK=/usr/bin/awk
+    daily_not_loaded
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_lout" | /usr/bin/grep -q 'DAILY-UNCLEAR' || {
+    printf '%s\n' "$_lout" >&2
+    fail "daily print unclear"
+}
+printf '%s\n' "$_lout" | /usr/bin/grep -q 'DAILY-NOT-LOADED' && fail "unclear looked not-loaded"
+printf '%s\n' "$_lout" | /usr/bin/grep -q '^RC=0$' && fail "unclear returned success"
+
+_dout=$(
+    set +e
+    set +C
+    # shellcheck disable=SC1090
+    . "$SCRIPT"
+    PFX=ATT0T
+    N=0
+    TRANSCRIPT=
+    LAUNCHCTL=/tmp/att0-lc-unclear
+    IDBIN=/usr/bin/id
+    AWK=/usr/bin/awk
+    daily_disabled
+    printf 'RC=%s\n' "$?"
+)
+printf '%s\n' "$_dout" | /usr/bin/grep -q 'STOP-print-disabled' || {
+    printf '%s\n' "$_dout" >&2
+    fail "print-disabled rc"
+}
+printf '%s\n' "$_dout" | /usr/bin/grep -q 'DAILY-DISABLED' && fail "print-disabled rc looked disabled"
+printf '%s\n' "PROC-RC-OK"
 
 # W23. The pinned curl argv has no imap text. The URL is on stdin.
 cat > /tmp/att0-sleeper.c <<'EOF'
@@ -560,6 +679,10 @@ test ! -e "${ATT0_STATE}/security.log" || fail "happy called security"
 /usr/bin/grep -q 'FLOCK-WRITE-FREE' /tmp/att0-happy || fail "happy flock"
 /usr/bin/grep -q 'WATCHDOG-MISSING-OK' /tmp/att0-happy || fail "happy watchdog"
 /usr/bin/grep -q 'STEP0-LOCKS-OK' /tmp/att0-happy || fail "happy step0"
+/usr/bin/grep -q 'NO-WRITER-OK' /tmp/att0-happy || fail "happy no writer"
+/usr/bin/grep -q 'PGREP-ERROR' /tmp/att0-happy && fail "happy pgrep error"
+/usr/bin/grep -q 'LSOF-ERROR' /tmp/att0-happy && fail "happy lsof error"
+/usr/bin/grep -q 'DAILY-UNCLEAR' /tmp/att0-happy && fail "happy daily unclear"
 /usr/bin/grep -q 'FOLLOWUP-CLEAR with_writer_lock meta_fill curl security perl time script locks' /tmp/att0-happy || fail "happy followup"
 /usr/bin/grep -q 'fill_curl=0' /tmp/att0-happy || fail "happy fill curl"
 if ! /usr/bin/awk '
@@ -686,6 +809,19 @@ expect_rc "$rc" 1 /tmp/att0-restore-no
 /usr/bin/grep -q 'enable' "${ATT0_STATE}/launchctl.log" && fail "restore enabled"
 /usr/bin/grep -q 'SAFE-STATE' /tmp/att0-restore-no || fail "restore refuse safe"
 printf '%s\n' "RESTORE-REFUSE-OK"
+
+P_STAMP=20260928-010017
+ATT0_FAKE_STAMP=20260928-120017
+export ATT0_FAKE_STAMP ATT0_PDIS_FAIL_AFTER=1
+setup_tree pdis
+printf '%s\n' "$P_STAMP" > "/tmp/att0w-done-${ATT0_FAKE_STAMP}.OK"
+rc=$(run_mode /tmp/att0-pdis restore-daily "$ATT0_FAKE_STAMP")
+expect_rc "$rc" 3 /tmp/att0-pdis
+/usr/bin/grep -q 'STOP-print-disabled' /tmp/att0-pdis || fail "pdis stop"
+/usr/bin/grep -q 'ENABLED-OK' /tmp/att0-pdis && fail "pdis looked enabled"
+/usr/bin/grep -q 'SAFE-STATE-FAIL' /tmp/att0-pdis || fail "pdis safe"
+unset ATT0_PDIS_FAIL_AFTER
+printf '%s\n' "PRINT-DISABLED-RC-OK"
 
 printf '%s\n' "$P_STAMP" > /tmp/att0w-done-20260928-120007.OK
 # The restore mode's window stamp is the argument, not P_STAMP.

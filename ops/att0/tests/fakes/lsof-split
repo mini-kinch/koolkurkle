@@ -9,6 +9,10 @@ if [ "${ATT0_LSOF_ERROR:-0}" = "1" ]; then
     printf '%s\n' "lsof: error" >&2
     exit 2
 fi
+if [ "${ATT0_LSOF_GARBAGE:-0}" = "1" ]; then
+    printf '%s\n' "not-a-pid"
+    exit 0
+fi
 files=""
 nfiles=0
 endopt=0

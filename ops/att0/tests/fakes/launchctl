@@ -40,6 +40,16 @@ case "$cmd" in
         exit 113
         ;;
     print-disabled)
+        _pn=0
+        if [ -f "${ATT0_STATE}/pdis_n" ]; then
+            _pn=$(cat "${ATT0_STATE}/pdis_n")
+        fi
+        _pn=$((_pn + 1))
+        printf '%s\n' "$_pn" > "${ATT0_STATE}/pdis_n"
+        if [ -n "${ATT0_PDIS_FAIL_AFTER:-}" ] && [ "$_pn" -gt "$ATT0_PDIS_FAIL_AFTER" ]; then
+            echo "print-disabled failed" >&2
+            exit 9
+        fi
         echo 'disabled services = {'
         if [ ! -f "${ATT0_STATE}/daily_enabled" ]; then
             echo '"com.mailroom.daily" => disabled'
