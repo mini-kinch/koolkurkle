@@ -77,7 +77,7 @@ THINKING_OFF_FIELDS = {
 }
 PROBE_MAX_TOKENS = 8
 PROBE_USER = "Reply with the single word pong."
-DEFAULT_GENERATE_TIMEOUT = 30
+DEFAULT_GENERATE_TIMEOUT = 180
 DATA_BEGIN = "BEGIN_UNTRUSTED_MAIL_DATA"
 DATA_END = "END_UNTRUSTED_MAIL_DATA"
 
@@ -487,6 +487,7 @@ def generate_answer(
         "messages": build_generate_messages(query, citations, data_block),
         "temperature": 0,
         "max_tokens": int(max_tokens),
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     payload.update(THINKING_OFF_FIELDS)
     try:
