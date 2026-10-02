@@ -1,0 +1,20 @@
+#!/bin/bash
+base=1700000000
+if [ "${1:-}" = "+%Y%m%d-%H%M%S" ]; then
+    printf '%s\n' "${ATT0_FAKE_STAMP:-20260928-120001}"
+    exit 0
+fi
+if [ "${1:-}" = "-j" ]; then
+    printf '%s\n' "$((base - 60))"
+    exit 0
+fi
+if [ "${1:-}" = "+%s" ]; then
+    if [ "${ATT0_FAKE_DATE_BREACH:-}" = "1" ] && [ -f "${HOME}/MailArchive/state/search_resume_after.epoch" ]; then
+        printf '%s\n' "$((base + 10000))"
+        exit 0
+    fi
+    printf '%s\n' "$base"
+    exit 0
+fi
+echo "date fake: $*" >&2
+exit 1

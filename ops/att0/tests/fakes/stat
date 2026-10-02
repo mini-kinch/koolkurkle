@@ -1,0 +1,56 @@
+#!/bin/bash
+fmt=
+file=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f)
+            fmt=$2
+            shift 2
+            ;;
+        -t)
+            shift 2
+            ;;
+        *)
+            file=$1
+            shift
+            ;;
+    esac
+done
+base=${file##*/}
+case "$fmt" in
+    '%Sm')
+        case "$base" in
+            last_daily_rag_ok)
+                if [ -f "${ATT0_STATE}/stamp_moved" ]; then
+                    echo "2026-09-28 12:00:00"
+                else
+                    echo "2026-09-26 16:51:58"
+                fi
+                ;;
+            last_imap_ok)
+                echo "2026-09-26 08:50:16"
+                ;;
+            *)
+                echo "1970-01-01 00:00:00"
+                ;;
+        esac
+        ;;
+    '%HT %l')
+        echo "Regular File 1"
+        ;;
+    '%z %m %N')
+        size=$(/usr/bin/wc -c < "$file" | /usr/bin/tr -d ' ')
+        echo "$size 1000 $file"
+        ;;
+    '%m')
+        if [ -f "${ATT0_STATE}/stamp_moved" ]; then
+            echo 1800000000
+        else
+            echo 1000
+        fi
+        ;;
+    *)
+        echo "stat fake: $fmt" >&2
+        exit 1
+        ;;
+esac
